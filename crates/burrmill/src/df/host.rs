@@ -119,19 +119,27 @@ impl Engine {
     ) -> Result<()> {
         self.refuse_replacing_a_table(name)?;
         let store = self.store()?;
-        let mut files = Vec::with_capacity(keys.len());
-        for (key, len) in keys {
-            let path = PathBuf::from(&key);
-            if !self.bound_segments.contains_key(&(path.clone(), len)) {
-                let schema = super::catalog::footer_schema(&store, &key, len)
+        // Over HTTP each footer is a round trip, so they are asked for together.
+        let unbound = keys
+            .iter()
+            .filter(|(k, l)| !self.bound_segments.contains_key(&(PathBuf::from(k), *l)));
+        let read = futures::future::try_join_all(unbound.map(|(key, len)| {
+            let store = &store;
+            async move {
+                super::catalog::footer_schema(store, key, *len)
                     .await
+                    .map(|s| ((PathBuf::from(key), *len), s))
                     .map_err(|e| {
                         crate::BurrmillError::Substrate(format!("segment {key} will not bind: {e}"))
-                    })?;
-                self.bound_segments.insert((path.clone(), len), schema);
+                    })
             }
-            files.push((path, len));
-        }
+        }))
+        .await?;
+        self.bound_segments.extend(read);
+        let files = keys
+            .into_iter()
+            .map(|(k, l)| (PathBuf::from(k), l))
+            .collect();
         self.define_facts(name, declared, files, hot, window, true)
     }
 
