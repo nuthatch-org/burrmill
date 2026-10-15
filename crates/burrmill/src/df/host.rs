@@ -104,6 +104,46 @@ impl Engine {
                 }
             }
         }
+        self.define_facts(name, declared, files, hot, window, false)
+    }
+
+    /// As [`Engine::register_facts`], over segments in the engine's store
+    /// ([`Engine::attach_store`]): `keys` are its keys, each footer read by range.
+    pub async fn register_store_facts(
+        &mut self,
+        name: &str,
+        declared: &[(String, String)],
+        keys: Vec<(String, u64)>,
+        hot: &[Value],
+        window: (Option<u64>, Option<u64>),
+    ) -> Result<()> {
+        self.refuse_replacing_a_table(name)?;
+        let store = self.store()?;
+        let mut files = Vec::with_capacity(keys.len());
+        for (key, len) in keys {
+            let path = PathBuf::from(&key);
+            if !self.bound_segments.contains_key(&(path.clone(), len)) {
+                let schema = super::catalog::footer_schema(&store, &key, len)
+                    .await
+                    .map_err(|e| {
+                        crate::BurrmillError::Substrate(format!("segment {key} will not bind: {e}"))
+                    })?;
+                self.bound_segments.insert((path.clone(), len), schema);
+            }
+            files.push((path, len));
+        }
+        self.define_facts(name, declared, files, hot, window, true)
+    }
+
+    fn define_facts(
+        &mut self,
+        name: &str,
+        declared: &[(String, String)],
+        files: Vec<(PathBuf, u64)>,
+        hot: &[Value],
+        window: (Option<u64>, Option<u64>),
+        keyed: bool,
+    ) -> Result<()> {
         let raw = format!("{name}__raw");
         let raw_schema: SchemaRef = if files.is_empty() {
             Arc::new(Schema::new(
@@ -132,6 +172,7 @@ impl Engine {
                     schema: raw_schema.clone(),
                     files,
                     wide: Vec::new(),
+                    keyed,
                 },
                 self.threads,
                 self.cancel.clone(),

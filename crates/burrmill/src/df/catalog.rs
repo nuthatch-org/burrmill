@@ -47,7 +47,12 @@ pub struct NestTable {
     pub schema: SchemaRef,
     pub files: Vec<(PathBuf, u64)>,
     pub wide: Vec<String>,
+    /// `files` are keys in the store at [`NEST_STORE`], not paths on this machine.
+    pub keyed: bool,
 }
+
+/// Where an engine opened from an object store finds it.
+pub const NEST_STORE: &str = "nest://segments";
 
 /// Discover `<table>-<hash>.parquet` under `segments/`, last hyphen splitting table from hash.
 pub fn discover_tables(segments: &Path) -> crate::Result<Vec<NestTable>> {
@@ -81,6 +86,7 @@ pub fn discover_tables(segments: &Path) -> crate::Result<Vec<NestTable>> {
             schema,
             files,
             wide: Vec::new(),
+            keyed: false,
         });
     }
     tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -89,8 +95,12 @@ pub fn discover_tables(segments: &Path) -> crate::Result<Vec<NestTable>> {
 
 /// Apply `schema.json` declarations: unsealed tables become empty, `word16`/`word32` get `_dec`.
 pub fn apply_schema_json(tables: &mut Vec<NestTable>, schema_json: &Path) -> crate::Result<()> {
-    let raw = std::fs::read_to_string(schema_json)?;
-    let doc: serde_json::Value = serde_json::from_str(&raw)
+    apply_schema_text(tables, &std::fs::read_to_string(schema_json)?)
+}
+
+/// [`apply_schema_json`] over a document already read, from a store rather than a directory.
+pub fn apply_schema_text(tables: &mut Vec<NestTable>, raw: &str) -> crate::Result<()> {
+    let doc: serde_json::Value = serde_json::from_str(raw)
         .map_err(|e| crate::BurrmillError::Substrate(format!("schema.json: {e}")))?;
     let Some(arr) = doc["tables"].as_array() else {
         return Ok(());
@@ -136,6 +146,7 @@ pub fn apply_schema_json(tables: &mut Vec<NestTable>, schema_json: &Path) -> cra
             schema: Arc::new(Schema::new(fields)),
             files: Vec::new(),
             wide,
+            keyed: false,
         });
     }
     tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -182,6 +193,7 @@ pub struct SegmentTable {
     schema: SchemaRef,
     files: Vec<PartitionedFile>,
     groups: usize,
+    url: ObjectStoreUrl,
     /// The engine's token; every scan of this table stops at it.
     cancel: crate::CancelToken,
 }
@@ -196,8 +208,7 @@ impl SegmentTable {
             .files
             .iter()
             .map(|(p, size)| {
-                let loc = object_store::path::Path::from_filesystem_path(p)
-                    .map_err(|e| crate::BurrmillError::Substrate(e.to_string()))?;
+                let loc = store_location(p, table.keyed)?;
                 Ok(PartitionedFile::new(loc.to_string(), *size))
             })
             .collect::<crate::Result<Vec<_>>>()?;
@@ -205,6 +216,12 @@ impl SegmentTable {
             schema: table.schema.clone(),
             files,
             groups: groups.max(1),
+            url: if table.keyed {
+                ObjectStoreUrl::parse(NEST_STORE)
+                    .map_err(|e| crate::BurrmillError::Substrate(e.to_string()))?
+            } else {
+                ObjectStoreUrl::local_filesystem()
+            },
             cancel,
         })
     }
@@ -232,7 +249,7 @@ impl TableProvider for SegmentTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        let url = ObjectStoreUrl::local_filesystem();
+        let url = self.url.clone();
         let mut opts = datafusion_common::config::TableParquetOptions {
             global: state.config_options().execution.parquet.clone(),
             ..Default::default()
@@ -265,4 +282,85 @@ impl TableProvider for SegmentTable {
             self.cancel.clone(),
         ))
     }
+}
+
+/// [`discover_tables`] over an object store: `<root>/segments/<table>-<hash>.parquet`, each table's
+/// schema from its first segment's footer, read by range and not whole.
+pub async fn discover_store_tables(
+    store: &Arc<dyn object_store::ObjectStore>,
+    root: &object_store::path::Path,
+) -> crate::Result<Vec<NestTable>> {
+    use futures::TryStreamExt;
+    let sub = |e: object_store::Error| crate::BurrmillError::Substrate(e.to_string());
+    let listed: Vec<_> = store
+        .list(Some(&root.clone().join("segments")))
+        .try_collect()
+        .await
+        .map_err(sub)?;
+    let mut by_table: HashMap<String, Vec<(PathBuf, u64)>> = HashMap::new();
+    for m in listed {
+        let Some(stem) = m
+            .location
+            .filename()
+            .and_then(|f| f.strip_suffix(".parquet"))
+        else {
+            continue;
+        };
+        let Some((table, _)) = stem.rsplit_once('-') else {
+            continue;
+        };
+        by_table
+            .entry(table.to_string())
+            .or_default()
+            .push((PathBuf::from(m.location.as_ref()), m.size));
+    }
+    let mut tables = Vec::new();
+    for (name, mut files) in by_table {
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        let (first, size) = &files[0];
+        let schema = footer_schema(store, &first.to_string_lossy(), *size).await?;
+        tables.push(NestTable {
+            name,
+            schema,
+            files,
+            wide: Vec::new(),
+            keyed: true,
+        });
+    }
+    tables.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(tables)
+}
+
+/// The columns of the segment at `key`, from its footer alone, as a scan of it reads them.
+pub async fn footer_schema(
+    store: &Arc<dyn object_store::ObjectStore>,
+    key: &str,
+    size: u64,
+) -> crate::Result<SchemaRef> {
+    let sub =
+        |e: datafusion_common::DataFusionError| crate::BurrmillError::Substrate(e.to_string());
+    let file = PartitionedFile::new(store_location(Path::new(key), true)?.to_string(), size);
+    let mut reader: Box<dyn AsyncFileReader> =
+        DefaultParquetFileReaderFactory::new(Arc::clone(store))
+            .create_reader(0, file, None, &ExecutionPlanMetricsSet::new())
+            .map_err(sub)?;
+    let opts = ArrowReaderOptions::new();
+    let footer = reader.get_metadata(Some(&opts)).await?;
+    let meta = ArrowReaderMetadata::try_new(footer, opts)?;
+    Ok(Arc::new(view_schema(meta.schema())))
+}
+
+/// A segment's location: a key in the engine's store, or a file on this machine.
+fn store_location(p: &Path, keyed: bool) -> crate::Result<object_store::path::Path> {
+    let sub = |e: object_store::path::Error| crate::BurrmillError::Substrate(e.to_string());
+    if keyed {
+        return object_store::path::Path::parse(p.to_string_lossy()).map_err(sub);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    return object_store::path::Path::from_filesystem_path(p).map_err(sub);
+    #[cfg(target_arch = "wasm32")]
+    Err(crate::BurrmillError::Substrate(format!(
+        "{} is a local path, and a tab has no files",
+        p.display()
+    )))
 }

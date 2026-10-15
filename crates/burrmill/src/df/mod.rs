@@ -103,13 +103,15 @@ impl SharedPool {
 
 /// Concrete engine: SQL in, RecordBatches out. Generics stay inside this crate.
 pub struct Engine {
-    /// Taken only by `Drop`.
+    /// Taken only by `Drop`. A tab has no runtime; its event loop drives `sql_async`.
+    #[cfg(not(target_arch = "wasm32"))]
     rt: Option<tokio::runtime::Runtime>,
     session: MiniSession,
     /// Partitions for a table the host registers later (`host.rs`); the ones opened here use it too.
     threads: usize,
     /// First-come-first-served admission, as on the owned path (roadmap 5.3). Without it, 32
     /// clients sharing one runtime starved one of them outright (roadmap 6.8).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     gate: crate::gate::Gate,
     /// Set from another thread to stop the statement in flight at its next batch; armed again when
     /// the next statement starts, as DuckDB's interrupt handle behaves.
@@ -150,6 +152,55 @@ impl Engine {
         Self::from_tables(tables, Limits::default().max_threads, None, None)
     }
 
+    /// Open a nest held in an object store, `<root>/segments/` plus an optional `<root>/schema.json`:
+    /// a bucket, a mirror over HTTP, or bytes a tab already holds. Footers are read by range.
+    pub async fn open_store(
+        store: Arc<dyn object_store::ObjectStore>,
+        root: &str,
+        threads: usize,
+    ) -> Result<Self> {
+        let sub = |e: object_store::Error| BurrmillError::Substrate(e.to_string());
+        let root = object_store::path::Path::parse(root)
+            .map_err(|e| BurrmillError::Substrate(e.to_string()))?;
+        let mut tables = catalog::discover_store_tables(&store, &root).await?;
+        match object_store::ObjectStoreExt::get(&store, &root.clone().join("schema.json")).await {
+            Ok(got) => {
+                let raw = got.bytes().await.map_err(sub)?;
+                let raw = std::str::from_utf8(&raw)
+                    .map_err(|e| BurrmillError::Substrate(format!("schema.json: {e}")))?;
+                catalog::apply_schema_text(&mut tables, raw)?;
+            }
+            Err(object_store::Error::NotFound { .. }) => {}
+            Err(e) => return Err(sub(e)),
+        }
+        if tables.is_empty() {
+            return Err(BurrmillError::NoSegments(format!("no tables under {root}")));
+        }
+        let engine = Self::from_tables(tables, threads, None, None)?;
+        engine.attach_store(store)?;
+        Ok(engine)
+    }
+
+    /// The store that [`Engine::register_store_facts`] reads segments from, and any table opened
+    /// by [`Engine::open_store`]. Replaces an earlier one.
+    pub fn attach_store(&self, store: Arc<dyn object_store::ObjectStore>) -> Result<()> {
+        let url = datafusion_execution::object_store::ObjectStoreUrl::parse(catalog::NEST_STORE)
+            .map_err(df_err)?;
+        self.session
+            .runtime_env()
+            .register_object_store(url.as_ref(), store);
+        Ok(())
+    }
+
+    fn store(&self) -> Result<Arc<dyn object_store::ObjectStore>> {
+        let url = datafusion_execution::object_store::ObjectStoreUrl::parse(catalog::NEST_STORE)
+            .map_err(df_err)?;
+        self.session
+            .runtime_env()
+            .object_store(&url)
+            .map_err(|_| BurrmillError::Substrate("no store attached".into()))
+    }
+
     fn from_tables(
         tables: Vec<NestTable>,
         threads: usize,
@@ -157,16 +208,26 @@ impl Engine {
         shared: Option<&SharedPool>,
     ) -> Result<Self> {
         let threads = budget.as_ref().map_or(threads, |b| b.threads.max(1));
-        let mut rt = tokio::runtime::Builder::new_multi_thread();
-        if budget.is_some() {
-            rt.worker_threads(threads);
-        }
-        let rt = rt
-            .enable_all()
-            .build()
-            .map_err(|e| BurrmillError::Substrate(e.to_string()))?;
+        // One partition, so no operator repartitions and nothing spawns a task.
+        #[cfg(target_arch = "wasm32")]
+        let threads = {
+            let _ = threads;
+            1
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let rt = {
+            let mut rt = tokio::runtime::Builder::new_multi_thread();
+            if budget.is_some() {
+                rt.worker_threads(threads);
+            }
+            rt.enable_all()
+                .build()
+                .map_err(|e| BurrmillError::Substrate(e.to_string()))?
+        };
         let mut fold_tables = std::collections::HashMap::new();
-        for t in tables.iter().filter(|t| !t.files.is_empty()) {
+        // The owned fold opens segment files itself, so a table in a store has none; the
+        // substitution then declines and DataFusion's aggregate runs instead.
+        for t in tables.iter().filter(|t| !t.files.is_empty() && !t.keyed) {
             let name = if t.wide.is_empty() {
                 t.name.clone()
             } else {
@@ -180,7 +241,11 @@ impl Engine {
         }
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads.max(1))
-            .thread_name(|i| format!("burrmill-fold-{i}"))
+            .thread_name(|i| format!("burrmill-fold-{i}"));
+        // A tab cannot spawn a thread: the one it has is the pool.
+        #[cfg(target_arch = "wasm32")]
+        let pool = pool.num_threads(1).use_current_thread();
+        let pool = pool
             .build()
             .map_err(|e| BurrmillError::Substrate(e.to_string()))?;
         let fold = fold::FoldTables {
@@ -223,6 +288,7 @@ impl Engine {
             .map_err(df_err)?;
         let gate = crate::gate::Gate::new(crate::default_width(threads.max(1)));
         Ok(Self {
+            #[cfg(not(target_arch = "wasm32"))]
             rt: Some(rt),
             session,
             threads: threads.max(1),
@@ -289,6 +355,7 @@ impl Engine {
     }
 
     /// Run a query. DDL, DML, COPY, and table functions are refused before they plan.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn sql(&self, sql: &str) -> Result<Vec<RecordBatch>> {
         let mut out = Vec::new();
         self.sql_for_each(sql, |b| {
@@ -313,6 +380,7 @@ impl Engine {
 
     /// Tasks alive on the engine's runtime. A cancelled statement returns before its partition tasks
     /// stop, each at its next yield, and its memory goes back as they do: zero here is when it has.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn tasks_alive(&self) -> usize {
         self.runtime().metrics().num_alive_tasks()
     }
@@ -337,6 +405,7 @@ impl Engine {
     ///
     /// `sql` collects; a million-row answer is then a million rows live at once, which is the
     /// caller's memory and not the engine's. An encoder writing to a socket wants this instead.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn sql_for_each(
         &self,
         sql: &str,
@@ -370,6 +439,25 @@ impl Engine {
         })
     }
 
+    /// Run a query on the caller's event loop, for a host with one thread and no runtime: a
+    /// browser tab. The plan runs in one partition, so nothing in it spawns a task.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn sql_async(&self, sql: &str) -> Result<Vec<RecordBatch>> {
+        refuse_hidden_names(sql)?;
+        let logical = plan_query(&self.session, sql)?;
+        refuse_non_query(sql)?;
+        if self.cancel.is_cancelled() {
+            return Err(BurrmillError::Cancelled);
+        }
+        let mut out = Vec::new();
+        self.stream(logical, &mut |b| {
+            out.push(b);
+            Ok(())
+        })
+        .await?;
+        Ok(out)
+    }
+
     async fn stream(
         &self,
         logical: datafusion_expr::LogicalPlan,
@@ -386,11 +474,15 @@ impl Engine {
                 .map_err(df_err)?;
         // A plan with no nest scan (`range`, a recursive CTE) never meets `CancelExec`, so the
         // token is also raced here; dropping the stream aborts the partition tasks under it.
+        // A tab has no timer to poll it on; there the token is seen at each batch instead.
+        #[cfg(not(target_arch = "wasm32"))]
         let mut stopped = std::pin::pin!(async {
             while !self.cancel.is_cancelled() {
                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             }
         });
+        #[cfg(target_arch = "wasm32")]
+        let mut stopped = std::pin::pin!(futures::future::pending::<()>());
         loop {
             let b = match futures::future::select(stream.next(), stopped.as_mut()).await {
                 futures::future::Either::Left((Some(b), _)) => b,
@@ -411,11 +503,13 @@ impl Engine {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn runtime(&self) -> &tokio::runtime::Runtime {
         self.rt.as_ref().expect("taken only by drop")
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Engine {
     fn drop(&mut self) {
         // From a thread a host's runtime drives, tokio refuses to wait for our workers to stop.
@@ -431,6 +525,7 @@ impl Engine {
     /// Parquet scans in the statement's physical plan, for a host's admission bound (nuthatch
     /// RFC-0048). An operator not listed refuses, and so does any that can run its input more than
     /// once: a nested-loop join, and a recursive query, which has no static scan count at all.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn parquet_scans(&self, sql: &str) -> Result<u64> {
         refuse_hidden_names(sql)?;
         let logical = plan_query(&self.session, sql)?;
@@ -453,6 +548,7 @@ impl Engine {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn scans(p: &Arc<dyn datafusion_physical_plan::ExecutionPlan>) -> Result<u64> {
     use datafusion_datasource::file_scan_config::FileScanConfig;
     use datafusion_datasource::source::DataSourceExec;
