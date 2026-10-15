@@ -445,19 +445,30 @@ impl Engine {
     /// browser tab. The plan runs in one partition, so nothing in it spawns a task.
     #[cfg(target_arch = "wasm32")]
     pub async fn sql_async(&self, sql: &str) -> Result<Vec<RecordBatch>> {
+        let mut out = Vec::new();
+        self.sql_async_for_each(sql, |b| {
+            out.push(b);
+            Ok(())
+        })
+        .await?;
+        Ok(out)
+    }
+
+    /// As [`Engine::sql_for_each`], on the caller's event loop: each batch to `f` as it is made, so
+    /// a tab holding a million-row answer holds it once, in whatever `f` makes of it.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn sql_async_for_each(
+        &self,
+        sql: &str,
+        mut f: impl FnMut(RecordBatch) -> Result<()>,
+    ) -> Result<()> {
         refuse_hidden_names(sql)?;
         let logical = plan_query(&self.session, sql)?;
         refuse_non_query(sql)?;
         if self.cancel.is_cancelled() {
             return Err(BurrmillError::Cancelled);
         }
-        let mut out = Vec::new();
-        self.stream(logical, &mut |b| {
-            out.push(b);
-            Ok(())
-        })
-        .await?;
-        Ok(out)
+        self.stream(logical, &mut f).await
     }
 
     async fn stream(
