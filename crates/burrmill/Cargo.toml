@@ -100,6 +100,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"], optiona
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { version = "1", features = ["js"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
+# The clock is JavaScript's `Date` in a tab; without it `Utc::now` panics there.
+chrono = { version = "0.4", default-features = false, features = ["clock", "wasmbind"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 # Test-only. The seal-layout canary writes throwaway segment directories, and a canary that leaves

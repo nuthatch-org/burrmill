@@ -4,7 +4,6 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -363,12 +362,17 @@ impl MiniSession {
                         as Arc<dyn PhysicalOptimizerRule + Send + Sync>,
                     Arc::new(super::sharing::PublishShared),
                 ])
+                // A tab cannot spawn the task each partition would be coalesced on.
+                .chain(cfg!(target_arch = "wasm32").then(|| {
+                    Arc::new(super::sequential::Sequential)
+                        as Arc<dyn PhysicalOptimizerRule + Send + Sync>
+                }))
                 .collect(),
             execution_props: ExecutionProps::new(),
             table_options: TableOptions::new(),
             extension_types: Arc::new(MemoryExtensionTypeRegistry::default()),
             alias_generator: Arc::new(AliasGenerator::new()),
-            query_start: DateTime::<Utc>::from(SystemTime::now()),
+            query_start: Utc::now(),
             query_planner: Arc::new(MiniQueryPlanner),
         })
     }

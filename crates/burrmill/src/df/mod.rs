@@ -53,6 +53,7 @@ mod printf;
 mod rangebounds;
 mod rangejoin;
 mod rule;
+mod sequential;
 mod session;
 mod sharing;
 mod smallinputs;
@@ -239,18 +240,19 @@ impl Engine {
                 crate::segment::SealedSegments::from_files(name, files),
             );
         }
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads.max(1))
-            .thread_name(|i| format!("burrmill-fold-{i}"));
-        // A tab cannot spawn a thread: the one it has is the pool.
+        #[cfg(not(target_arch = "wasm32"))]
+        let pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads.max(1))
+                .thread_name(|i| format!("burrmill-fold-{i}"))
+                .build()
+                .map_err(|e| BurrmillError::Substrate(e.to_string()))?,
+        );
         #[cfg(target_arch = "wasm32")]
-        let pool = pool.num_threads(1).use_current_thread();
-        let pool = pool
-            .build()
-            .map_err(|e| BurrmillError::Substrate(e.to_string()))?;
+        let pool = tab_pool()?;
         let fold = fold::FoldTables {
             tables: Arc::new(fold_tables),
-            pool: Arc::new(pool),
+            pool,
         };
         let cancel = crate::CancelToken::new();
         let mut session = MiniSession::new(threads, fold, budget.as_ref(), shared, cancel.clone())
@@ -469,6 +471,14 @@ impl Engine {
             .create_physical_plan(&logical)
             .await
             .map_err(plan_err)?;
+        // `execute_stream` would coalesce a plan of several partitions on a task each.
+        #[cfg(target_arch = "wasm32")]
+        let physical: Arc<dyn datafusion_physical_plan::ExecutionPlan> =
+            if physical.properties().partitioning.partition_count() > 1 {
+                Arc::new(sequential::SequentialCoalesceExec::new(physical))
+            } else {
+                physical
+            };
         let mut stream =
             datafusion_physical_plan::execute_stream(physical, self.session.task_ctx())
                 .map_err(df_err)?;
@@ -603,8 +613,16 @@ fn scans(p: &Arc<dyn datafusion_physical_plan::ExecutionPlan>) -> Result<u64> {
 
 /// The planner recurses. The caller's stack is whatever the host gave its worker, and a stack
 /// overflow aborts the process. What the depth bound let through is planned on a stack of a known size.
+#[cfg(not(target_arch = "wasm32"))]
 const PLAN_STACK_BYTES: usize = 8 * 1024 * 1024;
 
+/// A tab has no second thread; its one stack is sized when the module links, to at least this.
+#[cfg(target_arch = "wasm32")]
+fn plan_query(session: &MiniSession, sql: &str) -> Result<datafusion_expr::LogicalPlan> {
+    plan_query_on_stack(session, sql)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn plan_query(session: &MiniSession, sql: &str) -> Result<datafusion_expr::LogicalPlan> {
     let owned = sql.to_string();
     std::thread::scope(|scope| {
@@ -620,6 +638,7 @@ fn plan_query(session: &MiniSession, sql: &str) -> Result<datafusion_expr::Logic
 }
 
 fn plan_query_on_stack(session: &MiniSession, sql: &str) -> Result<datafusion_expr::LogicalPlan> {
+    #[cfg(not(target_arch = "wasm32"))]
     debug_assert_eq!(std::thread::current().name(), Some("burrmill-plan"));
     let (stmt, names) = dialect::parse(sql, &session.known_names())?;
     refuse_df_statement(&stmt)?;
@@ -828,4 +847,24 @@ fn df_err(e: datafusion_common::DataFusionError) -> BurrmillError {
     } else {
         BurrmillError::Substrate(s)
     }
+}
+
+/// A tab cannot spawn a thread, so the one it has is the pool, and rayon lets a thread join only
+/// one: every engine in the tab shares it.
+#[cfg(target_arch = "wasm32")]
+fn tab_pool() -> Result<Arc<rayon::ThreadPool>> {
+    thread_local! {
+        static POOL: std::cell::OnceCell<Arc<rayon::ThreadPool>> = const { std::cell::OnceCell::new() };
+    }
+    POOL.with(|p| {
+        if let Some(pool) = p.get() {
+            return Ok(Arc::clone(pool));
+        }
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .use_current_thread()
+            .build()
+            .map_err(|e| BurrmillError::Substrate(e.to_string()))?;
+        Ok(Arc::clone(p.get_or_init(|| Arc::new(pool))))
+    })
 }
