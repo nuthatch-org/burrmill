@@ -293,6 +293,23 @@ fn a_subquery_repeating_a_name_keeps_both_columns_as_duckdb_names_them() {
     assert_eq!(rows.len(), 3);
 }
 
+// burrmill#98: the footer cache was configured and never read.
+#[test]
+fn a_statement_keeps_its_footers_for_the_next() {
+    let (_tmp, engine) = nest_with_transfer();
+    assert_eq!(engine.footer_cache_bytes(), 0);
+    let sql = "SELECT count(*) FROM token__transfer";
+    let first = engine.sql(sql).unwrap();
+    let held = engine.footer_cache_bytes();
+    assert!(held > 0, "nothing cached after reading a segment");
+    assert_eq!(engine.sql(sql).unwrap(), first);
+    assert_eq!(
+        engine.footer_cache_bytes(),
+        held,
+        "the second read cached its footer again"
+    );
+}
+
 #[test]
 fn a_small_table_is_not_fanned_out() {
     let (_tmp, engine) = nest_with_transfer();

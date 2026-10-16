@@ -14,7 +14,7 @@ use datafusion_datasource::file_groups::FileGroup;
 use datafusion_datasource::file_scan_config::{FileScanConfig, FileScanConfigBuilder};
 use datafusion_datasource::source::DataSourceExec;
 use datafusion_datasource_parquet::source::ParquetSource;
-use datafusion_datasource_parquet::{DefaultParquetFileReaderFactory, ParquetFileReaderFactory};
+use datafusion_datasource_parquet::{CachedParquetFileReaderFactory, ParquetFileReaderFactory};
 use datafusion_execution::object_store::ObjectStoreUrl;
 use datafusion_expr::utils::conjunction;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
@@ -239,10 +239,13 @@ impl TableProvider for SegmentTable {
         };
         opts.global.pushdown_filters = true;
         let store = state.runtime_env().object_store(&url)?;
+        // The session's footer cache is read only through this factory; a limit on the cache
+        // manager alone leaves every statement reading every footer again (burrmill#98).
+        let footers = state.runtime_env().cache_manager.get_file_metadata_cache();
         let mut source = ParquetSource::new(self.schema.clone())
             .with_table_parquet_options(opts)
             .with_parquet_file_reader_factory(Arc::new(Unmetered(Arc::new(
-                DefaultParquetFileReaderFactory::new(store),
+                CachedParquetFileReaderFactory::new(store, footers),
             ))));
         if let Some(pred) = conjunction(filters.iter().cloned()) {
             let df_schema = DFSchema::try_from(self.schema.as_ref().clone())?;

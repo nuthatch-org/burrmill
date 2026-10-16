@@ -311,6 +311,12 @@ impl Engine {
         self.session.runtime_env().memory_pool.reserved()
     }
 
+    /// Bytes of Parquet footers the engine keeps between statements, outside the pool: at most an
+    /// eighth of a budget, which the pool was sized without.
+    pub fn footer_cache_bytes(&self) -> usize {
+        self.session.footer_bytes()
+    }
+
     /// Tasks alive on the engine's runtime. A cancelled statement returns before its partition tasks
     /// stop, each at its next yield, and its memory goes back as they do: zero here is when it has.
     pub fn tasks_alive(&self) -> usize {

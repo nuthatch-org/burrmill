@@ -112,7 +112,11 @@ fn a_scan_holds_its_segments_bookkeeping_inside_the_pool() {
     e.sql_for_each(
         "SELECT block_number FROM t WHERE block_number % 2 = 0",
         |b| {
-            let live = LIVE.load(Ordering::Relaxed).saturating_sub(base);
+            // Footers stay cached outside the pool by design, in the eighth it was sized without.
+            let live = LIVE
+                .load(Ordering::Relaxed)
+                .saturating_sub(base)
+                .saturating_sub(e.footer_cache_bytes());
             let held = e.memory_reserved();
             if live.saturating_sub(held) > outside {
                 (outside, held_then) = (live.saturating_sub(held), held);
