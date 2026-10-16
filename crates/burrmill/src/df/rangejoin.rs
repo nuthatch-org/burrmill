@@ -33,10 +33,10 @@ use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_expr::expressions::{BinaryExpr, Column};
 use datafusion_physical_plan::joins::NestedLoopJoinExec;
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion_physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, execute_stream,
-};
+use datafusion_physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_session::PhysicalOptimizerRule;
+
+use super::sequential::execute_stream;
 use futures::StreamExt;
 
 #[derive(Debug, Default)]

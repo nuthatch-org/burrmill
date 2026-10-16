@@ -489,17 +489,8 @@ impl Engine {
             .create_physical_plan(&logical)
             .await
             .map_err(plan_err)?;
-        // `execute_stream` would coalesce a plan of several partitions on a task each.
-        #[cfg(target_arch = "wasm32")]
-        let physical: Arc<dyn datafusion_physical_plan::ExecutionPlan> =
-            if physical.properties().partitioning.partition_count() > 1 {
-                Arc::new(sequential::SequentialCoalesceExec::new(physical))
-            } else {
-                physical
-            };
         let mut stream =
-            datafusion_physical_plan::execute_stream(physical, self.session.task_ctx())
-                .map_err(df_err)?;
+            sequential::execute_stream(physical, self.session.task_ctx()).map_err(df_err)?;
         // A plan with no nest scan (`range`, a recursive CTE) never meets `CancelExec`, so the
         // token is also raced here; dropping the stream aborts the partition tasks under it.
         // A tab has no timer to poll it on; there the token is seen at each batch instead.
