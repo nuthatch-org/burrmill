@@ -64,7 +64,8 @@ pub fn discover_tables(segments: &Path) -> crate::Result<Vec<NestTable>> {
         let Some((table, _)) = stem.rsplit_once('-') else {
             continue;
         };
-        let size = e.metadata()?.len();
+        // The target's length: `DirEntry::metadata` reports a symlinked segment's link.
+        let size = std::fs::metadata(&p)?.len();
         by_table
             .entry(table.to_string())
             .or_default()
