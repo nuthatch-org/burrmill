@@ -205,6 +205,31 @@ fn replacement_scan_is_refused() {
     }
 }
 
+// A segment linked into place was sized as its link, and its footer read from the wrong offset.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_segment_is_read_at_its_target_length() {
+    let (tmp, _engine) = nest_with_transfer();
+    let segs = tmp.path().join("segments");
+    let linked = tmp.path().join("linked");
+    std::fs::create_dir(&linked).unwrap();
+    for e in std::fs::read_dir(&segs).unwrap() {
+        let p = e.unwrap().path();
+        std::os::unix::fs::symlink(&p, linked.join(p.file_name().unwrap())).unwrap();
+    }
+    let engine = Engine::open_segments(&linked).unwrap();
+    let got = engine
+        .sql("SELECT count(*) AS n FROM token__transfer")
+        .unwrap();
+    let n = got[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(n, 3);
+}
+
 // nuthatch's `segment_vanished` keys on the segment path plus the OS's own wording.
 #[test]
 fn a_vanished_segment_names_its_path_and_the_os_error() {
