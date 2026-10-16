@@ -67,6 +67,7 @@ mod wide;
 
 #[path = "generated/physical_planner.rs"]
 mod physical_planner;
+mod running;
 #[path = "generated/schema_equivalence.rs"]
 mod schema_equivalence;
 
