@@ -340,6 +340,9 @@ impl MiniSession {
                     .rules
                     .into_iter()
                     .filter(|r| r.name() != "eliminate_group_by_constant")
+                    // Last in each pass, so the next pass optimizes what it cut.
+                    .chain([Arc::new(super::sharing::PruneShared)
+                        as Arc<dyn datafusion_optimizer::OptimizerRule + Send + Sync>])
                     .collect(),
             ),
             // Last, so it sees the join filter after projection pushdown has made its operands columns.
