@@ -1,12 +1,13 @@
 //! Nest tables as DataFusion providers: explicit file lists, sizes known, empty if unsealed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion_catalog::{Session, TableProvider};
+use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{DFSchema, Result as DFResult};
 use datafusion_datasource::PartitionedFile;
 use datafusion_datasource::file::FileSource;
@@ -47,6 +48,8 @@ pub struct NestTable {
     pub schema: SchemaRef,
     pub files: Vec<(PathBuf, u64)>,
     pub wide: Vec<String>,
+    /// Columns the host writes lower-case: nuthatch renders every `address` as `0x` and lower hex.
+    pub lowercase: Vec<String>,
 }
 
 /// Discover `<table>-<hash>.parquet` under `segments/`, last hyphen splitting table from hash.
@@ -82,6 +85,7 @@ pub fn discover_tables(segments: &Path) -> crate::Result<Vec<NestTable>> {
             schema,
             files,
             wide: Vec::new(),
+            lowercase: Vec::new(),
         });
     }
     tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -120,8 +124,14 @@ pub fn apply_schema_json(tables: &mut Vec<NestTable>, schema_json: &Path) -> cra
             .filter(|(_, s)| *s == "word16" || *s == "word32")
             .map(|(n, _)| n.clone())
             .collect();
+        let lowercase: Vec<String> = cols
+            .iter()
+            .filter(|(_, s)| s == "address")
+            .map(|(n, _)| n.clone())
+            .collect();
         if let Some(t) = tables.iter_mut().find(|t| t.name == *name) {
             t.wide = wide;
+            t.lowercase = lowercase;
             continue;
         }
         let mut fields: Vec<Field> = cols
@@ -137,6 +147,7 @@ pub fn apply_schema_json(tables: &mut Vec<NestTable>, schema_json: &Path) -> cra
             schema: Arc::new(Schema::new(fields)),
             files: Vec::new(),
             wide,
+            lowercase,
         });
     }
     tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -185,6 +196,7 @@ pub struct SegmentTable {
     groups: usize,
     /// The engine's token; every scan of this table stops at it.
     cancel: crate::CancelToken,
+    lowercase: HashSet<String>,
 }
 
 impl SegmentTable {
@@ -207,8 +219,24 @@ impl SegmentTable {
             files,
             groups: groups.max(1),
             cancel,
+            lowercase: table.lowercase.iter().cloned().collect(),
         })
     }
+}
+
+/// `lower(c)` as `c` for a column the host writes lower-case, so the predicate the scan prunes with
+/// can use the segments' statistics and bloom filters. The filter above the scan keeps `lower`.
+fn unlowered(e: Expr, lowercase: &HashSet<String>) -> DFResult<Expr> {
+    e.transform_up(|e| match &e {
+        Expr::ScalarFunction(f) if f.func.name() == "lower" => match f.args.as_slice() {
+            [Expr::Column(c)] if lowercase.contains(&c.name) => {
+                Ok(Transformed::yes(Expr::Column(c.clone())))
+            }
+            _ => Ok(Transformed::no(e)),
+        },
+        _ => Ok(Transformed::no(e)),
+    })
+    .map(|t| t.data)
 }
 
 #[async_trait]
@@ -248,7 +276,11 @@ impl TableProvider for SegmentTable {
             .with_parquet_file_reader_factory(Arc::new(Unmetered(Arc::new(
                 CachedParquetFileReaderFactory::new(store, footers),
             ))));
-        if let Some(pred) = conjunction(filters.iter().cloned()) {
+        let filters = filters
+            .iter()
+            .map(|f| unlowered(f.clone(), &self.lowercase))
+            .collect::<DFResult<Vec<_>>>()?;
+        if let Some(pred) = conjunction(filters) {
             let df_schema = DFSchema::try_from(self.schema.as_ref().clone())?;
             source = source.with_predicate(state.create_physical_expr(pred, &df_schema)?);
         }
