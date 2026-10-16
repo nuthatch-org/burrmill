@@ -166,3 +166,55 @@ fn a_statement_over_a_shared_subquery_keeps_its_order() {
     assert_eq!(pos.len(), 20_000);
     assert!(pos.windows(2).all(|w| w[0] >= w[1]), "not in order");
 }
+
+/// #97: a shared subquery was computed whole, every column of it, whatever its readers took.
+#[test]
+fn a_shared_subquery_computes_only_what_its_readers_take() {
+    let (_t, e) = engine();
+    let sql = "SELECT x.id, y.n FROM placed x JOIN placed y ON x.id = y.id ORDER BY x.id";
+    assert_eq!(rows(&e, sql), vec!["a|2", "b|1", "c|1"]);
+    assert_eq!(planned_scans(&e, "place", sql), 1);
+    let plan = rows(&e, &format!("EXPLAIN {sql}")).join("\n");
+    assert!(
+        !plan.contains("max("),
+        "the unread `pos` is still computed:\n{plan}"
+    );
+}
+
+#[test]
+fn a_shared_subquery_read_for_no_column_still_has_its_rows() {
+    let (_t, e) = engine();
+    let sql = "SELECT a.c + b.c FROM (SELECT count(*) AS c FROM placed) a, \
+               (SELECT count(*) AS c FROM placed) b";
+    assert_eq!(rows(&e, sql), vec!["6"]);
+    assert_eq!(planned_scans(&e, "place", sql), 1);
+}
+
+/// Rows a table's scan produced, from `EXPLAIN ANALYZE`.
+fn scanned_rows(e: &Engine, table: &str, sql: &str) -> usize {
+    let plan = rows(e, &format!("EXPLAIN ANALYZE {sql}")).join("\n");
+    plan.lines()
+        .filter(|l| l.contains("DataSourceExec") && l.contains(&format!("{table}-")))
+        .filter_map(|l| l.split("output_rows=").nth(1))
+        .map(|r| {
+            r.split(|c: char| !c.is_ascii_digit())
+                .next()
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+        })
+        .sum()
+}
+
+/// #97: a filter every reader of a shared subquery applies reaches inside it.
+#[test]
+fn a_filter_every_reader_applies_reaches_the_shared_scan() {
+    let (_t, e) = engine();
+    let sql = "SELECT x.id, y.n FROM placed x JOIN placed y ON x.id = y.id WHERE x.id = 'a'";
+    assert_eq!(rows(&e, sql), vec!["a|2"]);
+    assert_eq!(
+        scanned_rows(&e, "place", sql),
+        2,
+        "the shared scan read every id"
+    );
+}

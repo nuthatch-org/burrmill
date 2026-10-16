@@ -13,7 +13,7 @@
 //! copy, because they rewrite a subquery from outside it, as the checked sums trace a value to its
 //! cast.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
@@ -24,11 +24,14 @@ use async_trait::async_trait;
 use datafusion_catalog::Session;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
-use datafusion_common::{DFSchemaRef, DataFusionError, Result, internal_err};
+use datafusion_common::{Column, DFSchemaRef, DataFusionError, Result, ScalarValue, internal_err};
 use datafusion_execution::TaskContext;
-use datafusion_expr::logical_plan::{Extension, SubqueryAlias};
+use datafusion_expr::logical_plan::{Extension, Filter, Projection, SubqueryAlias};
+use datafusion_expr::utils::disjunction;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode, UserDefinedLogicalNodeCore};
 use datafusion_optimizer::analyzer::AnalyzerRule;
+use datafusion_optimizer::optimize_projections::OptimizeProjections;
+use datafusion_optimizer::optimizer::{ApplyOrder, OptimizerConfig, OptimizerRule};
 use datafusion_physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion_physical_optimizer::output_requirements::OutputRequirements;
 use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -45,6 +48,11 @@ use futures::StreamExt;
 struct State {
     plan: Mutex<Option<Arc<dyn ExecutionPlan>>>,
     batches: tokio::sync::OnceCell<Arc<Vec<RecordBatch>>>,
+    /// The columns projection pruning asked of the references, for [`PruneShared`].
+    wanted: Mutex<BTreeSet<usize>>,
+    /// The disjunction of the readers' filters already put on the definition, so a later pass
+    /// does not put it there again.
+    pushed: Mutex<Option<Expr>>,
 }
 
 impl fmt::Debug for State {
@@ -582,6 +590,10 @@ impl UserDefinedLogicalNodeCore for SharedRef {
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Shared: computed once, id={:016x}", self.id)
     }
+    fn necessary_children_exprs(&self, output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
+        lock(&self.state.wanted).extend(output_columns);
+        Some(vec![])
+    }
     fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, _inputs: Vec<LogicalPlan>) -> Result<Self> {
         Ok(Self {
             id: self.id,
@@ -684,6 +696,243 @@ impl UserDefinedLogicalNodeCore for SharedDefs {
             body,
         })
     }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The optimizer's last rule: each shared subquery cut to the columns its readers take, and to the
+/// rows, where every reader filters.
+///
+/// Sharing is decided in the analyzer, before projections are pruned or filters pushed, and neither
+/// reaches through a reference, so a view read twice computed every column and row it has whatever
+/// either reader took (#97). Each reference records what pruning asks of it; a definition is cut to
+/// the union, and each reference handed back its old columns, the unread ones as constants, so
+/// nothing above it changes shape and the next pass prunes them away. Where every reference sits
+/// under a filter, the definition is filtered by their disjunction, which the next pass pushes in;
+/// each reader keeps its own.
+#[derive(Debug, Default)]
+pub struct PruneShared;
+
+impl OptimizerRule for PruneShared {
+    fn name(&self) -> &str {
+        "prune_shared"
+    }
+    fn apply_order(&self) -> Option<ApplyOrder> {
+        None
+    }
+    fn supports_rewrite(&self) -> bool {
+        true
+    }
+    fn rewrite(
+        &self,
+        plan: LogicalPlan,
+        config: &dyn OptimizerConfig,
+    ) -> Result<Transformed<LogicalPlan>> {
+        match plan {
+            LogicalPlan::Analyze(_) => plan.map_children(|p| prune(p, config)),
+            plan => prune(plan, config),
+        }
+    }
+}
+
+fn prune(plan: LogicalPlan, config: &dyn OptimizerConfig) -> Result<Transformed<LogicalPlan>> {
+    let LogicalPlan::Extension(e) = &plan else {
+        return Ok(Transformed::no(plan));
+    };
+    let Some(d) = e.node.as_any().downcast_ref::<SharedDefs>() else {
+        return Ok(Transformed::no(plan));
+    };
+    d.states.iter().for_each(|s| lock(&s.wanted).clear());
+    let rule = OptimizeProjections::new();
+    let body = rule.rewrite(d.body.clone(), config)?.data;
+    // A definition's readers may sit in a definition after it or before it, so until nothing grows.
+    let mut cut: Vec<Option<(BTreeSet<usize>, LogicalPlan)>> = vec![None; d.defs.len()];
+    loop {
+        let mut grew = false;
+        for (i, def) in d.defs.iter().enumerate().rev() {
+            let wanted = lock(&d.states[i].wanted).clone();
+            if cut[i].as_ref().is_some_and(|(w, _)| *w == wanted) {
+                continue;
+            }
+            // A reader that takes no column, as `count(*)` does, still needs the rows.
+            let keep: Vec<usize> = match wanted.is_empty() {
+                true => vec![0],
+                false => wanted.iter().copied().collect(),
+            };
+            let narrowed = match keep.len() == def.schema().fields().len() {
+                true => def.clone(),
+                false => LogicalPlan::Projection(Projection::try_new(
+                    keep.iter()
+                        .map(|&c| Expr::Column(Column::from(def.schema().qualified_field(c))))
+                        .collect(),
+                    Arc::new(def.clone()),
+                )?),
+            };
+            cut[i] = Some((wanted, rule.rewrite(narrowed, config)?.data));
+            grew = true;
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut narrowed: HashMap<u64, DFSchemaRef> = HashMap::new();
+    let mut defs = d.defs.clone();
+    let mut schemas = d.schemas.clone();
+    for (i, c) in cut.into_iter().enumerate() {
+        let (_, def) = c.expect("every definition was cut");
+        if def.schema().fields().len() == d.defs[i].schema().fields().len() {
+            continue;
+        }
+        narrowed.insert(d.ids[i], Arc::clone(def.schema()));
+        schemas[i] = Arc::clone(def.schema());
+        defs[i] = def;
+    }
+    let readers = reader_filters(std::iter::once(&d.body).chain(&d.defs))?;
+    let mut filtered = false;
+    for (i, def) in defs.iter_mut().enumerate() {
+        let Some(Some(predicates)) = readers.get(&d.ids[i]) else {
+            continue;
+        };
+        let Some(any) = disjunction(predicates.iter().cloned()) else {
+            continue;
+        };
+        if !any.column_refs().iter().all(|c| def.schema().has_column(c)) {
+            continue;
+        }
+        let mut pushed = lock(&d.states[i].pushed);
+        if pushed.as_ref() == Some(&any) {
+            continue;
+        }
+        *pushed = Some(any.clone());
+        *def = LogicalPlan::Filter(Filter::try_new(any, Arc::new(std::mem::take(def)))?);
+        filtered = true;
+    }
+    if narrowed.is_empty() && !filtered {
+        return Ok(Transformed::no(plan));
+    }
+    let defs = defs
+        .into_iter()
+        .map(|p| widen(p, &narrowed))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Transformed::yes(LogicalPlan::Extension(Extension {
+        node: Arc::new(SharedDefs {
+            ids: d.ids.clone(),
+            states: d.states.clone(),
+            schemas,
+            defs,
+            body: widen(body, &narrowed)?,
+        }),
+    })))
+}
+
+/// Per definition, the distinct predicates its references are read under, or `None` where any
+/// reference is read unfiltered or under a predicate that cannot move.
+fn reader_filters<'a>(
+    plans: impl Iterator<Item = &'a LogicalPlan>,
+) -> Result<HashMap<u64, Option<Vec<Expr>>>> {
+    let mut out: HashMap<u64, Option<Vec<Expr>>> = HashMap::new();
+    for plan in plans {
+        plan.apply_with_subqueries(|n| {
+            let (id, predicate) = match n {
+                LogicalPlan::Filter(f) => match reference_under(&f.input) {
+                    Some(id) => (id, movable(&f.predicate)?.then(|| f.predicate.clone())),
+                    None => return Ok(TreeNodeRecursion::Continue),
+                },
+                LogicalPlan::Extension(e) => match e.node.as_any().downcast_ref::<SharedRef>() {
+                    Some(r) => (r.id, None),
+                    None => return Ok(TreeNodeRecursion::Continue),
+                },
+                _ => return Ok(TreeNodeRecursion::Continue),
+            };
+            let seen = out.entry(id).or_insert_with(|| Some(Vec::new()));
+            match (seen.as_mut(), predicate) {
+                (Some(all), Some(p)) if !all.contains(&p) => all.push(p),
+                (Some(_), Some(_)) => {}
+                (_, None) => *seen = None,
+                (None, Some(_)) => {}
+            }
+            // The reference under the filter is accounted for.
+            Ok(TreeNodeRecursion::Jump)
+        })?;
+    }
+    Ok(out)
+}
+
+/// The shared reference `p` reads, directly or through the projection [`widen`] puts over it.
+fn reference_under(p: &LogicalPlan) -> Option<u64> {
+    let under = match p {
+        LogicalPlan::Projection(p) => p.input.as_ref(),
+        p => p,
+    };
+    match under {
+        LogicalPlan::Extension(e) => e.node.as_any().downcast_ref::<SharedRef>().map(|r| r.id),
+        _ => None,
+    }
+}
+
+/// A predicate the same over the definition as over one reader: no subquery, nothing volatile.
+fn movable(e: &Expr) -> Result<bool> {
+    let reaches = e.exists(|e| {
+        Ok(matches!(
+            e,
+            Expr::ScalarSubquery(_)
+                | Expr::Exists(_)
+                | Expr::InSubquery(_)
+                | Expr::OuterReferenceColumn(..)
+        ))
+    })?;
+    Ok(!reaches && !e.is_volatile())
+}
+
+/// Each reference to a cut definition reading the cut columns, with the old ones around them.
+fn widen(plan: LogicalPlan, narrowed: &HashMap<u64, DFSchemaRef>) -> Result<LogicalPlan> {
+    plan.transform_up_with_subqueries(|n| {
+        let LogicalPlan::Extension(e) = &n else {
+            return Ok(Transformed::no(n));
+        };
+        let Some(r) = e.node.as_any().downcast_ref::<SharedRef>() else {
+            return Ok(Transformed::no(n));
+        };
+        let Some(schema) = narrowed.get(&r.id) else {
+            return Ok(Transformed::no(n));
+        };
+        let exprs = r
+            .schema
+            .iter()
+            .map(|(q, f)| {
+                let c = Column::new(q.cloned(), f.name());
+                match schema.has_column(&c) {
+                    true => Ok(Expr::Column(c)),
+                    false => unread(q, f),
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let reference = LogicalPlan::Extension(Extension {
+            node: Arc::new(SharedRef {
+                id: r.id,
+                state: Arc::clone(&r.state),
+                schema: Arc::clone(schema),
+            }),
+        });
+        Projection::try_new(exprs, Arc::new(reference))
+            .map(|p| Transformed::yes(LogicalPlan::Projection(p)))
+    })
+    .map(|t| t.data)
+}
+
+/// A column no reader takes, since pruning asked for every one a reader uses. Nullable only where
+/// it was, so the nodes above keep their schemas.
+fn unread(
+    q: Option<&datafusion_common::TableReference>,
+    f: &arrow::datatypes::Field,
+) -> Result<Expr> {
+    let v = match f.is_nullable() {
+        true => ScalarValue::try_new_null(f.data_type())?,
+        false => ScalarValue::new_default(f.data_type())?,
+    };
+    Ok(Expr::Literal(v, None).alias_qualified(q.cloned(), f.name()))
 }
 
 #[derive(Debug)]
