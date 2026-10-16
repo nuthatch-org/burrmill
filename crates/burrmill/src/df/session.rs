@@ -18,7 +18,10 @@ use datafusion_common::config::{ConfigOptions, TableOptions};
 use datafusion_common::display::{PlanType, ToStringifiedPlan};
 use datafusion_common::{DFSchema, Result as DFResult, TableReference, plan_datafusion_err};
 use datafusion_execution::TaskContext;
-use datafusion_execution::cache::cache_manager::CacheManagerConfig;
+use datafusion_execution::cache::cache_manager::{
+    CacheManagerConfig, CachedFileMetadataEntry, FileMetadataCache,
+};
+use datafusion_execution::cache::default_cache::DefaultCache;
 use datafusion_execution::config::SessionConfig;
 use datafusion_execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
 use datafusion_execution::memory_pool::{
@@ -49,10 +52,14 @@ use super::fold::{FoldSubstitution, FoldTables, OwnedFoldPlanner};
 use super::physical_planner::DefaultPhysicalPlanner;
 use super::rule::CheckedArithmetic;
 
+/// Parquet footers by segment path. Segments never change once sealed, so an entry stays right.
+pub(super) type Footers = DefaultCache<object_store::path::Path, CachedFileMetadataEntry>;
+
 pub struct MiniSession {
     session_id: String,
     config: SessionConfig,
     runtime: Arc<RuntimeEnv>,
+    footers: Arc<Footers>,
     catalog_list: Arc<MemoryCatalogProviderList>,
     scalar: HashMap<String, Arc<ScalarUDF>>,
     higher: HashMap<String, Arc<HigherOrderUDF>>,
@@ -120,16 +127,18 @@ impl MiniSession {
             // 8,192 rows of a wide cell exist before the caller caps the answer (#1650).
             config = config.with_batch_size(128);
         }
+        // The footer cache sits outside the pool, so under a budget it takes an eighth of the bound
+        // rather than adding to it. Only `SegmentTable`'s reader factory consults it.
+        let footer_limit = budget.map_or(1 << 30, |b| b.memory_bytes / 8);
+        let footers = Arc::new(Footers::new(footer_limit).with_name("burrmill footers"));
+        let cache = CacheManagerConfig::default()
+            .with_metadata_cache_limit(footer_limit)
+            .with_file_metadata_cache(Some(Arc::clone(&footers) as Arc<FileMetadataCache>));
         let runtime = match budget {
-            None => RuntimeEnvBuilder::new().with_cache_manager(
-                CacheManagerConfig::default().with_metadata_cache_limit(1024 * 1024 * 1024),
-            ),
-            // The footer cache sits outside the pool, so it takes an eighth of the bound rather
-            // than adding to it. Without a spill directory, over the bound is a refusal.
+            None => RuntimeEnvBuilder::new().with_cache_manager(cache),
+            // Without a spill directory, over the bound is a refusal.
             Some(b) => RuntimeEnvBuilder::new()
-                .with_cache_manager(
-                    CacheManagerConfig::default().with_metadata_cache_limit(b.memory_bytes / 8),
-                )
+                .with_cache_manager(cache)
                 // The peak is this engine's own; `reserved` is the shared pool's.
                 .with_memory_pool(Arc::new(PeakRecordingPool::new(
                     shared.map_or_else(|| budget_pool(b.memory_bytes), |p| Arc::clone(&p.0)),
@@ -266,6 +275,7 @@ impl MiniSession {
             session_id: "s".into(),
             config,
             runtime,
+            footers,
             catalog_list,
             scalar,
             higher,
@@ -376,6 +386,10 @@ impl MiniSession {
     /// `information_schema.tables` and `.columns` as DuckDB shows them to nuthatch's `.tables` and
     /// `.schema`: the visible tables, all views, with DuckDB's type names. A subset of DuckDB's
     /// columns, the ones those commands and a person reading them use.
+    pub fn footer_bytes(&self) -> usize {
+        self.footers.memory_used()
+    }
+
     pub fn build_information_schema(&mut self, hidden: fn(&str) -> bool) -> DFResult<()> {
         self.hidden = hidden;
         *self
