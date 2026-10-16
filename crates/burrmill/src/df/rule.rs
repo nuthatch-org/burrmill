@@ -110,6 +110,8 @@ const SAFE_WINDOWS: &[&str] = &[
     "first_value",
     "last_value",
     "nth_value",
+    "burrmill_running_max",
+    "burrmill_running_min",
 ];
 
 #[derive(Debug)]
@@ -385,12 +387,19 @@ impl CheckedArithmetic {
             Expr::Negative(inner) if is_exact(&inner.get_type(schema)?) => Ok(Transformed::yes(
                 Expr::ScalarFunction(ScalarFunction::new_udf(Arc::clone(&self.neg), vec![*inner])),
             )),
-            Expr::WindowFunction(wf) => match super::lastnonnull::rewrite(*wf) {
+            Expr::WindowFunction(wf) => match super::running::rewrite(*wf, schema)? {
                 t if t.transformed => Ok(t),
                 Transformed {
                     data: Expr::WindowFunction(wf),
                     ..
-                } => checked_window_sum(*wf, schema),
+                } => match super::lastnonnull::rewrite(*wf) {
+                    t if t.transformed => Ok(t),
+                    Transformed {
+                        data: Expr::WindowFunction(wf),
+                        ..
+                    } => checked_window_sum(*wf, schema),
+                    t => Ok(t),
+                },
                 t => Ok(t),
             },
             e => Ok(Transformed::no(e)),
