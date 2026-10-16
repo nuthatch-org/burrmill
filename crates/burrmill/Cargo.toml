@@ -249,3 +249,8 @@ required-features = ["datafusion"]
 [[example]]
 name = "hosted_fold"
 required-features = ["datafusion"]
+
+[[test]]
+name = "df_lowercase"
+path = "tests/df_lowercase.rs"
+required-features = ["datafusion"]
