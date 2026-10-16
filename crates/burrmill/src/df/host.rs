@@ -132,6 +132,11 @@ impl Engine {
                     schema: raw_schema.clone(),
                     files,
                     wide: Vec::new(),
+                    lowercase: declared
+                        .iter()
+                        .filter(|(_, t)| t == "address")
+                        .map(|(c, _)| c.clone())
+                        .collect(),
                 },
                 self.threads,
                 self.cancel.clone(),
