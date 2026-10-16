@@ -9,6 +9,7 @@ use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
 use datafusion_catalog::MemTable;
 use datafusion_catalog::default_table_source::provider_as_source;
+#[cfg(not(target_arch = "wasm32"))]
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -27,6 +28,7 @@ impl Engine {
         Ok(dialect::strip_dup_suffix(empty).schema())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn batches(&self, sql: &str) -> Result<(SchemaRef, Vec<RecordBatch>)> {
         let batches = self.sql(sql)?;
         let schema = match batches.first() {
@@ -47,6 +49,7 @@ impl Engine {
     }
 
     /// `CREATE OR REPLACE TABLE name AS sql`, held in memory. Returns its row count.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn create_table_as(&mut self, name: &str, sql: &str) -> Result<u64> {
         let (schema, batches) = self.batches(sql)?;
         let rows = batches.iter().map(|b| b.num_rows() as u64).sum();
@@ -96,6 +99,7 @@ impl Engine {
     }
 
     /// `sql`'s result written to `path` as one Parquet file. Returns its row count.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn write_parquet(&self, sql: &str, path: &Path) -> Result<u64> {
         let (schema, batches) = self.batches(sql)?;
         let file = std::fs::File::create(path).map_err(io)?;
@@ -140,6 +144,7 @@ impl Engine {
     }
 
     /// `sql`'s result as an Arrow IPC stream, for a host whose arrow is not this one.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn sql_ipc(&self, sql: &str) -> Result<Vec<u8>> {
         let (schema, batches) = self.batches(sql)?;
         let mut w = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).map_err(io)?;

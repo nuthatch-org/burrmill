@@ -73,7 +73,7 @@ itertools = { version = "0.14", optional = true }
 log = { version = "0.4", optional = true }
 object_store = { version = "0.13", default-features = false, optional = true }
 serde_json = { version = "1", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"], optional = true }
+tokio = { version = "1", features = ["sync"], optional = true }
 arrow-schema = { version = "59", default-features = false, optional = true }
 datafusion-catalog = { version = "=55.0.0", default-features = false, optional = true }
 datafusion-common = { version = "=55.0.0", default-features = false, features = ["recursive_protection"], optional = true }
@@ -92,10 +92,25 @@ datafusion-physical-plan = { version = "=55.0.0", default-features = false, opti
 datafusion-session = { version = "=55.0.0", default-features = false, optional = true }
 datafusion-sql = { version = "=55.0.0", default-features = false, features = ["recursive_protection", "unicode_expressions"], optional = true }
 
+# A tab has one thread and its own event loop: no tokio runtime there, and uuid (DataFusion's) draws
+# its randomness from the browser.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+uuid = { version = "1", features = ["js"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+# The clock is JavaScript's `Date` in a tab; without it `Utc::now` panics there.
+chrono = { version = "0.4", default-features = false, features = ["clock", "wasmbind"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
 # Test-only. The seal-layout canary writes throwaway segment directories, and a canary that leaves
 # litter in /tmp on every run is one people start ignoring.
 [dev-dependencies]
 tempfile = "3"
+# The store a tab reads from, run natively (`tests/df_store.rs`).
+object_store = { version = "0.13", default-features = false }
+futures = "0.3"
 # Already normal dependencies; repeated here because an integration test links the crate and not its
 # graph. The generated-fold tests write their own segments and vary the thread count on purpose.
 arrow = { workspace = true, features = ["ipc", "prettyprint"] }
@@ -248,6 +263,11 @@ required-features = ["datafusion"]
 
 [[example]]
 name = "hosted_fold"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_store"
+path = "tests/df_store.rs"
 required-features = ["datafusion"]
 
 [[test]]

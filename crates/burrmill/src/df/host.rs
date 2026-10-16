@@ -104,6 +104,54 @@ impl Engine {
                 }
             }
         }
+        self.define_facts(name, declared, files, hot, window, false)
+    }
+
+    /// As [`Engine::register_facts`], over segments in the engine's store
+    /// ([`Engine::attach_store`]): `keys` are its keys, each footer read by range.
+    pub async fn register_store_facts(
+        &mut self,
+        name: &str,
+        declared: &[(String, String)],
+        keys: Vec<(String, u64)>,
+        hot: &[Value],
+        window: (Option<u64>, Option<u64>),
+    ) -> Result<()> {
+        self.refuse_replacing_a_table(name)?;
+        let store = self.store()?;
+        // Over HTTP each footer is a round trip, so they are asked for together.
+        let unbound = keys
+            .iter()
+            .filter(|(k, l)| !self.bound_segments.contains_key(&(PathBuf::from(k), *l)));
+        let read = futures::future::try_join_all(unbound.map(|(key, len)| {
+            let store = &store;
+            async move {
+                super::catalog::footer_schema(store, key, *len)
+                    .await
+                    .map(|s| ((PathBuf::from(key), *len), s))
+                    .map_err(|e| {
+                        crate::BurrmillError::Substrate(format!("segment {key} will not bind: {e}"))
+                    })
+            }
+        }))
+        .await?;
+        self.bound_segments.extend(read);
+        let files = keys
+            .into_iter()
+            .map(|(k, l)| (PathBuf::from(k), l))
+            .collect();
+        self.define_facts(name, declared, files, hot, window, true)
+    }
+
+    fn define_facts(
+        &mut self,
+        name: &str,
+        declared: &[(String, String)],
+        files: Vec<(PathBuf, u64)>,
+        hot: &[Value],
+        window: (Option<u64>, Option<u64>),
+        keyed: bool,
+    ) -> Result<()> {
         let raw = format!("{name}__raw");
         let raw_schema: SchemaRef = if files.is_empty() {
             Arc::new(Schema::new(
@@ -132,6 +180,7 @@ impl Engine {
                     schema: raw_schema.clone(),
                     files,
                     wide: Vec::new(),
+                    keyed,
                     lowercase: declared
                         .iter()
                         .filter(|(_, t)| t == "address")
