@@ -181,6 +181,11 @@ impl Engine {
                     files,
                     wide: Vec::new(),
                     keyed,
+                    lowercase: declared
+                        .iter()
+                        .filter(|(_, t)| t == "address")
+                        .map(|(c, _)| c.clone())
+                        .collect(),
                 },
                 self.threads,
                 self.cancel.clone(),

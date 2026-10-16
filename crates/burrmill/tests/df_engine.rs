@@ -205,6 +205,31 @@ fn replacement_scan_is_refused() {
     }
 }
 
+// A segment linked into place was sized as its link, and its footer read from the wrong offset.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_segment_is_read_at_its_target_length() {
+    let (tmp, _engine) = nest_with_transfer();
+    let segs = tmp.path().join("segments");
+    let linked = tmp.path().join("linked");
+    std::fs::create_dir(&linked).unwrap();
+    for e in std::fs::read_dir(&segs).unwrap() {
+        let p = e.unwrap().path();
+        std::os::unix::fs::symlink(&p, linked.join(p.file_name().unwrap())).unwrap();
+    }
+    let engine = Engine::open_segments(&linked).unwrap();
+    let got = engine
+        .sql("SELECT count(*) AS n FROM token__transfer")
+        .unwrap();
+    let n = got[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(n, 3);
+}
+
 // nuthatch's `segment_vanished` keys on the segment path plus the OS's own wording.
 #[test]
 fn a_vanished_segment_names_its_path_and_the_os_error() {
@@ -291,6 +316,23 @@ fn a_subquery_repeating_a_name_keeps_both_columns_as_duckdb_names_them() {
                SELECT from_1, \"(\"\"value\"\" || 'x')\" FROM j ORDER BY 1, 2";
     let rows = burrmill::df::encode::rows(&engine.sql(sql).unwrap()[0]).unwrap();
     assert_eq!(rows.len(), 3);
+}
+
+// burrmill#98: the footer cache was configured and never read.
+#[test]
+fn a_statement_keeps_its_footers_for_the_next() {
+    let (_tmp, engine) = nest_with_transfer();
+    assert_eq!(engine.footer_cache_bytes(), 0);
+    let sql = "SELECT count(*) FROM token__transfer";
+    let first = engine.sql(sql).unwrap();
+    let held = engine.footer_cache_bytes();
+    assert!(held > 0, "nothing cached after reading a segment");
+    assert_eq!(engine.sql(sql).unwrap(), first);
+    assert_eq!(
+        engine.footer_cache_bytes(),
+        held,
+        "the second read cached its footer again"
+    );
 }
 
 #[test]

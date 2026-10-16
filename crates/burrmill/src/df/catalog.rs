@@ -1,12 +1,13 @@
 //! Nest tables as DataFusion providers: explicit file lists, sizes known, empty if unsealed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion_catalog::{Session, TableProvider};
+use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{DFSchema, Result as DFResult};
 use datafusion_datasource::PartitionedFile;
 use datafusion_datasource::file::FileSource;
@@ -14,7 +15,9 @@ use datafusion_datasource::file_groups::FileGroup;
 use datafusion_datasource::file_scan_config::{FileScanConfig, FileScanConfigBuilder};
 use datafusion_datasource::source::DataSourceExec;
 use datafusion_datasource_parquet::source::ParquetSource;
-use datafusion_datasource_parquet::{DefaultParquetFileReaderFactory, ParquetFileReaderFactory};
+use datafusion_datasource_parquet::{
+    CachedParquetFileReaderFactory, DefaultParquetFileReaderFactory, ParquetFileReaderFactory,
+};
 use datafusion_execution::object_store::ObjectStoreUrl;
 use datafusion_expr::utils::conjunction;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
@@ -49,6 +52,8 @@ pub struct NestTable {
     pub wide: Vec<String>,
     /// `files` are keys in the store at [`NEST_STORE`], not paths on this machine.
     pub keyed: bool,
+    /// Columns the host writes lower-case: nuthatch renders every `address` as `0x` and lower hex.
+    pub lowercase: Vec<String>,
 }
 
 /// Where an engine opened from an object store finds it.
@@ -69,7 +74,8 @@ pub fn discover_tables(segments: &Path) -> crate::Result<Vec<NestTable>> {
         let Some((table, _)) = stem.rsplit_once('-') else {
             continue;
         };
-        let size = e.metadata()?.len();
+        // The target's length: `DirEntry::metadata` reports a symlinked segment's link.
+        let size = std::fs::metadata(&p)?.len();
         by_table
             .entry(table.to_string())
             .or_default()
@@ -87,6 +93,7 @@ pub fn discover_tables(segments: &Path) -> crate::Result<Vec<NestTable>> {
             files,
             wide: Vec::new(),
             keyed: false,
+            lowercase: Vec::new(),
         });
     }
     tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -129,8 +136,14 @@ pub fn apply_schema_text(tables: &mut Vec<NestTable>, raw: &str) -> crate::Resul
             .filter(|(_, s)| *s == "word16" || *s == "word32")
             .map(|(n, _)| n.clone())
             .collect();
+        let lowercase: Vec<String> = cols
+            .iter()
+            .filter(|(_, s)| s == "address")
+            .map(|(n, _)| n.clone())
+            .collect();
         if let Some(t) = tables.iter_mut().find(|t| t.name == *name) {
             t.wide = wide;
+            t.lowercase = lowercase;
             continue;
         }
         let mut fields: Vec<Field> = cols
@@ -147,6 +160,7 @@ pub fn apply_schema_text(tables: &mut Vec<NestTable>, raw: &str) -> crate::Resul
             files: Vec::new(),
             wide,
             keyed: false,
+            lowercase,
         });
     }
     tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -196,6 +210,7 @@ pub struct SegmentTable {
     url: ObjectStoreUrl,
     /// The engine's token; every scan of this table stops at it.
     cancel: crate::CancelToken,
+    lowercase: HashSet<String>,
 }
 
 impl SegmentTable {
@@ -223,8 +238,24 @@ impl SegmentTable {
                 ObjectStoreUrl::local_filesystem()
             },
             cancel,
+            lowercase: table.lowercase.iter().cloned().collect(),
         })
     }
+}
+
+/// `lower(c)` as `c` for a column the host writes lower-case, so the predicate the scan prunes with
+/// can use the segments' statistics and bloom filters. The filter above the scan keeps `lower`.
+fn unlowered(e: Expr, lowercase: &HashSet<String>) -> DFResult<Expr> {
+    e.transform_up(|e| match &e {
+        Expr::ScalarFunction(f) if f.func.name() == "lower" => match f.args.as_slice() {
+            [Expr::Column(c)] if lowercase.contains(&c.name) => {
+                Ok(Transformed::yes(Expr::Column(c.clone())))
+            }
+            _ => Ok(Transformed::no(e)),
+        },
+        _ => Ok(Transformed::no(e)),
+    })
+    .map(|t| t.data)
 }
 
 #[async_trait]
@@ -256,12 +287,19 @@ impl TableProvider for SegmentTable {
         };
         opts.global.pushdown_filters = true;
         let store = state.runtime_env().object_store(&url)?;
+        // The session's footer cache is read only through this factory; a limit on the cache
+        // manager alone leaves every statement reading every footer again (burrmill#98).
+        let footers = state.runtime_env().cache_manager.get_file_metadata_cache();
         let mut source = ParquetSource::new(self.schema.clone())
             .with_table_parquet_options(opts)
             .with_parquet_file_reader_factory(Arc::new(Unmetered(Arc::new(
-                DefaultParquetFileReaderFactory::new(store),
+                CachedParquetFileReaderFactory::new(store, footers),
             ))));
-        if let Some(pred) = conjunction(filters.iter().cloned()) {
+        let filters = filters
+            .iter()
+            .map(|f| unlowered(f.clone(), &self.lowercase))
+            .collect::<DFResult<Vec<_>>>()?;
+        if let Some(pred) = conjunction(filters) {
             let df_schema = DFSchema::try_from(self.schema.as_ref().clone())?;
             source = source.with_predicate(state.create_physical_expr(pred, &df_schema)?);
         }
@@ -325,6 +363,7 @@ pub async fn discover_store_tables(
             files,
             wide: Vec::new(),
             keyed: true,
+            lowercase: Vec::new(),
         });
     }
     tables.sort_by(|a, b| a.name.cmp(&b.name));
