@@ -218,3 +218,23 @@ fn a_filter_every_reader_applies_reaches_the_shared_scan() {
         "the shared scan read every id"
     );
 }
+
+/// #99: a repeated subquery holding a window, and no aggregate, was computed at every reach.
+#[test]
+fn a_repeated_window_is_computed_once() {
+    let (_t, mut e) = engine();
+    e.register_view(
+        "running",
+        "SELECT id, block_number, sum(block_number) OVER (PARTITION BY id ORDER BY block_number) AS run
+         FROM roll",
+    )
+    .unwrap();
+    let sql = "SELECT a.id, a.block_number, a.run, b.run FROM running a
+               JOIN running b ON a.id = b.id AND a.block_number = b.block_number
+               ORDER BY a.id, a.block_number";
+    assert_eq!(
+        rows(&e, sql),
+        vec!["a|2|2|2", "a|5|7|7", "b|3|3|3", "b|7|10|10", "c|6|6|6"]
+    );
+    assert_eq!(executed_scans(&e, "roll", sql), 1);
+}

@@ -2,10 +2,11 @@
 //!
 //! DataFusion inlines CTEs and views, so `per_epoch` used twice in `epoch_boundaries` aggregated
 //! its half-million rows twice, and a view joined twice is planned twice. Identical aliased
-//! subtrees that occur more than once, and contain an aggregate (so what is kept is bounded), are
-//! defined once under a [`SharedDefs`] node at the root, and each occurrence becomes a
-//! [`SharedRef`] reading one cache: the first consumer computes the batches and the others read
-//! them. Nothing passes a reference from above, so every reader sees the same answer.
+//! subtrees that occur more than once, and contain an aggregate or a window, are defined once under
+//! a [`SharedDefs`] node at the root, and each occurrence becomes a [`SharedRef`] reading one
+//! cache: the first consumer computes the batches and the others read them. Nothing passes a
+//! reference from above, so every reader sees the same answer. What a cache holds is charged to the
+//! pool; one that does not fit is not kept, and each reader computes the subquery itself.
 //!
 //! Every copy had been analysed, optimised and planned again, so planning grew with how often a view
 //! was reached rather than with the statement (#92). The analyzer's rules after this one run through
@@ -26,6 +27,7 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{Column, DFSchemaRef, DataFusionError, Result, ScalarValue, internal_err};
 use datafusion_execution::TaskContext;
+use datafusion_execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion_expr::logical_plan::{Extension, Filter, Projection, SubqueryAlias};
 use datafusion_expr::utils::disjunction;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode, UserDefinedLogicalNodeCore};
@@ -38,7 +40,7 @@ use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream, collect,
+    SendableRecordBatchStream, execute_stream,
 };
 use datafusion_session::{ExtensionPlanner, PhysicalOptimizerRule, PhysicalPlanner};
 use futures::StreamExt;
@@ -47,12 +49,23 @@ use futures::StreamExt;
 #[derive(Default)]
 struct State {
     plan: Mutex<Option<Arc<dyn ExecutionPlan>>>,
-    batches: tokio::sync::OnceCell<Arc<Vec<RecordBatch>>>,
+    batches: tokio::sync::OnceCell<Arc<Held>>,
     /// The columns projection pruning asked of the references, for [`PruneShared`].
     wanted: Mutex<BTreeSet<usize>>,
     /// The disjunction of the readers' filters already put on the definition, so a later pass
     /// does not put it there again.
     pushed: Mutex<Option<Expr>>,
+}
+
+/// What the first reader kept for the others.
+enum Held {
+    /// The reservation is held for as long as the batches are, and released with them.
+    Batches {
+        batches: Vec<RecordBatch>,
+        _charged: MemoryReservation,
+    },
+    /// Over what the pool would give: each reader runs the plan itself.
+    TooBig,
 }
 
 impl fmt::Debug for State {
@@ -71,12 +84,13 @@ pub struct ShareRepeats;
 #[derive(Clone, Copy)]
 struct Summary {
     key: u64,
-    aggregate: bool,
+    /// An aggregate or a window: work a reader would otherwise repeat.
+    costly: bool,
     outer: bool,
 }
 
-/// The aliases worth sharing, by the address of their input: over an aggregate, not correlated, and
-/// not shared yet.
+/// The aliases worth sharing, by the address of their input: over an aggregate or a window, not
+/// correlated, and not shared yet.
 #[derive(Default)]
 struct Candidates {
     stack: Vec<Summary>,
@@ -84,8 +98,8 @@ struct Candidates {
     found: Vec<(*const LogicalPlan, u64)>,
 }
 
-/// Already shared, through any aliases of aliases; or a window a filter above may still turn into
-/// an aggregate (`TopPerGroup`, `PartitionExtreme`), which it cannot see through a reference.
+/// Already shared, through any aliases of aliases. A window a filter above turns into an aggregate
+/// (`TopPerGroup`, `PartitionExtreme`) has been turned by then: both run before this rule.
 fn not_a_candidate(input: &LogicalPlan) -> bool {
     let mut under = input;
     loop {
@@ -95,8 +109,7 @@ fn not_a_candidate(input: &LogicalPlan) -> bool {
             _ => break,
         };
     }
-    matches!(under, LogicalPlan::Window(_))
-        || matches!(under, LogicalPlan::Extension(e) if e.node.as_any().is::<SharedNode>())
+    matches!(under, LogicalPlan::Extension(e) if e.node.as_any().is::<SharedNode>())
 }
 
 /// What identifies `p` apart from its children. Collisions only cost an equality check.
@@ -138,12 +151,13 @@ impl<'n> TreeNodeVisitor<'n> for Candidates {
         below.iter().for_each(|s| s.key.hash(&mut h));
         let summary = Summary {
             key: h.finish(),
-            aggregate: matches!(n, LogicalPlan::Aggregate(_)) || inputs.iter().any(|s| s.aggregate),
+            costly: matches!(n, LogicalPlan::Aggregate(_) | LogicalPlan::Window(_))
+                || inputs.iter().any(|s| s.costly),
             outer: n.contains_outer_reference() || inputs.iter().any(|s| s.outer),
         };
         if let LogicalPlan::SubqueryAlias(s) = n
             && let [input] = inputs
-            && input.aggregate
+            && input.costly
             && !input.outer
             && !not_a_candidate(&s.input)
         {
@@ -1182,18 +1196,19 @@ impl ExecutionPlan for SharedExec {
                 .ok_or_else(|| {
                     DataFusionError::Internal("a shared subquery read before it was defined".into())
                 })?;
-            let batches = state
+            let held = state
                 .batches
-                .get_or_try_init(|| async move { collect(plan, ctx).await.map(Arc::new) })
+                .get_or_try_init(|| hold(Arc::clone(&plan), Arc::clone(&ctx)))
                 .await
                 .map_err(|e| DataFusionError::Context("shared subquery".into(), Box::new(e)))?;
-            Ok::<_, DataFusionError>(futures::stream::iter(
-                batches
-                    .iter()
-                    .cloned()
-                    .map(Ok::<_, DataFusionError>)
-                    .collect::<Vec<_>>(),
-            ))
+            let rows: SendableRecordBatchStream = match held.as_ref() {
+                Held::Batches { batches, .. } => Box::pin(RecordBatchStreamAdapter::new(
+                    plan.schema(),
+                    futures::stream::iter(batches.clone().into_iter().map(Ok)),
+                )),
+                Held::TooBig => execute_stream(plan, ctx)?,
+            };
+            Ok::<_, DataFusionError>(rows)
         })
         .flat_map(|r| match r {
             Ok(s) => s.left_stream(),
@@ -1204,6 +1219,24 @@ impl ExecutionPlan for SharedExec {
             stream,
         )))
     }
+}
+
+/// The plan's batches, kept for the other readers if the pool gives room for them.
+async fn hold(plan: Arc<dyn ExecutionPlan>, ctx: Arc<TaskContext>) -> Result<Arc<Held>> {
+    let reservation = MemoryConsumer::new("SharedExec").register(ctx.memory_pool());
+    let mut stream = execute_stream(plan, ctx)?;
+    let mut batches = Vec::new();
+    while let Some(b) = stream.next().await {
+        let b = b?;
+        if reservation.try_grow(b.get_array_memory_size()).is_err() {
+            return Ok(Arc::new(Held::TooBig));
+        }
+        batches.push(b);
+    }
+    Ok(Arc::new(Held::Batches {
+        batches,
+        _charged: reservation,
+    }))
 }
 
 #[cfg(test)]
@@ -1232,6 +1265,74 @@ mod tests {
             })
             .map(|t| t.data)
         }
+    }
+
+    /// Two readers of one shared subquery under a pool of `pool` bytes: the rows each read, and
+    /// what the pool still holds while the subquery is alive.
+    fn read_twice(pool: usize) -> (usize, usize, usize) {
+        use datafusion_execution::memory_pool::GreedyMemoryPool;
+        use datafusion_execution::runtime_env::RuntimeEnvBuilder;
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("v", arrow::datatypes::DataType::UInt64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(arrow::array::UInt64Array::from_iter_values(
+                0..10_000,
+            ))],
+        )
+        .unwrap();
+        let plan: Arc<dyn ExecutionPlan> =
+            datafusion_datasource::memory::MemorySourceConfig::try_new_exec(
+                &[vec![batch.clone(), batch]],
+                Arc::clone(&schema),
+                None,
+            )
+            .unwrap();
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::new(GreedyMemoryPool::new(pool)))
+            .build_arc()
+            .unwrap();
+        let ctx = Arc::new(TaskContext::default().with_runtime(Arc::clone(&runtime)));
+        let state = Shared::default();
+        *state.plan.lock().unwrap() = Some(plan);
+        let reader = || SharedExec {
+            schema: Arc::clone(&schema),
+            state: Arc::clone(&state),
+            properties: Arc::new(PlanProperties::new(
+                EquivalenceProperties::new(Arc::clone(&schema)),
+                Partitioning::UnknownPartitioning(1),
+                EmissionType::Final,
+                Boundedness::Bounded,
+            )),
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let rows = |r: SharedExec| {
+            let batches = rt
+                .block_on(datafusion_physical_plan::common::collect(
+                    r.execute(0, Arc::clone(&ctx)).unwrap(),
+                ))
+                .unwrap();
+            batches.iter().map(|b| b.num_rows()).sum::<usize>()
+        };
+        let (a, b) = (rows(reader()), rows(reader()));
+        (a, b, runtime.memory_pool.reserved())
+    }
+
+    #[test]
+    fn a_shared_subquery_is_held_against_the_pool() {
+        let (a, b, held) = read_twice(64 << 20);
+        assert_eq!((a, b), (20_000, 20_000));
+        assert!(held >= 20_000 * 8, "{held} held for 160 KB of rows");
+    }
+
+    #[test]
+    fn a_shared_subquery_the_pool_cannot_hold_is_computed_by_each_reader() {
+        let (a, b, held) = read_twice(64 << 10);
+        assert_eq!((a, b), (20_000, 20_000));
+        assert_eq!(held, 0);
     }
 
     #[test]
