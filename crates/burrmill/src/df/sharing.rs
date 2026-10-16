@@ -40,9 +40,11 @@ use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream, execute_stream,
+    SendableRecordBatchStream,
 };
 use datafusion_session::{ExtensionPlanner, PhysicalOptimizerRule, PhysicalPlanner};
+
+use super::sequential::execute_stream;
 use futures::StreamExt;
 
 /// One shared subquery's plan, set when the statement starts, and its batches once computed.
