@@ -109,6 +109,10 @@ impl MiniSession {
             .with_collect_statistics(false)
             .with_extension(Arc::new(cancel.clone()));
         config.options_mut().sql_parser.enable_ident_normalization = false;
+        // At one target partition an InterleaveExec keeps nothing apart, and DataFusion's sort
+        // enforcement can then drop a one-partition repartition under one it already built, which
+        // fails the rebuild (#110). A plain union plans the same work.
+        config.options_mut().optimizer.prefer_existing_union = threads <= 1;
         // DuckDB types `1.5` as DECIMAL(2,1), and nuthatch prints a DECIMAL as a string.
         config.options_mut().sql_parser.parse_float_as_decimal = true;
         // It drops the ORDER BY of every view and derived table; `OutermostOrder` keeps the one that

@@ -274,3 +274,8 @@ required-features = ["datafusion"]
 name = "df_lowercase"
 path = "tests/df_lowercase.rs"
 required-features = ["datafusion"]
+
+[[test]]
+name = "df_running"
+path = "tests/df_running.rs"
+required-features = ["datafusion"]
