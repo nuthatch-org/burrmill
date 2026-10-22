@@ -829,3 +829,48 @@ ctl.txt:=== glibc-b512t2 lodestar_indexer_ledger
 ctl.txt:=== jem-oldgather-b512t2 lodestar_indexer_ledger  
 ctl.txt:=== jem-oldgather-b2048t2 lodestar_indexer_ledger  1027 ms;898 ms;914 ms;
 # b512t2 ledger refused on this tree with either gather: Memory Exhausted while Sorting (no spill dir); it answered in 1,430 ms on 4b4c8e8
+
+## Unzeroed segment reads, A/B on a quiet box (load 2.3), 2 GB / 2 threads, 4 warm runs x 3 rounds, interleaved
+# jem = c22b182 bench, unzero = same plus a pread-into-capacity local store; __memset 3.18% -> 0.04% of samples
+AB 1 lodestar_indexer_ledger jem 916 962 983 948 
+AB 1 lodestar_indexer_ledger unzero 949 941 952 960 
+AB 1 lodestar_network jem 1865 2007 1906 1957 
+AB 1 lodestar_network unzero 1981 1874 1945 1892 
+AB 2 lodestar_indexer_ledger jem 986 963 921 922 
+AB 2 lodestar_indexer_ledger unzero 937 968 972 972 
+AB 2 lodestar_network jem 1910 1881 1855 1875 
+AB 2 lodestar_network unzero 1940 1870 1875 1867 
+AB 3 lodestar_indexer_ledger jem 983 924 935 917 
+AB 3 lodestar_indexer_ledger unzero 958 1094 933 933 
+AB 3 lodestar_network jem 1923 1918 2005 1902 
+AB 3 lodestar_network unzero 1952 1898 1994 1896 
+# medians: ledger jem 942 unzero 955; network jem 1908 unzero 1897. Not landed.
+
+## Allocation callers, c22b182 bench on jemalloc, 2 GB / 2 threads, perf -F 2999 --call-graph dwarf,8192, first run + 5 warm (956-995 ms)
+# first non-allocator frame above a jemalloc leaf, share of allocator samples (alloccallers.py over perf script)
+samples 46495 allocator-leaf 2673 (5.7%)
+ 29.2%  <alloc::sync::Arc<arrow_buffer::bytes::Bytes>>::drop_slow
+  8.9%  object_store::local::read_range
+  5.2%  ?
+  2.9%  <alloc::raw_vec::RawVecInner>::finish_grow
+  2.4%  <burrmill::df::checked::Single<3> as datafusion_expr_common::accumulator::Accumulator>::update_batch
+  2.3%  _RNvXNtNtCs6i54tJFfzR_5alloc3vec14spec_from_iterINtB4_3VecxEINtB2_12SpecFromIterxINtNtNtNtCsgxBkk5gSRhY_4core4iter8adapters3map3MapINtNtNtB1p_5slice4i
+  1.9%  <alloc::raw_vec::RawVecInner>::finish_grow
+  1.9%  _RNvMs_NtNtCsi3t6uFLdP2L_11arrow_array5array15byte_view_arrayINtB4_20GenericByteViewArrayNtNtB8_5types14StringViewTypeE23gc_with_max_buffer_sizeCsiRV5
+  1.4%  <alloc::raw_vec::RawVecInner>::finish_grow
+  1.3%  <alloc::raw_vec::RawVecInner>::finish_grow
+  1.3%  <alloc::raw_vec::RawVecInner>::finish_grow
+  1.3%  _RNvXs5_NtNtCsi3t6uFLdP2L_11arrow_array5array15byte_view_arrayINtB5_20GenericByteViewArrayNtNtB9_5types14StringViewTypeEINtNtCsgxBkk5gSRhY_4core7conve
+  1.2%  __GI___nptl_deallocate_tsd
+  1.2%  _RNvXNtNtCs6i54tJFfzR_5alloc3vec14spec_from_iterINtB4_3VecnEINtB2_12SpecFromIternINtNtNtNtCsgxBkk5gSRhY_4core4iter8adapters3map3MapINtNtNtB1p_5slice4i
+  1.0%  _RNvXNtNtCs6i54tJFfzR_5alloc3vec14spec_from_iterINtB4_3VecoEINtB2_12SpecFromIteroINtNtNtNtCsgxBkk5gSRhY_4core4iter8adapters3map3MapINtNtNtB1p_3ops5ran
+  0.9%  <arrow_buffer::buffer::mutable::MutableBuffer>::from_len_zeroed
+  0.9%  <burrmill::df::checked::Groups<3>>::build
+  0.9%  _RNvXs1_NtNtCsi3t6uFLdP2L_11arrow_array5array15primitive_arrayINtB5_14PrimitiveArrayNtNtB9_5types14Decimal128TypeENtB7_5Array5sliceCs3rCSoHrAlDL_12arr
+  0.8%  <alloc::raw_vec::RawVecInner>::finish_grow
+  0.8%  parquet::file::serialized_reader::decode_page
+  0.8%  _RINvNtCsgxBkk5gSRhY_4core3ptr9drop_glueINtNtNtCsi3t6uFLdP2L_11arrow_array5array15primitive_array14PrimitiveArrayNtNtBI_5types10UInt64TypeEECsiRV5O9Mq
+  0.7%  <alloc::raw_vec::RawVecInner>::finish_grow
+  0.7%  <alloc::string::String as core::clone::Clone>::clone
+  0.7%  std::sys::pal::unix::stack_overflow::thread_info::set_current_info
+  0.7%  <alloc::raw_vec::RawVecInner>::finish_grow
