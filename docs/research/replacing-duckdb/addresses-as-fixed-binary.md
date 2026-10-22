@@ -22,7 +22,9 @@ it.
   therefore prunes by statistics as before, and a top-k over an address, which could not push
   its threshold into a scan over text views, now can: 500 rows read where it read 32,000. A
   value in an address column that is not `0x` and forty hex digits refuses the statement rather
-  than reading as nothing.
+  than reading as nothing, and `Engine::stream`, if no batch has reached the host yet, turns the
+  lever off for that engine and runs the statement again over text: nuthatch's own fixtures write
+  `0xa`, and a nest written by hand may too.
 - **Through the plan.** An analyzer rule, `Addresses`, before `DuckComparisons` and coercion:
   `lower(a)` is `a`; a comparison, `IN` or `BETWEEN` between an address and text that spells an
   address compares fixed binary against the decoded literal; any other text context (another

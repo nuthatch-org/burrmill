@@ -495,7 +495,35 @@ impl Engine {
         self.stream(logical, &mut f).await
     }
 
+    /// Addresses are read as fixed binary while every value in an address column is one. The
+    /// first that is not refuses the statement, and if no batch has reached `f` yet the engine
+    /// reads addresses as text from then on and runs the statement again.
     async fn stream(
+        &self,
+        logical: datafusion_expr::LogicalPlan,
+        f: &mut impl FnMut(RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        let mut sent = 0usize;
+        let r = self
+            .stream_once(logical.clone(), &mut |b| {
+                sent += 1;
+                f(b)
+            })
+            .await;
+        match r {
+            Err(BurrmillError::Substrate(ref m))
+                if sent == 0
+                    && m.contains(addresses::NOT_AN_ADDRESS)
+                    && self.session.addresses_off() =>
+            {
+                log::warn!("{m}: addresses are read as text from now on");
+                self.stream_once(logical, f).await
+            }
+            r => r,
+        }
+    }
+
+    async fn stream_once(
         &self,
         logical: datafusion_expr::LogicalPlan,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,

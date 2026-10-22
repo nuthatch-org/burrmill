@@ -380,3 +380,57 @@ fn keys_joins_and_aggregates_stay_binary() {
     );
     assert!(!plan.contains("address_text"), "{plan}");
 }
+
+/// A host's fixture, or a nest written by hand, may put something that is not an address in an
+/// address column. The statement that meets it answers over text, and so does every statement
+/// after it on that engine.
+#[test]
+fn a_value_that_is_not_an_address_turns_the_lever_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("who", DataType::Utf8, true),
+        Field::new("amount", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(vec![1u64, 2])) as ArrayRef,
+            Arc::new(StringArray::from(vec!["0xa", "0xb"])),
+            Arc::new(StringArray::from(vec!["1", "2"])),
+        ],
+    )
+    .unwrap();
+    let path = tmp.path().join(format!("t-{:064x}.parquet", 1));
+    let f = std::fs::File::create(&path).unwrap();
+    let mut w = parquet::arrow::ArrowWriter::try_new(f, schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+    let len = std::fs::metadata(&path).unwrap().len();
+    let mut e = Engine::open_empty_budgeted(burrmill::Budget {
+        memory_bytes: 64 << 20,
+        threads: 2,
+        spill: None,
+    })
+    .unwrap();
+    let declared = vec![
+        ("block_number".to_string(), "u64".to_string()),
+        ("who".to_string(), "address".to_string()),
+        ("amount".to_string(), "string".to_string()),
+    ];
+    e.register_facts("t", &declared, vec![(path, len)], &[], (None, None))
+        .unwrap();
+    assert_eq!(
+        col(&e, "SELECT who FROM t WHERE lower(who) = '0xb'"),
+        vec![json!("0xb")]
+    );
+    assert_eq!(
+        col(&e, "SELECT count(*) FROM t WHERE who IN ('0xa', '0xb')"),
+        vec![json!(2)]
+    );
+    let plan = rows(&e, "EXPLAIN SELECT who FROM t")
+        .iter()
+        .map(|r| r.to_string())
+        .collect::<String>();
+    assert!(!plan.contains("address_bytes"), "{plan}");
+}
