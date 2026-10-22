@@ -5,19 +5,28 @@
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, AsArray, FixedSizeBinaryBuilder, StringViewBuilder};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Schema};
 use datafusion_catalog::Session;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_common::{Column, DFSchema, Result as DFResult, ScalarValue, plan_err};
+use datafusion_common::{Column, DFSchema, DFSchemaRef, Result as DFResult, ScalarValue, plan_err};
+use datafusion_expr::Operator;
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{
     ColumnarValue, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, ScalarFunctionArgs,
     ScalarUDF, ScalarUDFImpl, Signature, Volatility, lit,
 };
 use datafusion_optimizer::analyzer::AnalyzerRule;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::ScalarFunctionExpr;
+use datafusion_physical_expr::expressions::{
+    BinaryExpr as PhysicalBinaryExpr, Column as PhysicalColumn, InListExpr,
+    Literal as PhysicalLiteral, in_list,
+};
 use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_plan::filter::FilterExec;
 use datafusion_physical_plan::projection::ProjectionExec;
+use datafusion_session::PhysicalOptimizerRule;
 
 pub const WIDTH: i32 = 20;
 
@@ -393,7 +402,28 @@ impl AnalyzerRule for Addresses {
         "addresses"
     }
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> DFResult<LogicalPlan> {
-        plan.transform_up_with_subqueries(|p| {
+        // A recursive query's work table has the text schema the parser gave it. Before the walk,
+        // each work table takes the schema its static term will have, so the recursive term reads
+        // fixed binary where the static term writes it.
+        let plan = plan
+            .transform_down_with_subqueries(|p| match p {
+                LogicalPlan::RecursiveQuery(r) => {
+                    let probe = self.pass(Arc::unwrap_or_clone(Arc::clone(&r.static_term)))?;
+                    fixed_work_table(r, probe.schema())
+                }
+                p => Ok(Transformed::no(p)),
+            })?
+            .data;
+        self.pass(plan)
+    }
+}
+
+impl Addresses {
+    /// The walk, bottom up, a subquery handled at the node that holds it: its outer references
+    /// are retyped from that node's inputs first, so a comparison inside it meets what the
+    /// outer plan now gives rather than what the parser recorded.
+    fn pass(&self, plan: LogicalPlan) -> DFResult<LogicalPlan> {
+        plan.transform_up(|p| {
             let p = match p {
                 LogicalPlan::TableScan(scan) => decoded_scan(scan, &self.0)?,
                 LogicalPlan::Union(u) => textual_union(u)?,
@@ -411,6 +441,7 @@ impl AnalyzerRule for Addresses {
             let was = p.transformed;
             let mut t = p.data.map_expressions(|e| {
                 let name = e.schema_name().to_string();
+                let e = self.with_subqueries(e, &schema)?;
                 let t = e.transform_up(|e| rewrite(e, &schema))?;
                 if t.transformed && names_matter && t.data.schema_name().to_string() != name {
                     Ok(Transformed::yes(t.data.alias(name)))
@@ -425,6 +456,61 @@ impl AnalyzerRule for Addresses {
             Ok(t)
         })
         .map(|t| t.data)
+    }
+
+    /// `e` with each subquery in it walked, its outer references typed from `outer`.
+    fn with_subqueries(&self, e: Expr, outer: &DFSchema) -> DFResult<Expr> {
+        e.transform_up(|e| {
+            Ok(match e {
+                Expr::ScalarSubquery(s) => {
+                    Transformed::yes(Expr::ScalarSubquery(self.subquery(s, outer)?))
+                }
+                Expr::InSubquery(mut i) => {
+                    i.subquery = self.subquery(i.subquery, outer)?;
+                    Transformed::yes(Expr::InSubquery(i))
+                }
+                Expr::Exists(mut x) => {
+                    x.subquery = self.subquery(x.subquery, outer)?;
+                    Transformed::yes(Expr::Exists(x))
+                }
+                e => Transformed::no(e),
+            })
+        })
+        .map(|t| t.data)
+    }
+
+    fn subquery(
+        &self,
+        s: datafusion_expr::Subquery,
+        outer: &DFSchema,
+    ) -> DFResult<datafusion_expr::Subquery> {
+        let retype = |e: Expr| -> DFResult<Transformed<Expr>> {
+            Ok(match e {
+                Expr::OuterReferenceColumn(ref field, ref c)
+                    if outer
+                        .qualified_field_from_column(c)
+                        .is_ok_and(|(_, f)| is_address(f.data_type())) =>
+                {
+                    let field = Arc::new(field.as_ref().clone().with_data_type(fixed()));
+                    Transformed::yes(Expr::OuterReferenceColumn(field, c.clone()))
+                }
+                e => Transformed::no(e),
+            })
+        };
+        let plan = Arc::unwrap_or_clone(s.subquery)
+            .transform_up(|p| p.map_expressions(|e| e.transform_up(retype)))?
+            .data;
+        let plan = self.pass(plan)?;
+        let outer_ref_columns = s
+            .outer_ref_columns
+            .into_iter()
+            .map(|e| e.transform_up(retype).map(|t| t.data))
+            .collect::<DFResult<Vec<_>>>()?;
+        Ok(datafusion_expr::Subquery {
+            subquery: Arc::new(plan),
+            outer_ref_columns,
+            spans: s.spans,
+        })
     }
 }
 
@@ -830,6 +916,47 @@ fn textual_join_keys(mut j: datafusion_expr::Join) -> DFResult<Transformed<Logic
     })
 }
 
+/// The recursive term's scans of the work table, retyped to `schema`, the static term's once its
+/// addresses are decoded; the query itself is rebuilt by the walk that follows.
+fn fixed_work_table(
+    r: datafusion_expr::RecursiveQuery,
+    schema: &DFSchemaRef,
+) -> DFResult<Transformed<LogicalPlan>> {
+    if !schema.fields().iter().any(|f| is_address(f.data_type())) {
+        return Ok(Transformed::no(LogicalPlan::RecursiveQuery(r)));
+    }
+    let name = r.name.clone();
+    let arrow: arrow::datatypes::SchemaRef = Arc::new(schema.as_arrow().clone());
+    let recursive = Arc::unwrap_or_clone(r.recursive_term)
+        .transform_up(|p| match p {
+            LogicalPlan::TableScan(scan) if scan.table_name.table() == name => {
+                let source = datafusion_catalog::default_table_source::provider_as_source(
+                    Arc::new(datafusion_catalog::cte_worktable::CteWorkTable::new(
+                        &name,
+                        Arc::clone(&arrow),
+                    )),
+                );
+                let scan = datafusion_expr::TableScanBuilder::new(scan.table_name, source)
+                    .with_projection(scan.projection)
+                    .with_filters(scan.filters)
+                    .with_fetch(scan.fetch)
+                    .build()?;
+                Ok(Transformed::yes(LogicalPlan::TableScan(scan)))
+            }
+            p => Ok(Transformed::no(p)),
+        })?
+        .data;
+    Ok(Transformed::yes(LogicalPlan::RecursiveQuery(
+        datafusion_expr::RecursiveQuery {
+            name: r.name,
+            static_term: r.static_term,
+            recursive_term: Arc::new(recursive),
+            is_distinct: r.is_distinct,
+            schema: r.schema,
+        },
+    )))
+}
+
 /// `plan` with every address column rendered as text.
 fn textual_plan(plan: Arc<LogicalPlan>) -> DFResult<LogicalPlan> {
     let schema = Arc::clone(plan.schema());
@@ -906,4 +1033,126 @@ fn textual_union(u: datafusion_expr::Union) -> DFResult<Transformed<LogicalPlan>
     // The union's schema is recomputed from its inputs.
     let rebuilt = datafusion_expr::Union::try_new_with_loose_types(inputs)?;
     Ok(Transformed::yes(LogicalPlan::Union(rebuilt)))
+}
+
+/// A filter the optimizer pushed through the decode, `address_bytes(c) = literal` over the text
+/// column `c`, compares the text instead: no decode per row, and the column itself is what the
+/// sort enforcement and the plan check both see as constant, where a function of it was constant
+/// to one and not the other (the network nest's `row_number() OVER (PARTITION BY indexer)` under a
+/// filter on `indexer`).
+#[derive(Debug)]
+pub(super) struct TextAddressFilters;
+
+impl PhysicalOptimizerRule for TextAddressFilters {
+    fn name(&self) -> &str {
+        "text_address_filters"
+    }
+    fn schema_check(&self) -> bool {
+        true
+    }
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        _config: &ConfigOptions,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        plan.transform_up(|p| {
+            let Some(filter) = p.as_ref().downcast_ref::<FilterExec>() else {
+                return Ok(Transformed::no(p));
+            };
+            let schema = filter.input().schema();
+            let predicate =
+                Arc::clone(filter.predicate()).transform_up(|e| text_compare(e, &schema))?;
+            if !predicate.transformed {
+                return Ok(Transformed::no(p));
+            }
+            let rebuilt = datafusion_physical_plan::filter::FilterExecBuilder::new(
+                predicate.data,
+                Arc::clone(filter.input()),
+            )
+            .with_default_selectivity(filter.default_selectivity())
+            .apply_projection(filter.projection().as_ref().map(|p| p.to_vec()))?
+            .build()?;
+            Ok(Transformed::yes(Arc::new(rebuilt)))
+        })
+        .map(|t| t.data)
+    }
+}
+
+/// The text column under `address_bytes(c)`, when `c` is one.
+fn decoded_text_column(
+    e: &Arc<dyn PhysicalExpr>,
+    schema: &Schema,
+) -> Option<(Arc<dyn PhysicalExpr>, DataType)> {
+    let f = e.as_ref().downcast_ref::<ScalarFunctionExpr>()?;
+    if f.name() != "address_bytes" || f.args().len() != 1 {
+        return None;
+    }
+    let c = f.args()[0].as_ref().downcast_ref::<PhysicalColumn>()?;
+    let t = schema.field(c.index()).data_type().clone();
+    matches!(t, DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8)
+        .then(|| (Arc::clone(&f.args()[0]), t))
+}
+
+fn text_literal(e: &Arc<dyn PhysicalExpr>, t: &DataType) -> Option<Arc<dyn PhysicalExpr>> {
+    let l = e.as_ref().downcast_ref::<PhysicalLiteral>()?;
+    let text = match l.value() {
+        ScalarValue::FixedSizeBinary(WIDTH, Some(b)) => Some(encode(b.as_slice())),
+        ScalarValue::FixedSizeBinary(WIDTH, None) => None,
+        _ => return None,
+    };
+    let v = match t {
+        DataType::Utf8 => ScalarValue::Utf8(text),
+        DataType::LargeUtf8 => ScalarValue::LargeUtf8(text),
+        _ => ScalarValue::Utf8View(text),
+    };
+    Some(Arc::new(PhysicalLiteral::new(v)))
+}
+
+fn text_compare(
+    e: Arc<dyn PhysicalExpr>,
+    schema: &Schema,
+) -> DFResult<Transformed<Arc<dyn PhysicalExpr>>> {
+    if let Some(b) = e.as_ref().downcast_ref::<PhysicalBinaryExpr>() {
+        let comparison = matches!(
+            b.op(),
+            Operator::Eq
+                | Operator::NotEq
+                | Operator::Lt
+                | Operator::LtEq
+                | Operator::Gt
+                | Operator::GtEq
+                | Operator::IsDistinctFrom
+                | Operator::IsNotDistinctFrom
+        );
+        if comparison {
+            if let Some((c, t)) = decoded_text_column(b.left(), schema)
+                && let Some(l) = text_literal(b.right(), &t)
+            {
+                return Ok(Transformed::yes(Arc::new(PhysicalBinaryExpr::new(
+                    c,
+                    *b.op(),
+                    l,
+                ))));
+            }
+            if let Some((c, t)) = decoded_text_column(b.right(), schema)
+                && let Some(l) = text_literal(b.left(), &t)
+            {
+                return Ok(Transformed::yes(Arc::new(PhysicalBinaryExpr::new(
+                    l,
+                    *b.op(),
+                    c,
+                ))));
+            }
+        }
+    }
+    if let Some(i) = e.as_ref().downcast_ref::<InListExpr>()
+        && let Some((c, t)) = decoded_text_column(i.expr(), schema)
+    {
+        let list: Option<Vec<Arc<dyn PhysicalExpr>>> =
+            i.list().iter().map(|l| text_literal(l, &t)).collect();
+        if let Some(list) = list {
+            return Ok(Transformed::yes(in_list(c, list, &i.negated(), schema)?));
+        }
+    }
+    Ok(Transformed::no(e))
 }

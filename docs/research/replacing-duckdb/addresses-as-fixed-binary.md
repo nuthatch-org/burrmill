@@ -18,13 +18,25 @@ it.
   recompute its schema, since a node keeps the schema it was built with when a child changes
   under it. A filter that reaches the scan is turned back into text: `address_bytes(c)` is `c`,
   a fixed-binary literal is its `0x` text, and a filter that still holds `address_text` after
-  that is not pushed at all (pushdown is inexact, the filter stays above). The parquet reader
+  that is not pushed at all (pushdown is inexact, the filter stays above). The `FilterExec` the
+  optimizer leaves above the scan gets the same treatment from a physical rule that runs first,
+  `TextAddressFilters`: no decode per row there, and the column itself is what the sort
+  enforcement and the final plan check both see as constant under `WHERE indexer = '0x…'`,
+  where a function of it was constant to one pass and not the other and the network nest's
+  `row_number() OVER (PARTITION BY indexer)` refused to plan. The parquet reader
   therefore prunes by statistics as before, and a top-k over an address, which could not push
   its threshold into a scan over text views, now can: 500 rows read where it read 32,000. A
   value in an address column that is not `0x` and forty hex digits refuses the statement rather
   than reading as nothing, and `Engine::stream`, if no batch has reached the host yet, turns the
-  lever off for that engine and runs the statement again over text: nuthatch's own fixtures write
-  `0xa`, and a nest written by hand may too.
+  lever off for that engine and runs the statement again over text, planned afresh: nuthatch's
+  own fixtures write `0xa`, and a nest written by hand may too. A shared definition's one run is
+  now a shared future that every reader awaits (`State::batches`): a run that failed fails every
+  reader the same way, and a reader that stops early, a page's `LIMIT`, drops its handle while
+  the run goes on for the others. Before, tokio's once-cell forgot a cancelled initialiser and
+  the next reader ran the same plan, whose `RepartitionExec` partitions were already taken; a
+  copy with its state reset would have run instead, but its metrics are not on the plan
+  `EXPLAIN ANALYZE` shows. Nuthatch's network paging test had the fault
+  (`network_rust_allocation_pages_keep_the_first_page_snapshot`).
 - **Through the plan.** An analyzer rule, `Addresses`, before `DuckComparisons` and coercion:
   `lower(a)` is `a`; a comparison, `IN` or `BETWEEN` between an address and text that spells an
   address compares fixed binary against the decoded literal; any other text context (another
@@ -34,7 +46,16 @@ it.
   `array_agg`, `coalesce`, `nullif` and window partitions keep the binary; a window's `ORDER BY`
   and `arrow_typeof` see the text, the one because DataFusion runs a RANGE frame over what it
   can compare as a scalar, the other because the host's type is text. Join keys are not
-  comparisons the expression walk meets, so the rule looks at them itself. Byte order and
+  comparisons the expression walk meets, so the rule looks at them itself. A recursive query's
+  work table has the text schema the parser gave it, so before the walk each work table takes
+  the schema its static term will have and the recursive term reads fixed binary where the static
+  term writes it; rendering the terms as text instead left the correlated-subquery rules a key
+  that was no longer a bare column. The network nest's views walk one, and nuthatch's `graph`
+  tests found both. A correlated subquery's outer reference carries the type the parser
+  recorded, text, so the walk handles a subquery at the node that holds it, retyping the outer
+  references from that node's decoded inputs first; otherwise `p.indexer = e.indexer` inside the
+  subquery read as binary against text, took its text, and the rule that ranks a correlated
+  `ORDER BY LIMIT` per key no longer had a bare column to key on. Byte order and
   lower-case hex order agree, so `ORDER BY` and `min`/`max` answer as before.
 - **The owned fold.** Its keys come out of the segments as text; a key the plan wants as fixed
   binary is decoded as the batch is built.

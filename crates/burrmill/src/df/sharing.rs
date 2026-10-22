@@ -51,7 +51,11 @@ use futures::StreamExt;
 #[derive(Default)]
 struct State {
     plan: Mutex<Option<Arc<dyn ExecutionPlan>>>,
-    batches: tokio::sync::OnceCell<Arc<Held>>,
+    /// The definition's one run, started by whichever reader comes first and awaited by all: a
+    /// reader that stops early, a page's `LIMIT`, drops its handle and the run goes on for the
+    /// others, so no reader runs a plan whose repartition partitions are already taken, and a
+    /// run that failed fails every reader the same way.
+    batches: Mutex<Option<Holding>>,
     /// The columns projection pruning asked of the references, for [`PruneShared`].
     wanted: Mutex<BTreeSet<usize>>,
     /// The disjunction of the readers' filters already put on the definition, so a later pass
@@ -77,6 +81,10 @@ impl fmt::Debug for State {
 }
 
 type Shared = Arc<State>;
+
+type Holding = futures::future::Shared<
+    futures::future::BoxFuture<'static, std::result::Result<Arc<Held>, Arc<DataFusionError>>>,
+>;
 
 #[derive(Debug, Default)]
 pub struct ShareRepeats;
@@ -1198,11 +1206,23 @@ impl ExecutionPlan for SharedExec {
                 .ok_or_else(|| {
                     DataFusionError::Internal("a shared subquery read before it was defined".into())
                 })?;
-            let held = state
-                .batches
-                .get_or_try_init(|| hold(Arc::clone(&plan), Arc::clone(&ctx)))
-                .await
-                .map_err(|e| DataFusionError::Context("shared subquery".into(), Box::new(e)))?;
+            let holding = {
+                use futures::FutureExt;
+                let mut slot = state.batches.lock().unwrap_or_else(|e| e.into_inner());
+                slot.get_or_insert_with(|| {
+                    hold(Arc::clone(&plan), Arc::clone(&ctx))
+                        .map(|r| r.map_err(Arc::new))
+                        .boxed()
+                        .shared()
+                })
+                .clone()
+            };
+            let held = holding.await.map_err(|e| {
+                DataFusionError::Context(
+                    "shared subquery".into(),
+                    Box::new(DataFusionError::Shared(e)),
+                )
+            })?;
             let rows: SendableRecordBatchStream = match held.as_ref() {
                 Held::Batches { batches, .. } => Box::pin(RecordBatchStreamAdapter::new(
                     plan.schema(),
