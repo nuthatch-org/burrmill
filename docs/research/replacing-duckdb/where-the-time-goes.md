@@ -131,8 +131,13 @@ Reading the ledger's callers at this shape, by what perf can attribute:
   main after #113 (transcript, "Allocator and gather controls"): jemalloc is 10.7% of samples
   across 67 symbols against glibc's 12.3%, and 3-6% of wall time (ledger 919 against 959 ms,
   network 1,853 against 1,953). So the cost is the number of allocations, not the allocator:
-  per-batch `Arc<dyn Array>`, `Vec<u8>` growth and `ScalarValue` churn, which a batch of 2,048
-  rows pays 16x less often than 128 and still pays.
+  per-batch buffers rather than anything one site owns. A 3 kHz DWARF profile over five warm
+  runs (transcript, "Allocation callers") puts the allocator at 5.7% of samples, and of that 29%
+  is freeing Arrow buffers (`Arc<Bytes>::drop_slow`, jemalloc's extent bookkeeping for large
+  frees), 9% the read buffers' allocation, about 10% `Vec` growth across a dozen sites, 3% the
+  checked window accumulators, 2% byte-view `gc` after a take. Nothing above 2% has an owner, so
+  this is the batch lifecycle itself; buffer reuse across batches is Arrow's design, not a
+  burrmill change. Closed as a lead.
 - **Main itself moved.** The matrix above was taken on 4b4c8e8 with the batch size patched;
   the same ledger on c22b182, fourteen PRs later, is 919 ms at 2 GB and 2 threads against
   1,419, and `lodestar_network` 1,853 against 3,239. The shared-definition pruning (#97, #99,
@@ -142,7 +147,10 @@ Reading the ledger's callers at this shape, by what perf can attribute:
   the gathered runs; production's allocations nest runs at 2 GB with spill.
 - **Planning is 2% of a 1.4 s statement** (`core::fmt::write` 0.9 and `stacker::remaining_stack`
   1.0 on the `burrmill-plan` thread, inside `SqlToRel`): about 30 ms per statement to plan the
-  ledger's union, paid on every statement. A plan cache keyed by statement text would remove it.
+  ledger's union, paid on every statement. The views themselves are planned once at
+  `register_view`; this is `SqlToRel` inlining them and the optimiser walking the result. A cache
+  keyed by statement text would not hit in production, where the dashboard's literals vary, so
+  this stays a measurement.
 - **Byte-view work is 10%** across 22 symbols (sort comparators on `GenericStringType`, view
   builders, `is_ascii`, gc after take) against 10% on primitive sort and take. So address
   columns as fixed binary, the second lever above, is bounded by about 10% at this shape, not the
@@ -173,8 +181,13 @@ Reading the ledger's callers at this shape, by what perf can attribute:
    production shape. The views apply `lower()` (already folded to the column), equality, `count`,
    six literal comparisons and fourteen concatenations to those columns, so the surface is small.
    Touches the catalogue, not the segment format. Behind the reads and the planner now.
-2a. **Segment reads without the zero fill**, and a plan cache per statement text: 3% and 2% on
-   the ledger, each a day, measured above.
+2a. **Segment reads without the zero fill: tried, not landed.** A local `ObjectStore` that
+   `pread`s into unzeroed capacity took `__memset` from 3.2% of samples to 0.04%, and an
+   interleaved A/B on a quiet box (12 warm runs each) put the ledger at 955 ms against 942 and
+   `lodestar_network` at 1,897 against 1,908. Reads run on tokio's blocking pool beside the two
+   compute threads, so their self-time is not on the statement's path. Self-time is not wall
+   time. The planner's 2% is on the path but is per statement with varying literals, so it has
+   no cheap cache either.
 3. **Decode.** Snappy at 3-4% plus buffer slicing. A different codec at seal is nuthatch's call
    and a format change; parked.
 4. **Parse-at-seal for uint256.** Removes the 4-9% cast. Format change; parked behind 2.
