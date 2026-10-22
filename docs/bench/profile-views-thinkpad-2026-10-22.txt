@@ -874,3 +874,25 @@ samples 46495 allocator-leaf 2673 (5.7%)
   0.7%  <alloc::string::String as core::clone::Clone>::clone
   0.7%  std::sys::pal::unix::stack_overflow::thread_info::set_current_info
   0.7%  <alloc::raw_vec::RawVecInner>::finish_grow
+
+## Addresses as fixed binary, A/B on a quiet box (load 2.1), 2 GB / 2 threads, 4 warm runs x 3 rounds, interleaved
+# jem = c22b182 bench; addr = same plus addresses-as-fixed-binary (first revision, before join keys and the strict decode)
+AB 1 lodestar_indexer_ledger jem 927 977 919 921                              
+AB 1 lodestar_indexer_ledger addr 921 912 903 932                      
+AB 1 lodestar_network jem 1934 1892 1907 1953                                
+AB 1 lodestar_network addr 1729 1715 1712 1799                            
+AB 1 lodestar_delegator_stakes jem 1572 1589 1537 1592                              
+AB 1 lodestar_delegator_stakes addr 1495 1486 1507 1489                      
+AB 2 lodestar_indexer_ledger jem 943 913 925 925                              
+AB 2 lodestar_indexer_ledger addr 924 908 996 925                      
+AB 2 lodestar_network jem 1922 1859 1909 1947                                
+AB 2 lodestar_network addr 1706 1710 1751 1735                            
+AB 2 lodestar_delegator_stakes jem 1585 1534 1547 1696                              
+AB 2 lodestar_delegator_stakes addr 1518 1497 1482 1630                      
+AB 3 lodestar_indexer_ledger jem 925 917 982 957                              
+AB 3 lodestar_indexer_ledger addr 917 1069 915 926                      
+AB 3 lodestar_network jem 1893 1918 2009 1858                                
+AB 3 lodestar_network addr 1727 1713 1783 1708                            
+AB 3 lodestar_delegator_stakes jem 1535 1538 1598 1495                              
+AB 3 lodestar_delegator_stakes addr 1499 1488 1481 1558                      
+# medians: ledger jem 925 addr 923; network jem 1914 addr 1721; delegator_stakes jem 1560 addr 1496

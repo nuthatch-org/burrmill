@@ -244,7 +244,9 @@ fn key_parts(
                 e => (e, None),
             };
             let (t, name, _, ty) = branch_column(input, e)?;
-            if !same_table(t) || !(is_text(&ty) || ty.is_integer()) {
+            if !same_table(t)
+                || !(is_text(&ty) || ty.is_integer() || super::addresses::is_address(&ty))
+            {
                 return None;
             }
             out.push(KeyPart::Column { name, key_fn });
@@ -294,6 +296,10 @@ fn defining(plan: &LogicalPlan, idx: usize) -> Option<(&Expr, &LogicalPlan)> {
 fn strip_text_casts(e: &Expr) -> &Expr {
     match e {
         Expr::Alias(a) => strip_text_casts(&a.expr),
+        // An address key read as fixed binary is the column the segment holds as text.
+        Expr::ScalarFunction(f) if f.name() == "address_bytes" && f.args.len() == 1 => {
+            strip_text_casts(&f.args[0])
+        }
         Expr::Cast(Cast { expr, field }) if is_text(field.data_type()) => match expr.as_ref() {
             Expr::Column(_)
             | Expr::ScalarFunction(_)
@@ -675,6 +681,16 @@ fn to_batch(
         columns.push(if *want == DataType::Utf8View {
             let mut b = StringViewBuilder::with_capacity(n);
             range.clone().for_each(|i| b.append_value(key(i)));
+            Arc::new(b.finish())
+        } else if super::addresses::is_address(want) {
+            let mut b =
+                arrow::array::FixedSizeBinaryBuilder::with_capacity(n, super::addresses::WIDTH);
+            for i in range.clone() {
+                match super::addresses::decode(key(i)) {
+                    Some(a) => b.append_value(a)?,
+                    None => b.append_null(),
+                }
+            }
             Arc::new(b.finish())
         } else {
             arrow::compute::cast(&StringArray::from_iter_values(range.clone().map(key)), want)?

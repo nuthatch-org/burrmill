@@ -16,6 +16,7 @@ use sqlparser::ast::Statement as SqlStatement;
 use crate::error::{BurrmillError, Result};
 use crate::limits::Limits;
 
+mod addresses;
 mod cancel;
 mod catalog;
 mod checked;
@@ -280,9 +281,11 @@ impl Engine {
                 Arc::new(SegmentTable::new(t, groups, cancel.clone())?)
             };
             if t.wide.is_empty() {
+                session.note_addresses(&t.name, t.lowercase.iter().cloned());
                 session.register_table(&t.name, provider);
             } else {
                 let raw = format!("{}__raw", t.name);
+                session.note_addresses(&raw, t.lowercase.iter().cloned());
                 session.register_table(&raw, provider);
                 let dec: String = t
                     .wide
@@ -503,6 +506,8 @@ impl Engine {
             .create_physical_plan(&logical)
             .await
             .map_err(plan_err)?;
+        // A host sees an address as the text it wrote.
+        let physical = addresses::rendered(physical, &self.session).map_err(df_err)?;
         let mut stream =
             sequential::execute_stream(physical, self.session.task_ctx()).map_err(df_err)?;
         // A plan with no nest scan (`range`, a recursive CTE) never meets `CancelExec`, so the

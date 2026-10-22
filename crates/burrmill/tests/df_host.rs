@@ -51,7 +51,8 @@ fn rows(engine: &Engine, sql: &str) -> Vec<Value> {
 fn declared() -> Vec<(String, String)> {
     vec![
         ("block_number".into(), "u64".into()),
-        ("who".into(), "address".into()),
+        // Text, not `address`: these rows name their actors `x`, `y` and `z`.
+        ("who".into(), "string".into()),
         ("amount".into(), "word32".into()),
         ("memo".into(), "string".into()),
     ]

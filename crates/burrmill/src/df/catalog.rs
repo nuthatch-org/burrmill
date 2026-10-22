@@ -299,6 +299,10 @@ impl TableProvider for SegmentTable {
             .iter()
             .map(|f| unlowered(f.clone(), &self.lowercase))
             .collect::<DFResult<Vec<_>>>()?;
+        let filters = filters
+            .into_iter()
+            .filter_map(|f| super::addresses::as_text_filter(f).transpose())
+            .collect::<DFResult<Vec<_>>>()?;
         if let Some(pred) = conjunction(filters) {
             let df_schema = DFSchema::try_from(self.schema.as_ref().clone())?;
             source = source.with_predicate(state.create_physical_expr(pred, &df_schema)?);
