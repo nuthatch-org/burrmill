@@ -516,6 +516,11 @@ impl MiniSession {
         self.addresses.note(table, columns);
     }
 
+    /// Addresses are text from now on; whether they were fixed binary until now.
+    pub fn addresses_off(&self) -> bool {
+        self.addresses.turn_off()
+    }
+
     pub fn register_table(&mut self, name: &str, table: Arc<dyn TableProvider>) {
         let new = provider_as_source(table);
         let old = self.tables.insert(name.to_string(), Arc::clone(&new));

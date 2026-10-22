@@ -111,7 +111,7 @@ impl ScalarUDFImpl for AddressBytes {
                 Some(b) => out.append_value(b)?,
                 None => {
                     return Err(datafusion_common::DataFusionError::Execution(format!(
-                        "not an address: {:?}",
+                        "{NOT_AN_ADDRESS}{:?}",
                         a.value(i)
                     )));
                 }
@@ -230,26 +230,40 @@ pub(super) fn rendered(
     Ok(Arc::new(ProjectionExec::try_new(exprs, plan)?))
 }
 
-/// By table name, the columns a host writes as addresses.
+/// What an address column holding something else refuses with; `Engine::stream` reads it.
+pub(super) const NOT_AN_ADDRESS: &str = "not an address: ";
+
+/// By table name, the columns a host writes as addresses, and whether the engine still reads
+/// them as fixed binary: it stops once a value in one of them is not an address.
 #[derive(Debug, Default, Clone)]
-pub struct Noted(Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>>);
+pub struct Noted {
+    columns: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>>,
+    off: Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl Noted {
     pub fn note(&self, table: &str, columns: impl IntoIterator<Item = String>) {
         let columns: Vec<String> = columns.into_iter().collect();
-        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = self.columns.lock().unwrap_or_else(|e| e.into_inner());
         match columns.is_empty() {
             true => m.remove(table),
             false => m.insert(table.to_string(), columns),
         };
     }
     fn of(&self, table: &str) -> Vec<String> {
-        self.0
+        if self.off.load(std::sync::atomic::Ordering::Relaxed) {
+            return Vec::new();
+        }
+        self.columns
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(table)
             .cloned()
             .unwrap_or_default()
+    }
+    /// Reads addresses as text from now on; whether they were fixed binary until now.
+    pub fn turn_off(&self) -> bool {
+        !self.off.swap(true, std::sync::atomic::Ordering::Relaxed)
     }
 }
 
