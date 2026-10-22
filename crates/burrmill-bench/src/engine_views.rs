@@ -345,7 +345,24 @@ pub fn analyze(root: &str, view: &str) -> anyhow::Result<()> {
         .collect();
     let view = view.to_string();
     std::thread::spawn(move || -> anyhow::Result<()> {
-        let mut e = burrmill::Engine::open_nest(&root_owned)?;
+        // `BUDGET_MB` (with `THREADS`, default 2) opens the session a host opens, batch size and all.
+        let mut e = match std::env::var("BUDGET_MB")
+            .ok()
+            .and_then(|m| m.parse::<usize>().ok())
+        {
+            Some(mb) => burrmill::Engine::open_nest_budgeted(
+                &root_owned,
+                burrmill::Budget {
+                    memory_bytes: mb << 20,
+                    threads: std::env::var("THREADS")
+                        .ok()
+                        .and_then(|t| t.parse().ok())
+                        .unwrap_or(2),
+                    spill: None,
+                },
+            )?,
+            None => burrmill::Engine::open_nest(&root_owned)?,
+        };
         for (n, b) in &views {
             let _ = e.register_view(n, b);
         }
@@ -361,6 +378,25 @@ pub fn analyze(root: &str, view: &str) -> anyhow::Result<()> {
             Ok(())
         })?;
         eprintln!("first run: {rows} rows in {} ms", t.elapsed().as_millis());
+        // Warm repeats before the analysed run, so a profiler over the process sees the query
+        // rather than opening the nest.
+        let repeats = std::env::var("REPEATS")
+            .ok()
+            .and_then(|r| r.parse::<usize>().ok())
+            .unwrap_or(0);
+        for i in 0..repeats {
+            let t = std::time::Instant::now();
+            let mut rows = 0usize;
+            e.sql_for_each(&sql, |b| {
+                rows += b.num_rows();
+                Ok(())
+            })?;
+            eprintln!(
+                "repeat {}: {rows} rows in {} ms",
+                i + 1,
+                t.elapsed().as_millis()
+            );
+        }
         use arrow::array::Array;
         for b in e.sql(&format!("EXPLAIN ANALYZE {sql}"))? {
             let plan = b.column(1);

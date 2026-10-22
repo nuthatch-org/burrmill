@@ -106,7 +106,7 @@ fn a_window_emits_batches_of_the_batch_size() {
     assert_eq!(rows, want, "budgeted and unbudgeted answers differ");
     // A budget's batch size, as `session.rs` sets it.
     assert!(
-        largest <= 128,
+        largest <= 2048,
         "the window emitted a batch of {largest} rows"
     );
 }

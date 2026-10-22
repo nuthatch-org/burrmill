@@ -127,8 +127,10 @@ impl MiniSession {
             let share = b.memory_bytes / (8 * threads.max(1));
             config.options_mut().execution.sort_spill_reservation_bytes =
                 share.clamp(256 << 10, 10 << 20);
-            // 8,192 rows of a wide cell exist before the caller caps the answer (#1650).
-            config = config.with_batch_size(128);
+            // A projection is not a pool consumer, so a batch of wide cells exists whole before
+            // the caller caps the answer (#1650). 2,048 is DuckDB's vector, which that issue
+            // costs as fine; 128 was 1.7-2.1x on every heavy view (where-the-time-goes.md).
+            config = config.with_batch_size(2048);
         }
         // The footer cache sits outside the pool, so under a budget it takes an eighth of the bound
         // rather than adding to it. Only `SegmentTable`'s reader factory consults it.

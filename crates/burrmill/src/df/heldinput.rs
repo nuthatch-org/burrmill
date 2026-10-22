@@ -9,7 +9,8 @@
 //!
 //! A sort that spills merges one run per batch it holds, and each run's merge cursor holds the
 //! whole of a batch no larger than an output batch. At a budget's 128-row batches the cursors were
-//! as large as the input, and the merge took the pool before writing anything (#56).
+//! as large as the input, and the merge took the pool before writing anything (#56). The cursors
+//! are the input over the ratio of a run to an output batch, so the runs grow with the batch.
 
 use std::fmt;
 use std::sync::Arc;
@@ -233,12 +234,13 @@ impl ExecutionPlan for CoalesceExec {
     }
 }
 
-/// Rows and bytes a [`GatherExec`] gathers a sort's input up to.
-const GATHER_ROWS: usize = 8192;
-const GATHER_BYTES: usize = 1 << 20;
+/// Rows and bytes a [`GatherExec`] gathers a sort's input up to: 32 of a budget's 2,048-row
+/// batches, which a 3,000,000-row sort spills under a 32 MB budget with room to halve.
+const GATHER_ROWS: usize = 65536;
+const GATHER_BYTES: usize = 8 << 20;
 
 /// A sort's input gathered into batches of up to [`GATHER_ROWS`] rows or [`GATHER_BYTES`] bytes, so
-/// its spill merges a few hundred runs rather than one per 128 rows.
+/// its spill merges a few hundred runs rather than one per scan batch.
 ///
 /// A hash join's build side too, with its view columns copied into one buffer per gathered batch
 /// (`compact`). Built from 128-row batches, the join's table kept a buffer for each, and every batch
@@ -514,7 +516,7 @@ mod tests {
     fn a_sorts_input_is_gathered_to_its_row_bound_in_order() {
         let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
         let mut next = 0;
-        let sizes = std::iter::repeat_n(100, 90).chain([10_000, 5]);
+        let sizes = std::iter::repeat_n(1000, 126).chain([10_000, 5]);
         let batches = sizes
             .map(|n| {
                 let v = Int64Array::from_iter_values(next..next + n);
@@ -524,7 +526,7 @@ mod tests {
             .collect();
         let out = gathered(batches);
         let rows: Vec<_> = out.iter().map(|b| b.num_rows()).collect();
-        assert_eq!(rows, [8200, 10_800, 5]);
+        assert_eq!(rows, [66_000, 70_000, 5]);
         let values: Vec<i64> = out
             .iter()
             .flat_map(|b| b.column(0).as_primitive::<Int64Type>().values().to_vec())
@@ -541,9 +543,9 @@ mod tests {
             vec![Arc::new(StringArray::from(vec![wide.as_str(); 60]))],
         )
         .unwrap();
-        let out = gathered(vec![batch.clone(), batch.clone(), batch]);
+        let out = gathered(vec![batch; 15]);
         let rows: Vec<_> = out.iter().map(|b| b.num_rows()).collect();
-        assert_eq!(rows, [120, 60]);
+        assert_eq!(rows, [840, 60]);
 
         // A view slice is counted for the whole buffer it keeps, so it passes on alone.
         let schema = Arc::new(Schema::new(vec![Field::new(
@@ -551,7 +553,8 @@ mod tests {
             DataType::Utf8View,
             false,
         )]));
-        let views = Arc::new(StringViewArray::from(vec![wide.as_str(); 200])) as ArrayRef;
+        let wider = "x".repeat(50_000);
+        let views = Arc::new(StringViewArray::from(vec![wider.as_str(); 200])) as ArrayRef;
         let batch = RecordBatch::try_new(schema, vec![views]).unwrap();
         let out = gathered(vec![batch.slice(0, 10), batch.slice(10, 10)]);
         let rows: Vec<_> = out.iter().map(|b| b.num_rows()).collect();
