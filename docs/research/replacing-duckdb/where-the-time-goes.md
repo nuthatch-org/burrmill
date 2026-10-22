@@ -106,6 +106,50 @@ For comparison the budgeted 8-thread, 8,192-row runs are 15-25% slower than the 
 on the same views (749 vs 610 ms on the ledger). The pool's accounting and the sort spill
 reservation are the only differences; not chased here either.
 
+## The split on the production shape (2 threads, 2 GB, 2,048 rows, landed tree)
+
+Self-time, percent of samples, the same buckets as above.
+
+| view | memcpy/alloc | decode | other | sort/merge | cast | agg/hash | window | kernel | take | LOWER | join | expr |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| lodestar_indexer_ledger | 22.9 | 16.7 | 13.1 | 13.0 | 6.5 | 5.6 | 5.9 | 3.1 | 3.1 | 2.4 | 1.2 | 1.2 |
+| lodestar_indexer_deployment_daily | 24.1 | 15.7 | 11.6 | 10.8 | 8.6 | 6.5 | 4.7 | 4.0 | 3.4 | 2.2 | 1.5 | 1.1 |
+| lodestar_delegator_stakes | 23.3 | 15.5 | 11.8 | 11.0 | 7.9 | 7.4 | 4.6 | 3.0 | 3.5 | 2.8 | 1.2 | 2.1 |
+| lodestar_network | 27.7 | 13.4 | 12.8 | 6.4 | 6.4 | 10.9 | 3.1 | 6.2 | 2.3 | 1.4 | 1.1 | 1.2 |
+| lodestar_indexers | 22.2 | 16.7 | 13.0 | 10.2 | 7.9 | 6.7 | 4.8 | 3.6 | 2.8 | 2.9 | 2.0 | 1.4 |
+| lodestar_indexer_daily | 24.3 | 16.2 | 10.9 | 9.9 | 9.2 | 7.0 | 4.4 | 3.8 | 3.5 | 2.4 | 1.6 | 1.2 |
+
+Reading the ledger's callers at this shape, by what perf can attribute:
+
+- **Reading segments is 10% before any decoding.** `object_store`'s local `get_ranges` allocates
+  a zero-filled `Vec` per range (`__memset`, 3.1%) and `pread` copies the page cache into it
+  (`_copy_to_iter`, 6.8%). Snappy is 3.7%. The zero fill is avoidable outright; the copy only by
+  mapping the segment, which the RSS gate would see as resident pages.
+- **The allocator is 12%** (`malloc` 3.1, `_int_malloc` 2.9, `cfree` 2.7, `malloc_consolidate`
+  1.8, `_int_free_chunk` 1.3, `_int_realloc` 0.7), and it is glibc's: the bench had no global
+  allocator, while nuthatch runs jemalloc. The bench now takes jemalloc on Linux. Re-profiled on
+  main after #113 (transcript, "Allocator and gather controls"): jemalloc is 10.7% of samples
+  across 67 symbols against glibc's 12.3%, and 3-6% of wall time (ledger 919 against 959 ms,
+  network 1,853 against 1,953). So the cost is the number of allocations, not the allocator:
+  per-batch `Arc<dyn Array>`, `Vec<u8>` growth and `ScalarValue` churn, which a batch of 2,048
+  rows pays 16x less often than 128 and still pays.
+- **Main itself moved.** The matrix above was taken on 4b4c8e8 with the batch size patched;
+  the same ledger on c22b182, fourteen PRs later, is 919 ms at 2 GB and 2 threads against
+  1,419, and `lodestar_network` 1,853 against 3,239. The shared-definition pruning (#97, #99,
+  #102) and the one-pass running windows (#107) are in that. At 512 MB and 2 threads without a
+  spill directory the ledger and `lodestar_indexers` now refuse in the sort where 4b4c8e8
+  answered, with either gather size, so that is the pool being charged honestly for what a shared subquery holds (#99), not
+  the gathered runs; production's allocations nest runs at 2 GB with spill.
+- **Planning is 2% of a 1.4 s statement** (`core::fmt::write` 0.9 and `stacker::remaining_stack`
+  1.0 on the `burrmill-plan` thread, inside `SqlToRel`): about 30 ms per statement to plan the
+  ledger's union, paid on every statement. A plan cache keyed by statement text would remove it.
+- **Byte-view work is 10%** across 22 symbols (sort comparators on `GenericStringType`, view
+  builders, `is_ascii`, gc after take) against 10% on primitive sort and take. So address
+  columns as fixed binary, the second lever above, is bounded by about 10% at this shape, not the
+  40-50% the unbudgeted buckets suggested: the rest of memcpy/alloc is the allocator and the
+  reads.
+- The text-to-i128 cast is 6.5-9.2%, the largest single symbol on every view.
+
 ## What follows
 
 1. **Batch size under a budget: landed at 2,048** (session.rs, same day). The 128 came from
@@ -125,8 +169,12 @@ reservation are the only differences; not chased here either.
    unchanged in kind, it merges a few hundred runs as before, only each is eight times larger.
 2. **Address columns as fixed binary.** Sort, join, group-by and every copy between operators are
    on 42-byte strings that are 20 bytes of information. A `FixedSizeBinary(20)` view of the
-   address columns, applied at scan, would shrink sort/merge, take and memcpy together, which is
-   40-50% of self-time on the ledger family. Touches the catalogue, not the segment format.
+   address columns, applied at scan, would shrink the byte-view share, which is about 10% at the
+   production shape. The views apply `lower()` (already folded to the column), equality, `count`,
+   six literal comparisons and fourteen concatenations to those columns, so the surface is small.
+   Touches the catalogue, not the segment format. Behind the reads and the planner now.
+2a. **Segment reads without the zero fill**, and a plan cache per statement text: 3% and 2% on
+   the ledger, each a day, measured above.
 3. **Decode.** Snappy at 3-4% plus buffer slicing. A different codec at seal is nuthatch's call
    and a format change; parked.
 4. **Parse-at-seal for uint256.** Removes the 4-9% cast. Format change; parked behind 2.

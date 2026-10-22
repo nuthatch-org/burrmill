@@ -345,24 +345,7 @@ pub fn analyze(root: &str, view: &str) -> anyhow::Result<()> {
         .collect();
     let view = view.to_string();
     std::thread::spawn(move || -> anyhow::Result<()> {
-        // `BUDGET_MB` (with `THREADS`, default 2) opens the session a host opens, batch size and all.
-        let mut e = match std::env::var("BUDGET_MB")
-            .ok()
-            .and_then(|m| m.parse::<usize>().ok())
-        {
-            Some(mb) => burrmill::Engine::open_nest_budgeted(
-                &root_owned,
-                burrmill::Budget {
-                    memory_bytes: mb << 20,
-                    threads: std::env::var("THREADS")
-                        .ok()
-                        .and_then(|t| t.parse().ok())
-                        .unwrap_or(2),
-                    spill: None,
-                },
-            )?,
-            None => burrmill::Engine::open_nest(&root_owned)?,
-        };
+        let mut e = open_engine(&root_owned)?;
         for (n, b) in &views {
             let _ = e.register_view(n, b);
         }
@@ -462,6 +445,29 @@ pub fn explain(root: &str, view: &str) -> anyhow::Result<()> {
 
 /// `engine-sql <nest> <sql-file>...`: each file's statement on both engines over the nest with its
 /// views, as a sorted row multiset in nuthatch's JSON, with warm medians of 5.
+/// `BUDGET_MB` (with `THREADS`, default 2) opens the session a host opens, batch size and all.
+fn open_engine(root: &Path) -> anyhow::Result<burrmill::Engine> {
+    Ok(
+        match std::env::var("BUDGET_MB")
+            .ok()
+            .and_then(|m| m.parse::<usize>().ok())
+        {
+            Some(mb) => burrmill::Engine::open_nest_budgeted(
+                root,
+                burrmill::Budget {
+                    memory_bytes: mb << 20,
+                    threads: std::env::var("THREADS")
+                        .ok()
+                        .and_then(|t| t.parse().ok())
+                        .unwrap_or(2),
+                    spill: None,
+                },
+            )?,
+            None => burrmill::Engine::open_nest(root)?,
+        },
+    )
+}
+
 pub fn sql_files(root: &str, files: &[String]) -> anyhow::Result<()> {
     let nest = load_nest(Path::new(root))?;
     let conn = duck(&nest)?;
@@ -475,7 +481,7 @@ pub fn sql_files(root: &str, files: &[String]) -> anyhow::Result<()> {
         .map(|v| (v.name.clone(), v.body.clone()))
         .collect();
     let engine = std::thread::spawn(move || -> anyhow::Result<_> {
-        let mut e = burrmill::Engine::open_nest(&root_owned)?;
+        let mut e = open_engine(&root_owned)?;
         for (n, b) in &views {
             let _ = e.register_view(n, b);
         }

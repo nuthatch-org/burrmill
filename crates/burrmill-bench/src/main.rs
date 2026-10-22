@@ -90,6 +90,13 @@ mod heap;
 #[cfg(feature = "alloc-stats")]
 #[global_allocator]
 static ALLOC: heap::Counting = heap::Counting;
+#[cfg(all(
+    not(feature = "alloc-stats"),
+    target_os = "linux",
+    not(target_env = "musl")
+))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() -> anyhow::Result<()> {
     // DuckDB follows the host's zone, as it does in nuthatch, which sets none; hosted servers run in

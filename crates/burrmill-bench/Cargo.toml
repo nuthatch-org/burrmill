@@ -42,6 +42,10 @@ async-trait = "0.1"
 bytes = "1"
 serde_json = "1"
 
+# nuthatch's allocator, so a profile of the bench charges what production pays.
+[target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
+tikv-jemallocator = "0.6"
+
 [features]
 # A counting global allocator: peak live heap beside peak RSS, to tell bytes held from bytes the
 # allocator has freed and kept. Off by default; it costs an atomic per allocation.
