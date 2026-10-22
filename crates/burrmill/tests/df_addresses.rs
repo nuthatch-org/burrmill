@@ -428,9 +428,116 @@ fn a_value_that_is_not_an_address_turns_the_lever_off() {
         col(&e, "SELECT count(*) FROM t WHERE who IN ('0xa', '0xb')"),
         vec![json!(2)]
     );
+    // A shared definition that met the value fails every reader the same way, and the statement
+    // runs again over text rather than a reader running the definition's plan a second time.
+    assert_eq!(
+        col(
+            &e,
+            "WITH g AS (SELECT who FROM t) SELECT (SELECT count(*) FROM g) \
+             + (SELECT count(*) FROM g WHERE who IS NOT NULL)"
+        ),
+        vec![json!(4)]
+    );
     let plan = rows(&e, "EXPLAIN SELECT who FROM t")
         .iter()
         .map(|r| r.to_string())
         .collect::<String>();
     assert!(!plan.contains("address_bytes"), "{plan}");
+}
+
+/// A recursive query's work table keeps the text schema the parser gave it, so the query runs over
+/// text: the network nest's views walk one.
+#[test]
+fn a_recursive_query_over_addresses_answers() {
+    let (_t, e) = engine();
+    assert_eq!(
+        col(
+            &e,
+            "WITH RECURSIVE walk AS (SELECT who, block_number FROM t WHERE block_number = 1 \
+             UNION ALL SELECT t.who, t.block_number FROM walk JOIN t \
+             ON t.block_number = walk.block_number + 1 WHERE t.block_number <= 3) \
+             SELECT who FROM walk ORDER BY block_number"
+        ),
+        vec![json!(addr(1)), json!(addr(2)), json!(addr(1))]
+    );
+    assert_eq!(
+        col(
+            &e,
+            &format!(
+                "WITH RECURSIVE walk AS (SELECT who, block_number FROM t WHERE block_number = 1 \
+                 UNION ALL SELECT t.who, t.block_number FROM walk JOIN t \
+                 ON t.block_number = walk.block_number + 1 WHERE t.block_number <= 6) \
+                 SELECT count(*) FROM walk WHERE who = '{}'",
+                addr(2)
+            )
+        ),
+        vec![json!(2)]
+    );
+}
+
+/// A correlated subquery's outer reference carries the type the parser recorded, text; inside the
+/// subquery it meets the address as fixed binary, and the key stays a bare column for the rules
+/// that rank or decorrelate it.
+#[test]
+fn a_correlated_subquery_keys_on_the_address() {
+    let (_t, e) = engine();
+    assert_eq!(
+        col(
+            &e,
+            "SELECT (SELECT u.amount FROM u WHERE u.who = t.who ORDER BY u.block_number DESC LIMIT 1) \
+             FROM t WHERE block_number <= 2 ORDER BY block_number"
+        ),
+        vec![json!("one"), json!("two")]
+    );
+    assert_eq!(
+        col(
+            &e,
+            "SELECT count(*) FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.who = t.who)"
+        ),
+        vec![json!(4)]
+    );
+    let plan = rows(
+        &e,
+        "EXPLAIN SELECT (SELECT u.amount FROM u WHERE u.who = t.who ORDER BY u.block_number DESC LIMIT 1) FROM t",
+    )
+    .iter()
+    .map(|r| r.to_string())
+    .collect::<String>();
+    assert!(!plan.contains("address_text"), "{plan}");
+}
+
+/// A filter the optimizer pushed through the decode compares the text column, so the scan's
+/// filter decodes nothing, and a window partitioned by the filtered address plans: the sort
+/// enforcement and the plan check agree on what is constant.
+#[test]
+fn a_pushed_filter_compares_the_text_and_a_window_over_it_plans() {
+    let (_t, e) = engine();
+    let physical = rows(
+        &e,
+        &format!(
+            "EXPLAIN SELECT block_number FROM t WHERE who = '{}'",
+            addr(3)
+        ),
+    )
+    .into_iter()
+    .find(|r| r["plan_type"] == "physical_plan")
+    .map(|r| r["plan"].as_str().unwrap_or_default().to_string())
+    .unwrap_or_default();
+    let filter = physical
+        .lines()
+        .find(|l| l.contains("FilterExec"))
+        .unwrap_or_else(|| panic!("{physical}"));
+    assert!(!filter.contains("address_bytes"), "{filter}");
+    assert_eq!(
+        col(
+            &e,
+            &format!(
+                "SELECT block_number FROM (SELECT block_number, row_number() OVER \
+                 (PARTITION BY who ORDER BY block_number DESC) AS rn FROM t WHERE who = '{}') \
+                 WHERE rn = 1",
+                addr(3)
+            )
+        ),
+        vec![json!(7)]
+    );
 }

@@ -448,7 +448,7 @@ impl Engine {
         }
         let _pass = self.gate.enter();
         if tokio::runtime::Handle::try_current().is_err() {
-            return self.runtime().block_on(self.stream(logical, &mut f));
+            return self.runtime().block_on(self.stream(logical, sql, &mut f));
         }
         // A host's runtime drives this thread and tokio will not block it, so the statement runs on
         // a thread of its own; its batches come back here, and `f` stays on the caller's thread.
@@ -456,7 +456,8 @@ impl Engine {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             let run = s.spawn(move || {
                 let mut send = |b| tx.send(b).map_err(|_| BurrmillError::Cancelled);
-                self.runtime().block_on(self.stream(logical, &mut send))
+                self.runtime()
+                    .block_on(self.stream(logical, sql, &mut send))
             });
             // Refused by `f`: `rx` goes with the loop, the next send fails and the statement ends.
             let taken = rx.into_iter().try_for_each(&mut f);
@@ -492,7 +493,7 @@ impl Engine {
         if self.cancel.is_cancelled() {
             return Err(BurrmillError::Cancelled);
         }
-        self.stream(logical, &mut f).await
+        self.stream(logical, sql, &mut f).await
     }
 
     /// Addresses are read as fixed binary while every value in an address column is one. The
@@ -501,11 +502,12 @@ impl Engine {
     async fn stream(
         &self,
         logical: datafusion_expr::LogicalPlan,
+        sql: &str,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
         let mut sent = 0usize;
         let r = self
-            .stream_once(logical.clone(), &mut |b| {
+            .stream_once(logical, &mut |b| {
                 sent += 1;
                 f(b)
             })
@@ -517,7 +519,9 @@ impl Engine {
                     && self.session.addresses_off() =>
             {
                 log::warn!("{m}: addresses are read as text from now on");
-                self.stream_once(logical, f).await
+                // Planned afresh: the plan that refused holds what its shared subqueries ran.
+                let fresh = plan_query(&self.session, sql)?;
+                self.stream_once(fresh, f).await
             }
             r => r,
         }

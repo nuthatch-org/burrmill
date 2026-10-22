@@ -363,42 +363,45 @@ impl MiniSession {
                     .collect(),
             ),
             // Last, so it sees the join filter after projection pushdown has made its operands columns.
-            physical_optimizers: PhysicalOptimizer::new()
-                .rules
-                .into_iter()
-                // Straight after DataFusion's own choice of sides, which without statistics is none.
-                .flat_map(|r| {
-                    let after_selection = r.name() == "join_selection";
-                    std::iter::once(r).chain(after_selection.then(|| {
-                        Arc::new(super::buildside::BuildOnSmaller)
-                            as Arc<dyn PhysicalOptimizerRule + Send + Sync>
-                    }))
-                })
-                .chain([
-                    Arc::new(super::topkfilter::TopKFilters)
-                        as Arc<dyn PhysicalOptimizerRule + Send + Sync>,
-                    Arc::new(super::rangejoin::RangeJoin),
-                    Arc::new(super::rangebounds::RangeBounds),
-                    Arc::new(super::joinfilters::ComputedKeyFilters),
-                    Arc::new(super::smallinputs::SmallInputs),
-                    Arc::new(super::heldinput::HeldInput),
-                ])
-                // Only a bounded pool charges the views; unbounded, the copy buys nothing.
-                .chain(budget.is_some().then(|| {
-                    Arc::new(super::compactviews::CompactViews)
+            physical_optimizers: std::iter::once(
+                // Before the sort and distribution passes, which read what a filter holds constant.
+                Arc::new(super::addresses::TextAddressFilters)
+                    as Arc<dyn PhysicalOptimizerRule + Send + Sync>,
+            )
+            .chain(PhysicalOptimizer::new().rules)
+            // Straight after DataFusion's own choice of sides, which without statistics is none.
+            .flat_map(|r| {
+                let after_selection = r.name() == "join_selection";
+                std::iter::once(r).chain(after_selection.then(|| {
+                    Arc::new(super::buildside::BuildOnSmaller)
                         as Arc<dyn PhysicalOptimizerRule + Send + Sync>
                 }))
-                .chain([
-                    Arc::new(super::cancel::Cancellable(cancel))
-                        as Arc<dyn PhysicalOptimizerRule + Send + Sync>,
-                    Arc::new(super::sharing::PublishShared),
-                ])
-                // A tab cannot spawn the task each partition would be coalesced on.
-                .chain(cfg!(target_arch = "wasm32").then(|| {
-                    Arc::new(super::sequential::Sequential)
-                        as Arc<dyn PhysicalOptimizerRule + Send + Sync>
-                }))
-                .collect(),
+            })
+            .chain([
+                Arc::new(super::topkfilter::TopKFilters)
+                    as Arc<dyn PhysicalOptimizerRule + Send + Sync>,
+                Arc::new(super::rangejoin::RangeJoin),
+                Arc::new(super::rangebounds::RangeBounds),
+                Arc::new(super::joinfilters::ComputedKeyFilters),
+                Arc::new(super::smallinputs::SmallInputs),
+                Arc::new(super::heldinput::HeldInput),
+            ])
+            // Only a bounded pool charges the views; unbounded, the copy buys nothing.
+            .chain(budget.is_some().then(|| {
+                Arc::new(super::compactviews::CompactViews)
+                    as Arc<dyn PhysicalOptimizerRule + Send + Sync>
+            }))
+            .chain([
+                Arc::new(super::cancel::Cancellable(cancel))
+                    as Arc<dyn PhysicalOptimizerRule + Send + Sync>,
+                Arc::new(super::sharing::PublishShared),
+            ])
+            // A tab cannot spawn the task each partition would be coalesced on.
+            .chain(cfg!(target_arch = "wasm32").then(|| {
+                Arc::new(super::sequential::Sequential)
+                    as Arc<dyn PhysicalOptimizerRule + Send + Sync>
+            }))
+            .collect(),
             execution_props: ExecutionProps::new(),
             table_options: TableOptions::new(),
             extension_types: Arc::new(MemoryExtensionTypeRegistry::default()),
