@@ -66,6 +66,8 @@ pub struct MiniSession {
     window: HashMap<String, Arc<WindowUDF>>,
     expr_planners: Vec<Arc<dyn ExprPlanner>>,
     tables: HashMap<String, Arc<dyn TableSource>>,
+    /// By table, the columns the host writes as addresses; the `Addresses` rule reads it.
+    addresses: super::addresses::Noted,
     known: std::sync::Mutex<Option<super::dialect::Known>>,
     /// Built on first read: rebuilding it at every registration was quadratic in the views.
     information_schema: std::sync::Mutex<Option<HashMap<String, Arc<dyn TableSource>>>>,
@@ -188,6 +190,12 @@ impl MiniSession {
             }
             scalar.insert(f.name().to_string(), f);
         }
+        for f in [
+            super::addresses::AddressBytes::udf(),
+            super::addresses::AddressText::udf(),
+        ] {
+            scalar.insert(f.name().to_string(), f);
+        }
         let from_hex = super::dialect::FromHex::udf();
         scalar.insert("unhex".to_string(), Arc::clone(&from_hex));
         scalar.insert(from_hex.name().to_string(), from_hex);
@@ -269,6 +277,7 @@ impl MiniSession {
             Arc::new(datafusion_functions_aggregate::planner::AggregateFunctionPlanner),
             Arc::new(datafusion_functions_window::planner::WindowFunctionPlanner),
         ];
+        let addresses = super::addresses::Noted::default();
         let catalog_list = Arc::new(MemoryCatalogProviderList::new());
         let catalog = MemoryCatalogProvider::new();
         catalog
@@ -288,6 +297,7 @@ impl MiniSession {
             window,
             expr_planners,
             tables: HashMap::new(),
+            addresses: addresses.clone(),
             information_schema: std::sync::Mutex::new(None),
             hidden: |_| false,
             known: std::sync::Mutex::new(None),
@@ -297,6 +307,8 @@ impl MiniSession {
                     Arc::new(super::outerorder::OutermostOrder)
                         as Arc<dyn AnalyzerRule + Send + Sync>,
                     Arc::new(ResolveGroupingFunction::new()),
+                    // Before every rule that compares text, an address is fixed binary or text.
+                    Arc::new(super::addresses::Addresses(addresses.clone())),
                     Arc::new(super::nullsub::NullableSubqueries::default()),
                     // Before coercion: DuckDB's text comparisons depend on what was written.
                     Arc::new(super::dialect::DuckComparisons),
@@ -497,6 +509,11 @@ impl MiniSession {
             None => self.tables.remove(name),
         };
         self.renamed(name, old.as_ref(), source.as_ref());
+    }
+
+    /// `columns` of `table` are addresses: fixed binary inside a plan.
+    pub fn note_addresses(&self, table: &str, columns: impl IntoIterator<Item = String>) {
+        self.addresses.note(table, columns);
     }
 
     pub fn register_table(&mut self, name: &str, table: Arc<dyn TableProvider>) {

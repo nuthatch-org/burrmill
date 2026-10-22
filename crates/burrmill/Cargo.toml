@@ -276,6 +276,11 @@ path = "tests/df_lowercase.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_addresses"
+path = "tests/df_addresses.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_running"
 path = "tests/df_running.rs"
 required-features = ["datafusion"]

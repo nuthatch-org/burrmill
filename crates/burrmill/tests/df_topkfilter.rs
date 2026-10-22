@@ -83,7 +83,8 @@ fn scan(plan: &str) -> (&str, &str) {
 }
 
 /// Under a budget a sort over text runs over offsets, and its thresholds cannot be compared with the
-/// scan's views, so that one top-k keeps its own filter and reads every row group.
+/// scan's views, so that one top-k keeps its own filter and reads every row group. An address is
+/// fixed binary inside the plan, so its thresholds reach the scan like a number's.
 #[test]
 fn top_k_skips_the_row_groups_its_filter_rules_out() {
     let tmp = tempfile::tempdir().unwrap();
@@ -106,7 +107,6 @@ fn top_k_skips_the_row_groups_its_filter_rules_out() {
             let plan = analyze(&e, &sql);
             let (line, read) = scan(&plan);
             match (budget, key) {
-                (true, "who") => assert_eq!(read, "32.00 K", "{line}"),
                 // Unbudgeted, the segment is split over eight partitions that race the filter.
                 (false, _) => assert!(line.contains("DynamicFilter"), "{key}: {line}"),
                 // The first row group is read whole; every other is ruled out once it holds 3 rows.

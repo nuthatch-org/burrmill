@@ -171,6 +171,12 @@ impl Engine {
                 crate::BurrmillError::Substrate(format!("the segments of {name} disagree: {e}"))
             })?)
         };
+        let addresses: Vec<String> = declared
+            .iter()
+            .filter(|(_, t)| t == "address")
+            .map(|(c, _)| c.clone())
+            .collect();
+        self.session.note_addresses(&raw, addresses.iter().cloned());
         let raw_provider: Arc<dyn TableProvider> = if files.is_empty() {
             Arc::new(MemTable::try_new(raw_schema.clone(), vec![vec![]]).map_err(df_err)?)
         } else {
@@ -181,11 +187,7 @@ impl Engine {
                     files,
                     wide: Vec::new(),
                     keyed,
-                    lowercase: declared
-                        .iter()
-                        .filter(|(_, t)| t == "address")
-                        .map(|(c, _)| c.clone())
-                        .collect(),
+                    lowercase: addresses.clone(),
                 },
                 self.threads,
                 self.cancel.clone(),
@@ -203,6 +205,8 @@ impl Engine {
             let hot_name = format!("{name}__hot");
             let (schema, batch) = json_batch(hot, true)?;
             present.extend(schema.fields().iter().map(|f| f.name().clone()));
+            self.session
+                .note_addresses(&hot_name, addresses.iter().cloned());
             let hot_provider: Arc<dyn TableProvider> =
                 Arc::new(MemTable::try_new(schema, vec![vec![batch]]).map_err(df_err)?);
             self.session

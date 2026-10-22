@@ -66,9 +66,13 @@ fn engine() -> Engine {
 }
 
 fn engine_with(memory_bytes: usize, spill: Option<(PathBuf, u64)>) -> Engine {
+    engine_threads(memory_bytes, 8, spill)
+}
+
+fn engine_threads(memory_bytes: usize, threads: usize, spill: Option<(PathBuf, u64)>) -> Engine {
     let mut e = Engine::open_empty_budgeted(burrmill::Budget {
         memory_bytes,
-        threads: 8,
+        threads,
         spill,
     })
     .unwrap();
@@ -359,11 +363,14 @@ fn shared_subquery() {
 
 /// A shared subquery the pool cannot hold is read by running its plan for each reader, and a
 /// `RepartitionExec` runs once per partition: the gate's `poi.overview` panicked under the second
-/// reader with "partition not used yet" (nuthatch 5.9.0 bump, 2026-10-22).
+/// reader with "partition not used yet" (nuthatch 5.9.0 bump, 2026-10-22). 61 MB of rows under a
+/// 48 MB budget: the readers' own aggregates and buffers need about a quarter of that.
 #[test]
 fn a_shared_subquery_too_big_to_hold_is_read_by_each_reader() {
-    let e = engine_with(32 << 20, None);
-    let sql = "WITH g AS (SELECT k, n, repeat('x', 800) AS w FROM \
+    // Two partitions: the repartition's channels, which buffer these wide rows, stay small
+    // beside the pool whichever way the readers interleave.
+    let e = engine_threads(48 << 20, 2, None);
+    let sql = "WITH g AS (SELECT k, n, repeat('x', 1200) AS w FROM \
                           (SELECT block_number % 50000 AS k, count(*) AS n FROM t GROUP BY 1)) \
                SELECT (SELECT count(*) FROM g) + (SELECT sum(n) FROM g WHERE k > 10) \
                       + (SELECT max(length(w)) FROM g) AS total";
@@ -374,9 +381,9 @@ fn a_shared_subquery_too_big_to_hold_is_read_by_each_reader() {
     );
     let (rows, _) = run(&e, sql).unwrap_or_else(|m| panic!("the shared read refused: {m}"));
     assert_eq!(rows.len(), 1);
-    // 50,000 groups of four rows, 11 of them at k <= 10, and a width of 800; a sum of BIGINT
+    // 50,000 groups of four rows, 11 of them at k <= 10, and a width of 1,200; a sum of BIGINT
     // is a HUGEINT, which is served as text.
-    assert_eq!(rows[0]["total"], Value::from("250756"));
+    assert_eq!(rows[0]["total"], Value::from("251156"));
 }
 
 /// The QoS nest's budget: 2 GB over eight partitions, where production refused in `ExternalSorter`
@@ -733,7 +740,8 @@ fn a_join_partitioned_by_a_window_key_meets_every_row() {
 #[test]
 fn a_partitioned_join_filter_at_the_scan_drops_no_row() {
     let e = engine();
-    let sql = "SELECT count(*) AS n FROM t a JOIN t b ON a.who = b.who";
+    // On `amount`, the text column: an address joins as fixed binary, not as a view.
+    let sql = "SELECT count(*) AS n FROM t a JOIN t b ON a.amount = b.amount";
     let shown = plan(&e, sql);
     assert!(
         shown.contains("HashJoinExec: mode=Partitioned")

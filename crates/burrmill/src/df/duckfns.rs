@@ -328,7 +328,8 @@ fn json_path(p: &str) -> Option<Vec<Step>> {
             let end = r.find(['.', '[']).unwrap_or(r.len());
             steps.push(Step::Key(r[..end].to_string()));
             rest = &r[end..];
-        } else if let Some(r) = rest.strip_prefix('[') {
+        } else {
+            let r = rest.strip_prefix('[')?;
             let end = r.find(']')?;
             let inner = &r[..end];
             let i = match inner.strip_prefix('#') {
@@ -338,8 +339,6 @@ fn json_path(p: &str) -> Option<Vec<Step>> {
             };
             steps.push(Step::Index(i));
             rest = &r[end + 1..];
-        } else {
-            return None;
         }
     }
     Some(steps)
