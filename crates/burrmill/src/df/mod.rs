@@ -125,6 +125,21 @@ pub struct Engine {
     bound_segments: HashMap<(std::path::PathBuf, u64), arrow::datatypes::SchemaRef>,
 }
 
+fn nest_tables(root: &Path) -> Result<Vec<NestTable>> {
+    let mut tables = discover_tables(&root.join("segments"))?;
+    let schema = root.join("schema.json");
+    if schema.is_file() {
+        apply_schema_json(&mut tables, &schema)?;
+    }
+    if tables.is_empty() {
+        return Err(BurrmillError::NoSegments(format!(
+            "no tables under {}",
+            root.display()
+        )));
+    }
+    Ok(tables)
+}
+
 impl Engine {
     /// Open every table under a `segments/` directory.
     pub fn open_segments(segments: &Path) -> Result<Self> {
@@ -140,18 +155,17 @@ impl Engine {
 
     /// Open a nest root (`segments/` plus optional `schema.json` for unsealed and `_dec`).
     pub fn open_nest(root: &Path) -> Result<Self> {
-        let mut tables = discover_tables(&root.join("segments"))?;
-        let schema = root.join("schema.json");
-        if schema.is_file() {
-            apply_schema_json(&mut tables, &schema)?;
-        }
-        if tables.is_empty() {
-            return Err(BurrmillError::NoSegments(format!(
-                "no tables under {}",
-                root.display()
-            )));
-        }
-        Self::from_tables(tables, Limits::default().max_threads, None, None)
+        Self::from_tables(
+            nest_tables(root)?,
+            Limits::default().max_threads,
+            None,
+            None,
+        )
+    }
+
+    /// As `open_nest`, held to `budget`: the session a host opens, batch size included.
+    pub fn open_nest_budgeted(root: &Path, budget: Budget) -> Result<Self> {
+        Self::from_tables(nest_tables(root)?, budget.threads, Some(budget), None)
     }
 
     /// Open a nest held in an object store, `<root>/segments/` plus an optional `<root>/schema.json`:

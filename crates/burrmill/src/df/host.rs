@@ -409,10 +409,10 @@ fn widen_integers(schemas: Vec<Schema>) -> Vec<Schema> {
 mod tests {
     use super::super::{Budget, Engine};
 
-    /// #1650: `/sql` opens a budgeted session. A thousand rows must not arrive as one batch, or the
-    /// caller's byte cap runs only after that batch already exists.
+    /// #1650: `/sql` opens a budgeted session. Ten thousand rows must not arrive as one batch, or
+    /// the caller's byte cap runs only after that batch already exists.
     #[test]
-    fn a_budgeted_session_reads_128_rows_at_a_time() {
+    fn a_budgeted_session_reads_2048_rows_at_a_time() {
         let budgeted = Engine::open_empty_budgeted(Budget {
             memory_bytes: 256 << 20,
             threads: 1,
@@ -421,18 +421,18 @@ mod tests {
         .unwrap();
         let mut sizes = Vec::new();
         budgeted
-            .sql_for_each("SELECT range FROM range(1000)", |batch| {
+            .sql_for_each("SELECT range FROM range(10000)", |batch| {
                 sizes.push(batch.num_rows());
                 Ok(())
             })
             .unwrap();
         assert_eq!(
             sizes.iter().copied().max(),
-            Some(128),
-            "a budgeted read of 1000 rows arrived as {sizes:?}"
+            Some(2048),
+            "a budgeted read of 10000 rows arrived as {sizes:?}"
         );
 
-        // No budget keeps DataFusion's own batch, so a fold scan is not cut into 128s.
+        // No budget keeps DataFusion's own batch, so a fold scan is not cut into 2048s.
         let plain = Engine::open_empty().unwrap();
         let mut plain_sizes = Vec::new();
         plain
@@ -443,7 +443,7 @@ mod tests {
             .unwrap();
         let plain_max = plain_sizes.iter().copied().max().unwrap_or(0);
         assert!(
-            plain_max > 128,
+            plain_max > 2048,
             "an unbudgeted read was also cut down: {plain_sizes:?}"
         );
     }

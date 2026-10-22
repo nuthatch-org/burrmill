@@ -1,0 +1,816 @@
+# engine-analyze under perf, thinkpad (32 cores, hybrid), 2026-10-22
+# nest: ~/scratch/gan-portable, 1,925 segments. burrmill 4b8c8e8 + REPEATS/BUDGET_MB probe knobs on engine-analyze.
+# perf record -F 499 -g, self-time bucketed by symbol class (P-core and E-core tables weighted by cycle count).
+# Method and reading: docs/research/replacing-duckdb/where-the-time-goes.md
+
+## unbudgeted: Engine::open_nest, 8 threads, batch 8192, REPEATS=3
+=== lodestar_indexer_ledger repeat 1: 1678525 rows in 628 ms;repeat 2: 1678525 rows in 610 ms;repeat 3: 1678525 rows in 604 ms;
+stage                        self%
+memcpy/alloc                 21.65
+sort/merge                   17.66
+parquet decode               12.58
+other                         9.70
+kernel (page faults, io)      6.21
+text->int cast                5.87
+aggregate/hash                5.80
+window                        5.48
+take/interleave               4.50
+LOWER()                       3.04
+expr eval                     1.31
+join                          1.06
+tokio/sync                    0.24
+=== lodestar_indexer_deployment_daily repeat 1: 808984 rows in 910 ms;repeat 2: 808984 rows in 891 ms;repeat 3: 808984 rows in 891 ms;
+stage                        self%
+memcpy/alloc                 28.19
+sort/merge                   11.05
+parquet decode               10.76
+text->int cast                8.24
+aggregate/hash                7.88
+other                         7.12
+kernel (page faults, io)      6.13
+take/interleave               5.35
+window                        3.43
+LOWER()                       2.84
+join                          1.69
+expr eval                     1.27
+tokio/sync                    0.17
+=== lodestar_delegator_stakes repeat 1: 323180 rows in 853 ms;repeat 2: 323180 rows in 895 ms;repeat 3: 323180 rows in 809 ms;
+stage                        self%
+memcpy/alloc                 23.28
+sort/merge                   13.67
+parquet decode               12.99
+aggregate/hash                9.02
+other                         8.15
+text->int cast                7.02
+kernel (page faults, io)      4.81
+take/interleave               4.33
+window                        3.60
+LOWER()                       3.15
+expr eval                     2.01
+join                          1.19
+tokio/sync                    0.28
+=== lodestar_delegators repeat 1: 309868 rows in 223 ms;repeat 2: 309868 rows in 232 ms;repeat 3: 309868 rows in 216 ms;
+stage                        self%
+memcpy/alloc                 24.73
+aggregate/hash               14.75
+parquet decode               13.34
+kernel (page faults, io)     12.46
+text->int cast                9.85
+other                         6.52
+take/interleave               5.01
+sort/merge                    4.23
+expr eval                     3.55
+LOWER()                       2.95
+join                          1.01
+tokio/sync                    0.29
+=== lodestar_allocations repeat 1: 260828 rows in 209 ms;repeat 2: 260828 rows in 188 ms;repeat 3: 260828 rows in 183 ms;
+stage                        self%
+memcpy/alloc                 28.83
+parquet decode               14.90
+kernel (page faults, io)     12.87
+other                        11.47
+aggregate/hash               11.09
+take/interleave               6.27
+text->int cast                5.61
+expr eval                     3.11
+join                          2.67
+sort/merge                    0.59
+tokio/sync                    0.40
+window                        0.28
+LOWER()                       0.01
+=== lodestar_delegations repeat 1: 608700 rows in 46 ms;repeat 2: 608700 rows in 44 ms;repeat 3: 608700 rows in 39 ms;
+stage                        self%
+parquet decode               28.99
+kernel (page faults, io)     19.45
+memcpy/alloc                 18.11
+text->int cast               10.81
+other                         9.23
+LOWER()                       8.60
+expr eval                     3.97
+tokio/sync                    0.58
+aggregate/hash                0.50
+=== lodestar_network repeat 1: 1 rows in 1363 ms;repeat 2: 1 rows in 1296 ms;repeat 3: 1 rows in 1305 ms;
+stage                        self%
+memcpy/alloc                 31.99
+aggregate/hash               12.91
+other                         9.15
+parquet decode                8.88
+sort/merge                    6.99
+text->int cast                6.64
+kernel (page faults, io)      6.63
+take/interleave               3.63
+window                        2.40
+LOWER()                       1.53
+expr eval                     1.06
+join                          1.03
+tokio/sync                    0.16
+=== lodestar_indexer_daily repeat 1: 19733 rows in 904 ms;repeat 2: 19733 rows in 938 ms;repeat 3: 19733 rows in 906 ms;
+stage                        self%
+memcpy/alloc                 28.30
+sort/merge                   10.41
+parquet decode               10.23
+text->int cast                8.65
+aggregate/hash                8.25
+other                         7.23
+kernel (page faults, io)      6.90
+take/interleave               5.40
+window                        3.18
+LOWER()                       2.68
+join                          1.72
+expr eval                     1.19
+tokio/sync                    0.11
+=== lodestar_indexers repeat 1: 184 rows in 849 ms;repeat 2: 184 rows in 859 ms;repeat 3: 184 rows in 811 ms;
+stage                        self%
+memcpy/alloc                 22.25
+parquet decode               13.69
+sort/merge                   13.26
+other                         9.01
+text->int cast                7.75
+aggregate/hash                7.74
+kernel (page faults, io)      5.05
+window                        4.14
+take/interleave               3.92
+LOWER()                       3.33
+join                          1.69
+expr eval                     1.43
+tokio/sync                    0.24
+
+## production default: Budget 512 MB, 2 threads, batch 128, no spill, REPEATS=3
+=== prod512t2 lodestar_indexer_ledger  first run: 1678525 rows in 2707 ms;repeat 1: 1678525 rows in 2703 ms;repeat 2: 1678525 rows in 2759 ms;repeat 3: 1678525 rows in 2665 ms;
+stage                        self%
+memcpy/alloc                 30.54
+parquet decode               16.39
+other                        13.71
+sort/merge                    7.74
+kernel (page faults, io)      5.16
+window                        3.96
+text->int cast                3.86
+aggregate/hash                3.81
+take/interleave               3.22
+expr eval                     2.63
+LOWER()                       1.45
+join                          0.64
+tokio/sync                    0.51
+=== prod512t2 lodestar_indexer_deployment_daily  
+stage                        self%
+memcpy/alloc                 27.00
+kernel (page faults, io)     19.04
+other                        16.42
+parquet decode               15.80
+text->int cast                8.11
+aggregate/hash                4.47
+expr eval                     4.41
+take/interleave               2.87
+LOWER()                       1.39
+tokio/sync                    0.28
+join                          0.15
+window                        0.05
+=== prod512t2 lodestar_delegator_stakes  
+stage                        self%
+memcpy/alloc                 29.67
+other                        15.53
+kernel (page faults, io)     14.41
+parquet decode               11.40
+aggregate/hash               10.21
+text->int cast                6.84
+expr eval                     4.40
+LOWER()                       2.17
+take/interleave               1.69
+sort/merge                    1.42
+tokio/sync                    1.24
+join                          0.95
+window                        0.14
+=== prod512t2 lodestar_network  
+stage                        self%
+memcpy/alloc                 33.14
+other                        17.97
+parquet decode               13.33
+kernel (page faults, io)      8.61
+aggregate/hash                8.35
+text->int cast                7.85
+expr eval                     3.84
+sort/merge                    1.88
+LOWER()                       1.57
+tokio/sync                    1.27
+take/interleave               1.02
+window                        0.39
+join                          0.32
+=== prod512t2 lodestar_indexers  first run: 184 rows in 3452 ms;repeat 1: 184 rows in 3356 ms;repeat 2: 184 rows in 3386 ms;repeat 3: 184 rows in 3340 ms;
+stage                        self%
+memcpy/alloc                 28.62
+parquet decode               17.57
+other                        13.54
+sort/merge                    6.29
+aggregate/hash                5.40
+text->int cast                5.19
+kernel (page faults, io)      3.67
+expr eval                     3.15
+take/interleave               2.92
+window                        2.56
+LOWER()                       1.87
+join                          1.26
+tokio/sync                    0.47
+=== prod512t2 lodestar_indexer_daily  
+stage                        self%
+memcpy/alloc                 29.90
+kernel (page faults, io)     17.15
+other                        16.14
+parquet decode               13.25
+text->int cast                8.51
+expr eval                     4.84
+aggregate/hash                4.36
+take/interleave               3.22
+LOWER()                       1.67
+tokio/sync                    0.89
+
+## matrix: Budget 2048 MB, threads 2/8, batch 128 then 8192 (session.rs patched for the probe), REPEATS=2
+=== b2048t2 lodestar_indexer_ledger  first run: 1678525 rows in 2771 ms;repeat 1: 1678525 rows in 2667 ms;repeat 2: 1678525 rows in 2765 ms;
+stage                        self%
+memcpy/alloc                 30.77
+parquet decode               16.72
+other                        13.19
+sort/merge                    7.65
+kernel (page faults, io)      5.01
+aggregate/hash                3.82
+text->int cast                3.77
+window                        3.53
+expr eval                     2.93
+take/interleave               2.80
+LOWER()                       1.29
+join                          0.78
+tokio/sync                    0.51
+=== b2048t2 lodestar_indexer_deployment_daily  first run: 808984 rows in 5255 ms;repeat 1: 808984 rows in 5036 ms;repeat 2: 808984 rows in 5049 ms;
+stage                        self%
+memcpy/alloc                 30.42
+parquet decode               16.28
+other                        13.34
+sort/merge                    6.20
+text->int cast                5.18
+aggregate/hash                5.07
+kernel (page faults, io)      4.71
+take/interleave               3.37
+window                        2.71
+expr eval                     2.66
+LOWER()                       1.41
+join                          0.97
+tokio/sync                    0.53
+=== b2048t2 lodestar_delegator_stakes  
+stage                        self%
+memcpy/alloc                 27.63
+other                        19.35
+kernel (page faults, io)     15.51
+parquet decode               11.77
+aggregate/hash                9.86
+text->int cast                5.56
+expr eval                     3.45
+LOWER()                       2.35
+take/interleave               1.98
+sort/merge                    1.46
+join                          0.80
+tokio/sync                    0.31
+window                        0.02
+=== b2048t2 lodestar_network  first run: 1 rows in 6780 ms;repeat 1: 1 rows in 6596 ms;repeat 2: 1 rows in 6605 ms;
+stage                        self%
+aggregate/hash               30.60
+memcpy/alloc                 23.89
+parquet decode                9.79
+other                         9.74
+kernel (page faults, io)      3.63
+text->int cast                3.35
+sort/merge                    3.28
+take/interleave               1.93
+expr eval                     1.78
+window                        1.60
+LOWER()                       0.75
+join                          0.62
+tokio/sync                    0.30
+=== b2048t2 lodestar_indexers  first run: 184 rows in 3516 ms;repeat 1: 184 rows in 3415 ms;repeat 2: 184 rows in 3325 ms;
+stage                        self%
+memcpy/alloc                 28.83
+parquet decode               16.94
+other                        13.66
+sort/merge                    6.47
+aggregate/hash                5.03
+text->int cast                4.78
+kernel (page faults, io)      4.24
+take/interleave               3.00
+expr eval                     2.96
+window                        2.92
+LOWER()                       1.84
+join                          1.32
+tokio/sync                    0.49
+=== b2048t2 lodestar_indexer_daily  first run: 19733 rows in 5245 ms;repeat 1: 19733 rows in 5047 ms;repeat 2: 19733 rows in 5160 ms;
+stage                        self%
+memcpy/alloc                 30.38
+parquet decode               16.51
+other                        13.01
+sort/merge                    6.32
+aggregate/hash                5.00
+text->int cast                4.90
+kernel (page faults, io)      4.86
+take/interleave               3.64
+expr eval                     2.79
+window                        2.74
+LOWER()                       1.27
+join                          0.94
+tokio/sync                    0.51
+=== b2048t8 lodestar_indexer_ledger  first run: 1678525 rows in 1548 ms;repeat 1: 1678525 rows in 1344 ms;repeat 2: 1678525 rows in 1340 ms;
+stage                        self%
+memcpy/alloc                 30.77
+parquet decode               16.18
+other                        14.50
+kernel (page faults, io)      6.99
+sort/merge                    6.50
+take/interleave               3.72
+aggregate/hash                3.63
+window                        3.32
+text->int cast                2.99
+expr eval                     2.95
+LOWER()                       1.17
+tokio/sync                    0.83
+join                          0.59
+=== b2048t8 lodestar_indexer_deployment_daily  first run: 808984 rows in 2448 ms;repeat 1: 808984 rows in 2455 ms;repeat 2: 808984 rows in 2469 ms;
+stage                        self%
+memcpy/alloc                 32.78
+parquet decode               14.62
+other                        12.89
+kernel (page faults, io)      8.59
+text->int cast                4.58
+sort/merge                    4.43
+aggregate/hash                4.17
+take/interleave               3.94
+window                        2.30
+expr eval                     2.25
+LOWER()                       1.12
+join                          0.85
+tokio/sync                    0.74
+=== b2048t8 lodestar_delegator_stakes  first run: 323180 rows in 2105 ms;repeat 1: 323180 rows in 2005 ms;repeat 2: 323180 rows in 2169 ms;
+stage                        self%
+memcpy/alloc                 31.99
+other                        14.07
+parquet decode               13.65
+kernel (page faults, io)      5.80
+sort/merge                    5.14
+expr eval                     4.57
+aggregate/hash                4.39
+text->int cast                3.92
+take/interleave               3.34
+window                        2.25
+LOWER()                       1.21
+join                          0.71
+tokio/sync                    0.68
+=== b2048t8 lodestar_network  first run: 1 rows in 2730 ms;repeat 1: 1 rows in 2652 ms;repeat 2: 1 rows in 2629 ms;
+stage                        self%
+memcpy/alloc                 31.19
+other                        13.10
+aggregate/hash               13.05
+parquet decode               11.35
+kernel (page faults, io)      8.36
+text->int cast                3.82
+sort/merge                    2.86
+take/interleave               2.71
+expr eval                     2.26
+window                        1.53
+tokio/sync                    0.67
+LOWER()                       0.63
+join                          0.59
+=== b2048t8 lodestar_indexers  first run: 184 rows in 1840 ms;repeat 1: 184 rows in 1734 ms;repeat 2: 184 rows in 1864 ms;
+stage                        self%
+memcpy/alloc                 30.31
+parquet decode               15.39
+other                        14.25
+kernel (page faults, io)      6.77
+sort/merge                    5.07
+aggregate/hash                5.04
+text->int cast                4.68
+take/interleave               3.21
+expr eval                     2.92
+window                        2.46
+LOWER()                       1.34
+join                          0.97
+tokio/sync                    0.89
+=== b2048t8 lodestar_indexer_daily  first run: 19733 rows in 2377 ms;repeat 1: 19733 rows in 2284 ms;repeat 2: 19733 rows in 2530 ms;
+stage                        self%
+memcpy/alloc                 33.16
+parquet decode               13.91
+other                        12.74
+kernel (page faults, io)      8.71
+text->int cast                4.84
+sort/merge                    4.36
+aggregate/hash                4.26
+take/interleave               3.99
+expr eval                     2.27
+window                        2.19
+LOWER()                       1.11
+join                          0.80
+tokio/sync                    0.68
+=== b2048t2bs8192 lodestar_indexer_ledger  first run: 1678525 rows in 1535 ms;repeat 1: 1678525 rows in 1431 ms;repeat 2: 1678525 rows in 1408 ms;
+stage                        self%
+memcpy/alloc                 22.63
+parquet decode               15.66
+sort/merge                   13.33
+other                        12.76
+text->int cast                6.96
+window                        6.56
+aggregate/hash                5.47
+kernel (page faults, io)      3.78
+take/interleave               3.28
+LOWER()                       2.46
+join                          1.57
+expr eval                     0.90
+tokio/sync                    0.14
+=== b2048t2bs8192 lodestar_indexer_deployment_daily  first run: 808984 rows in 2822 ms;repeat 1: 808984 rows in 2505 ms;repeat 2: 808984 rows in 2646 ms;
+stage                        self%
+memcpy/alloc                 24.12
+parquet decode               16.49
+other                        11.12
+sort/merge                   10.63
+text->int cast                8.64
+aggregate/hash                6.49
+window                        4.64
+kernel (page faults, io)      4.06
+take/interleave               3.74
+LOWER()                       2.41
+join                          1.76
+expr eval                     1.10
+tokio/sync                    0.06
+=== b2048t2bs8192 lodestar_delegator_stakes  first run: 323180 rows in 2201 ms;repeat 1: 323180 rows in 1987 ms;repeat 2: 323180 rows in 1949 ms;
+stage                        self%
+memcpy/alloc                 22.21
+parquet decode               16.44
+sort/merge                   11.49
+other                        11.02
+aggregate/hash                8.15
+text->int cast                7.37
+window                        5.01
+take/interleave               3.59
+kernel (page faults, io)      2.88
+LOWER()                       2.70
+expr eval                     2.23
+join                          1.47
+tokio/sync                    0.11
+=== b2048t2bs8192 lodestar_network  first run: 1 rows in 3355 ms;repeat 1: 1 rows in 3061 ms;repeat 2: 1 rows in 3176 ms;
+stage                        self%
+memcpy/alloc                 27.87
+other                        13.80
+parquet decode               13.27
+aggregate/hash                9.09
+text->int cast                7.27
+sort/merge                    6.75
+kernel (page faults, io)      6.13
+window                        3.26
+take/interleave               2.42
+LOWER()                       1.42
+join                          1.15
+expr eval                     1.05
+tokio/sync                    0.11
+=== b2048t2bs8192 lodestar_indexers  first run: 184 rows in 2044 ms;repeat 1: 184 rows in 2016 ms;repeat 2: 184 rows in 1970 ms;
+stage                        self%
+memcpy/alloc                 21.88
+parquet decode               17.45
+other                        12.44
+sort/merge                   10.32
+text->int cast                7.53
+aggregate/hash                7.06
+window                        4.61
+kernel (page faults, io)      4.55
+take/interleave               2.81
+LOWER()                       2.76
+join                          2.16
+expr eval                     0.94
+tokio/sync                    0.12
+=== b2048t2bs8192 lodestar_indexer_daily  first run: 19733 rows in 2824 ms;repeat 1: 19733 rows in 2666 ms;repeat 2: 19733 rows in 2809 ms;
+stage                        self%
+memcpy/alloc                 24.83
+parquet decode               15.81
+other                        10.64
+sort/merge                   10.16
+text->int cast                9.42
+aggregate/hash                6.42
+window                        4.79
+kernel (page faults, io)      4.16
+take/interleave               3.36
+LOWER()                       2.46
+join                          2.03
+expr eval                     0.97
+tokio/sync                    0.10
+=== b2048t8bs8192 lodestar_indexer_ledger  first run: 1678525 rows in 749 ms;repeat 1: 1678525 rows in 670 ms;repeat 2: 1678525 rows in 820 ms;
+stage                        self%
+memcpy/alloc                 23.49
+parquet decode               15.37
+other                        12.43
+sort/merge                   12.27
+text->int cast                6.44
+window                        6.35
+aggregate/hash                5.16
+kernel (page faults, io)      4.59
+take/interleave               3.75
+LOWER()                       2.47
+expr eval                     1.51
+join                          1.09
+tokio/sync                    0.13
+=== b2048t8bs8192 lodestar_indexer_deployment_daily  first run: 808984 rows in 1254 ms;repeat 1: 808984 rows in 1376 ms;repeat 2: 808984 rows in 1194 ms;
+stage                        self%
+memcpy/alloc                 26.42
+parquet decode               15.40
+other                         9.94
+text->int cast                9.51
+sort/merge                    8.70
+aggregate/hash                6.59
+kernel (page faults, io)      5.22
+window                        4.45
+take/interleave               4.19
+LOWER()                       2.36
+join                          1.49
+expr eval                     0.99
+tokio/sync                    0.06
+=== b2048t8bs8192 lodestar_delegator_stakes  first run: 323180 rows in 1057 ms;repeat 1: 323180 rows in 918 ms;repeat 2: 323180 rows in 978 ms;
+stage                        self%
+memcpy/alloc                 23.87
+parquet decode               15.62
+other                        11.42
+sort/merge                   10.02
+aggregate/hash                8.28
+text->int cast                7.18
+take/interleave               4.08
+window                        4.08
+kernel (page faults, io)      4.00
+LOWER()                       2.72
+expr eval                     2.22
+join                          1.24
+tokio/sync                    0.07
+=== b2048t8bs8192 lodestar_network  first run: 1 rows in 1755 ms;repeat 1: 1 rows in 1694 ms;repeat 2: 1 rows in 1580 ms;
+stage                        self%
+memcpy/alloc                 29.96
+other                        13.53
+parquet decode               12.23
+aggregate/hash                9.42
+text->int cast                6.92
+kernel (page faults, io)      6.72
+sort/merge                    5.95
+window                        2.90
+take/interleave               2.74
+LOWER()                       1.40
+expr eval                     1.14
+join                          0.97
+tokio/sync                    0.21
+=== b2048t8bs8192 lodestar_indexers  first run: 184 rows in 1029 ms;repeat 1: 184 rows in 934 ms;repeat 2: 184 rows in 953 ms;
+stage                        self%
+memcpy/alloc                 23.31
+parquet decode               16.68
+other                        12.55
+sort/merge                    8.94
+text->int cast                7.42
+aggregate/hash                6.82
+kernel (page faults, io)      4.94
+window                        4.65
+take/interleave               2.82
+LOWER()                       2.78
+join                          1.93
+expr eval                     1.42
+tokio/sync                    0.21
+=== b2048t8bs8192 lodestar_indexer_daily  first run: 19733 rows in 1231 ms;repeat 1: 19733 rows in 1372 ms;repeat 2: 19733 rows in 1155 ms;
+stage                        self%
+memcpy/alloc                 26.54
+parquet decode               14.80
+other                        10.36
+text->int cast               10.13
+sort/merge                    8.70
+aggregate/hash                6.66
+kernel (page faults, io)      4.97
+window                        4.08
+take/interleave               3.73
+LOWER()                       2.07
+join                          1.57
+expr eval                     1.04
+tokio/sync                    0.15
+MATRIXDONE
+
+## batch 2048, same budget, REPEATS=2
+=== b2048t2bs2048 lodestar_indexer_ledger  first run: 1678525 rows in 1475 ms;repeat 1: 1678525 rows in 1407 ms;repeat 2: 1678525 rows in 1419 ms;
+stage                        self%
+memcpy/alloc                 22.70
+parquet decode               16.06
+sort/merge                   13.20
+other                        12.22
+window                        6.78
+aggregate/hash                6.03
+text->int cast                5.84
+take/interleave               3.45
+kernel (page faults, io)      2.76
+LOWER()                       2.51
+expr eval                     1.20
+join                          1.13
+tokio/sync                    0.21
+=== b2048t2bs2048 lodestar_indexer_deployment_daily  first run: 808984 rows in 2759 ms;repeat 1: 808984 rows in 2912 ms;repeat 2: 808984 rows in 2736 ms;
+stage                        self%
+memcpy/alloc                 25.08
+parquet decode               16.05
+other                        10.79
+sort/merge                    9.80
+text->int cast                8.65
+aggregate/hash                6.46
+window                        4.48
+kernel (page faults, io)      4.05
+take/interleave               3.20
+LOWER()                       2.52
+join                          1.84
+expr eval                     1.15
+tokio/sync                    0.02
+=== b2048t2bs2048 lodestar_delegator_stakes  first run: 323180 rows in 2213 ms;repeat 1: 323180 rows in 2061 ms;repeat 2: 323180 rows in 2174 ms;
+stage                        self%
+memcpy/alloc                 23.20
+parquet decode               16.14
+other                        12.03
+sort/merge                   10.96
+aggregate/hash                7.58
+text->int cast                7.58
+window                        4.47
+take/interleave               2.93
+expr eval                     2.70
+LOWER()                       2.54
+kernel (page faults, io)      2.49
+join                          1.13
+tokio/sync                    0.12
+=== b2048t2bs2048 lodestar_network  first run: 1 rows in 3419 ms;repeat 1: 1 rows in 3239 ms;repeat 2: 1 rows in 3216 ms;
+stage                        self%
+memcpy/alloc                 27.62
+other                        13.33
+parquet decode               12.87
+aggregate/hash               11.56
+text->int cast                6.76
+sort/merge                    6.29
+kernel (page faults, io)      5.41
+window                        2.81
+take/interleave               2.39
+LOWER()                       1.35
+join                          1.20
+expr eval                     1.00
+tokio/sync                    0.15
+=== b2048t2bs2048 lodestar_indexers  first run: 184 rows in 2047 ms;repeat 1: 184 rows in 1877 ms;repeat 2: 184 rows in 1882 ms;
+stage                        self%
+memcpy/alloc                 23.39
+parquet decode               17.39
+other                        12.41
+sort/merge                   10.28
+text->int cast                6.92
+aggregate/hash                6.89
+window                        4.45
+kernel (page faults, io)      3.67
+take/interleave               2.85
+LOWER()                       2.52
+join                          1.90
+expr eval                     1.44
+tokio/sync                    0.27
+=== b2048t2bs2048 lodestar_indexer_daily  first run: 19733 rows in 3021 ms;repeat 1: 19733 rows in 2716 ms;repeat 2: 19733 rows in 2675 ms;
+stage                        self%
+memcpy/alloc                 24.58
+parquet decode               15.98
+other                        11.12
+sort/merge                    9.92
+text->int cast                9.02
+aggregate/hash                6.77
+window                        4.62
+kernel (page faults, io)      3.93
+take/interleave               3.10
+LOWER()                       2.43
+join                          1.68
+expr eval                     1.00
+tokio/sync                    0.12
+=== b2048t8bs2048 lodestar_indexer_ledger  first run: 1678525 rows in 708 ms;repeat 1: 1678525 rows in 674 ms;repeat 2: 1678525 rows in 693 ms;
+stage                        self%
+memcpy/alloc                 24.21
+parquet decode               16.36
+other                        13.90
+sort/merge                   11.76
+text->int cast                6.17
+window                        5.97
+aggregate/hash                5.33
+kernel (page faults, io)      3.38
+take/interleave               3.01
+LOWER()                       2.12
+expr eval                     1.62
+join                          1.16
+tokio/sync                    0.37
+=== b2048t8bs2048 lodestar_indexer_deployment_daily  first run: 808984 rows in 1250 ms;repeat 1: 808984 rows in 1143 ms;repeat 2: 808984 rows in 1082 ms;
+stage                        self%
+memcpy/alloc                 27.11
+parquet decode               14.49
+other                        10.26
+text->int cast                9.60
+sort/merge                    8.47
+aggregate/hash                6.40
+kernel (page faults, io)      5.17
+window                        3.88
+take/interleave               3.42
+LOWER()                       2.38
+join                          1.60
+expr eval                     1.02
+tokio/sync                    0.33
+=== b2048t8bs2048 lodestar_delegator_stakes  first run: 323180 rows in 998 ms;repeat 1: 323180 rows in 948 ms;repeat 2: 323180 rows in 950 ms;
+stage                        self%
+memcpy/alloc                 24.86
+parquet decode               15.49
+other                        11.49
+sort/merge                    9.59
+text->int cast                7.30
+aggregate/hash                7.04
+kernel (page faults, io)      4.17
+window                        4.03
+take/interleave               3.33
+expr eval                     2.70
+LOWER()                       2.68
+join                          1.30
+tokio/sync                    0.33
+=== b2048t8bs2048 lodestar_network  first run: 1 rows in 1705 ms;repeat 1: 1 rows in 1778 ms;repeat 2: 1 rows in 1750 ms;
+stage                        self%
+memcpy/alloc                 29.86
+other                        13.55
+parquet decode               12.22
+aggregate/hash                9.43
+kernel (page faults, io)      7.21
+text->int cast                6.78
+sort/merge                    5.36
+window                        2.69
+take/interleave               2.68
+expr eval                     1.34
+LOWER()                       1.26
+join                          1.03
+tokio/sync                    0.13
+=== b2048t8bs2048 lodestar_indexers  first run: 184 rows in 1067 ms;repeat 1: 184 rows in 941 ms;repeat 2: 184 rows in 942 ms;
+stage                        self%
+memcpy/alloc                 23.98
+parquet decode               16.68
+other                        12.64
+sort/merge                    8.30
+text->int cast                8.13
+aggregate/hash                7.47
+window                        4.26
+kernel (page faults, io)      4.20
+LOWER()                       2.66
+take/interleave               2.59
+join                          1.77
+expr eval                     1.53
+tokio/sync                    0.29
+=== b2048t8bs2048 lodestar_indexer_daily  first run: 19733 rows in 1267 ms;repeat 1: 19733 rows in 1363 ms;repeat 2: 19733 rows in 1371 ms;
+stage                        self%
+memcpy/alloc                 27.35
+parquet decode               14.59
+text->int cast               10.12
+other                        10.02
+sort/merge                    8.16
+aggregate/hash                6.56
+kernel (page faults, io)      5.16
+window                        4.17
+take/interleave               3.70
+LOWER()                       2.16
+join                          1.43
+expr eval                     1.28
+tokio/sync                    0.15
+BS2048DONE
+
+## engine-views TIMING=3 baseline, unbudgeted, same build (warm medians, DuckDB 1.5.5 beside)
+SAME  deployment_signal                  rows=14654   duck_ms=8      burrmill_ms=14     ratio=1.75
+SAME  open_allocations                   rows=6812    duck_ms=22     burrmill_ms=48     ratio=2.18
+SAME  port_queue                         rows=3943    duck_ms=31     burrmill_ms=60     ratio=1.94
+SAME  lodestar_allocations               rows=260828  duck_ms=321    burrmill_ms=212    ratio=0.66
+SAME  epoch_boundaries                   rows=269     duck_ms=20     burrmill_ms=24     ratio=1.20
+SAME  lodestar_epochs                    rows=269     duck_ms=732    burrmill_ms=629    ratio=0.86
+SAME  lodestar_disputes                  rows=8       duck_ms=4      burrmill_ms=8      ratio=2.00
+SAME  lodestar_escrow_transactions       rows=77941   duck_ms=33     burrmill_ms=11     ratio=0.33
+SAME  lodestar_delegations               rows=608700  duck_ms=132    burrmill_ms=34     ratio=0.26
+SAME  lodestar_network_params            rows=1       duck_ms=24     burrmill_ms=23     ratio=0.96
+SAME  lodestar_indexer_ledger            rows=1678525 duck_ms=1065   burrmill_ms=560    ratio=0.53
+SAME  lodestar_indexers                  rows=184     duck_ms=1352   burrmill_ms=847    ratio=0.63
+SAME  lodestar_indexer_pool              rows=143     duck_ms=1022   burrmill_ms=621    ratio=0.61
+SAME  lodestar_delegator_stakes          rows=323180  duck_ms=1815   burrmill_ms=810    ratio=0.45
+SAME  lodestar_delegators                rows=309868  duck_ms=1794   burrmill_ms=223    ratio=0.12
+SAME  lodestar_curator_signals           rows=15821   duck_ms=297    burrmill_ms=83     ratio=0.28
+SAME  lodestar_curators                  rows=1825    duck_ms=16     burrmill_ms=21     ratio=1.31
+SAME  lodestar_provisions                rows=95      duck_ms=262    burrmill_ms=127    ratio=0.48
+SAME  lodestar_network                   rows=1       duck_ms=1701   burrmill_ms=1277   ratio=0.75
+SAME  lodestar_deployments               rows=24833   duck_ms=540    burrmill_ms=428    ratio=0.79
+SAME  lodestar_indexer_deployment_daily  rows=808984  duck_ms=1763   burrmill_ms=926    ratio=0.53
+SAME  lodestar_indexer_daily             rows=19733   duck_ms=1683   burrmill_ms=968    ratio=0.58
+CHECK indexer-daily-sums burrmill=expected duckdb=expected
+CHECK pool-agrees    burrmill=expected duckdb=expected
+CHECK populations    burrmill=Ok(Array [Object {"deployments_ever_signalled": Number(14654), "still_signalled": Number(8382), "deployments_with_open_alloc": Number(6812)}]) duckdb=Ok(Array [Object {"deployments_ever_signalled": Number(14654), "still_signalled": Number(8382), "deployments_with_open_alloc": Number(6812)}])
+CHECK port-queue     burrmill=Ok(Array [Object {"unserved_signalled": Number(3943), "unserved_over_1000": Number(65), "largest_net_signal": Number(54336)}]) duckdb=Ok(Array [Object {"unserved_signalled": Number(3943), "unserved_over_1000": Number(65), "largest_net_signal": Number(54336)}])
+VIEWS	views=22	same=22	differing=0	failing=0	checks=2/4
+
+## Final tree (batch 2,048 in session.rs, GatherExec 65,536 rows / 8 MiB), 2026-10-22
+# TAG view  first;warm;warm (ms)
+=== final-b2048t2 lodestar_indexer_ledger  1527 ms;1447 ms;1376 ms;
+=== final-b2048t2 lodestar_indexer_deployment_daily  2842 ms;2777 ms;2694 ms;
+=== final-b2048t2 lodestar_delegator_stakes  2114 ms;2090 ms;2064 ms;
+=== final-b2048t2 lodestar_network  3543 ms;3278 ms;3299 ms;
+=== final-b2048t2 lodestar_indexers  2130 ms;1875 ms;1895 ms;
+=== final-b2048t2 lodestar_indexer_daily  2862 ms;2713 ms;2637 ms;
+=== final-b2048t8 lodestar_indexer_ledger  716 ms;725 ms;663 ms;
+=== final-b2048t8 lodestar_indexer_deployment_daily  1226 ms;1342 ms;1326 ms;
+=== final-b2048t8 lodestar_delegator_stakes  984 ms;1063 ms;931 ms;
+=== final-b2048t8 lodestar_network  1718 ms;1623 ms;1578 ms;
+=== final-b2048t8 lodestar_indexers  1049 ms;942 ms;969 ms;
+=== final-b2048t8 lodestar_indexer_daily  1306 ms;1250 ms;1214 ms;
+=== final-b512t2 lodestar_indexer_ledger  1477 ms;1430 ms;1429 ms;
+=== final-b512t2 lodestar_indexers  2132 ms;1968 ms;1924 ms;
