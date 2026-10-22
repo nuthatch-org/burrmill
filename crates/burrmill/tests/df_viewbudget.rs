@@ -357,6 +357,28 @@ fn shared_subquery() {
     );
 }
 
+/// A shared subquery the pool cannot hold is read by running its plan for each reader, and a
+/// `RepartitionExec` runs once per partition: the gate's `poi.overview` panicked under the second
+/// reader with "partition not used yet" (nuthatch 5.9.0 bump, 2026-10-22).
+#[test]
+fn a_shared_subquery_too_big_to_hold_is_read_by_each_reader() {
+    let e = engine_with(32 << 20, None);
+    let sql = "WITH g AS (SELECT k, n, repeat('x', 800) AS w FROM \
+                          (SELECT block_number % 50000 AS k, count(*) AS n FROM t GROUP BY 1)) \
+               SELECT (SELECT count(*) FROM g) + (SELECT sum(n) FROM g WHERE k > 10) \
+                      + (SELECT max(length(w)) FROM g) AS total";
+    let p = plan(&e, sql);
+    assert!(
+        p.contains("SharedExec") && p.contains("RepartitionExec"),
+        "the plan does not share a repartitioned definition: {p}"
+    );
+    let (rows, _) = run(&e, sql).unwrap_or_else(|m| panic!("the shared read refused: {m}"));
+    assert_eq!(rows.len(), 1);
+    // 50,000 groups of four rows, 11 of them at k <= 10, and a width of 800; a sum of BIGINT
+    // is a HUGEINT, which is served as text.
+    assert_eq!(rows[0]["total"], Value::from("250756"));
+}
+
 /// The QoS nest's budget: 2 GB over eight partitions, where production refused in `ExternalSorter`
 /// on 4.2.0. Without a spill directory the sort must answer in memory, and with one it must answer
 /// without needing to write there.
