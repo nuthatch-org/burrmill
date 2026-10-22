@@ -36,7 +36,7 @@ use datafusion_optimizer::optimize_projections::OptimizeProjections;
 use datafusion_optimizer::optimizer::{ApplyOrder, OptimizerConfig, OptimizerRule};
 use datafusion_physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion_physical_optimizer::output_requirements::OutputRequirements;
-use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType, reset_plan_states};
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
@@ -1208,7 +1208,8 @@ impl ExecutionPlan for SharedExec {
                     plan.schema(),
                     futures::stream::iter(batches.clone().into_iter().map(Ok)),
                 )),
-                Held::TooBig => execute_stream(plan, ctx)?,
+                // A `RepartitionExec` runs once per partition, and `hold` already ran this one.
+                Held::TooBig => execute_stream(reset_plan_states(plan)?, ctx)?,
             };
             Ok::<_, DataFusionError>(rows)
         })
