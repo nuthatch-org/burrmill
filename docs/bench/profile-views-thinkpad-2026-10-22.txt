@@ -814,3 +814,18 @@ VIEWS	views=22	same=22	differing=0	failing=0	checks=2/4
 === final-b2048t8 lodestar_indexer_daily  1306 ms;1250 ms;1214 ms;
 === final-b512t2 lodestar_indexer_ledger  1477 ms;1430 ms;1429 ms;
 === final-b512t2 lodestar_indexers  2132 ms;1968 ms;1924 ms;
+
+## Allocator and gather controls, burrmill c22b182 (main after #113), 2 GB / 2 threads unless tagged b512
+# jem = bench on tikv-jemallocator (nuthatch's), glibc = same tree with the allocator off, oldgather = 8,192-row / 1 MiB runs
+jem.txt:=== jem-b2048t2 lodestar_indexer_ledger  1031 ms;891 ms;919 ms;
+jem.txt:=== jem-b2048t2 lodestar_network  1842 ms;1872 ms;1853 ms;
+jem.txt:=== jem-b2048t2 lodestar_delegator_stakes  1646 ms;1539 ms;1601 ms;
+jem.txt:=== jem-b512t2 lodestar_indexer_ledger  
+jem.txt:=== jem-b512t2 lodestar_indexers  
+ctl.txt:=== glibc-b2048t2 lodestar_indexer_ledger  1047 ms;959 ms;938 ms;
+ctl.txt:=== glibc-b2048t2 lodestar_network  2187 ms;1953 ms;1980 ms;
+ctl.txt:=== glibc-b2048t2 lodestar_delegator_stakes  1704 ms;1631 ms;1572 ms;
+ctl.txt:=== glibc-b512t2 lodestar_indexer_ledger  
+ctl.txt:=== jem-oldgather-b512t2 lodestar_indexer_ledger  
+ctl.txt:=== jem-oldgather-b2048t2 lodestar_indexer_ledger  1027 ms;898 ms;914 ms;
+# b512t2 ledger refused on this tree with either gather: Memory Exhausted while Sorting (no spill dir); it answered in 1,430 ms on 4b4c8e8
