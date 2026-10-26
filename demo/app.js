@@ -65,7 +65,7 @@ function separators() {
   };
 }
 
-function promptText(question, card, grammar, feedback, mode) {
+function promptText(question, card, grammar, feedback, mode, identifiers) {
   const lines = [
     'Return one JSON object and no other text.',
     'Keys are sql, chart, and narration. No other keys.',
@@ -87,6 +87,16 @@ function promptText(question, card, grammar, feedback, mode) {
       'group_n is the measured size of a group.',
     );
   }
+  if (mode === 'pseudonymised') {
+    const list = identifiers.length ? identifiers.join(', ') : '(none)';
+    lines.push(
+      'Pseudonymised mode.',
+      'Identifier columns: ' + list + '.',
+      'Those columns come back as tokens such as CUSTOMER_ and a number. The same value keeps the same token.',
+      'Select an identifier column by name. A function around it is not sent.',
+      'Use the token or a slot when you mean that entity.',
+    );
+  }
   lines.push('', grammar, '', card, '', 'Question: ' + question);
   if (feedback) {
     lines.push('', 'Previous attempt:', feedback);
@@ -96,10 +106,14 @@ function promptText(question, card, grammar, feedback, mode) {
 
 function describeMode() {
   const mode = document.getElementById('mode').value;
-  document.getElementById('blurb').textContent =
-    mode === 'aggregates'
-      ? 'Groups of ' + AGGREGATE_K + ' or more can leave. Smaller groups stay.'
-      : 'The schema leaves this browser. The rows stay.';
+  const blurb = document.getElementById('blurb');
+  if (mode === 'aggregates') {
+    blurb.textContent = 'Groups of ' + AGGREGATE_K + ' or more can leave. Smaller groups stay.';
+  } else if (mode === 'pseudonymised') {
+    blurb.textContent = 'Identifier columns leave as tokens. The values stay here.';
+  } else {
+    blurb.textContent = 'The schema leaves this browser. The rows stay.';
+  }
 }
 
 function dropStatus(text) {
@@ -114,6 +128,17 @@ function dropStatus(text) {
   }
   if (payload.omitted) return 'No groups were sent.';
   return '';
+}
+
+function tokenStatus(text) {
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    return '';
+  }
+  if (payload.omitted) return 'No identifier rows were sent.';
+  return 'Identifier columns left as tokens.';
 }
 
 function requestBody(model, text) {
@@ -304,10 +329,11 @@ function render(shown, sql, answer) {
   if (answer.truncated) status('Result truncated at 5000 rows.');
 }
 
-function showColumns(columns) {
+function showColumns(columns, proposals) {
   const host = document.getElementById('columns');
   host.replaceChildren();
   fields.length = 0;
+  const proposed = new Map((proposals || []).map((item) => [item.name, item.kind]));
   for (const column of columns) {
     const row = document.createElement('div');
     row.className = 'column';
@@ -316,21 +342,25 @@ function showColumns(columns) {
     input.value = column.name;
     input.dataset.name = column.name;
     row.appendChild(input);
-    const field = { input, sign: null, date: null };
+    const field = { input, sign: null, date: null, identifier: null };
     if (column.numeric) {
-      field.sign = tick(row, 'Sign');
+      field.sign = tick(row, 'Sign', 'sign');
     }
     if (column.temporal) {
-      field.date = tick(row, 'Date range');
+      field.date = tick(row, 'Date range', '');
     }
+    const kind = proposed.get(column.name);
+    field.identifier = tick(row, kind ? 'Identifier, ' + kind : 'Identifier', 'identifier');
+    if (kind) field.identifier.checked = true;
     host.appendChild(row);
     fields.push(field);
   }
 }
 
-function tick(row, label) {
+function tick(row, label, className) {
   const box = document.createElement('input');
   box.type = 'checkbox';
+  if (className) box.className = className;
   const text = document.createElement('label');
   text.appendChild(box);
   text.appendChild(document.createTextNode(' ' + label));
@@ -345,7 +375,7 @@ async function openFile(file) {
   fileOpen = true;
   document.getElementById('setup').hidden = false;
   document.getElementById('ask').disabled = false;
-  showColumns(info.columns);
+  showColumns(info.columns, info.proposals);
   renderTable(document.getElementById('preview'), info.columns, info.preview);
   status('');
 }
@@ -385,16 +415,19 @@ async function ask() {
   status('');
   try {
     await applyRenames();
+    const mode = document.getElementById('mode').value;
+    const identifiers = mode === 'pseudonymised' ? ticked('identifier') : [];
+    await call('bind', { identifiers });
     const packed = await call('card', { signs: ticked('sign'), dates: ticked('date') });
     const model = document.getElementById('model').value.trim() || 'claude-sonnet-4-5';
     const locale = separators();
-    const mode = document.getElementById('mode').value;
     let feedback = '';
     let fedGroups = false;
+    let fedTokens = false;
     for (let attempt = 0; attempt < 4; attempt++) {
       const body = requestBody(
         model,
-        promptText(question, packed.card, packed.grammar, feedback, mode),
+        promptText(question, packed.card, packed.grammar, feedback, mode, identifiers),
       );
       logBody(body);
       if (document.getElementById('confirm').checked) await waitForSend();
@@ -422,6 +455,12 @@ async function ask() {
         feedback = await call('aggregates', { sql: reply.sql });
         fedGroups = true;
         status(dropStatus(feedback));
+        continue;
+      }
+      if (mode === 'pseudonymised' && !fedTokens && attempt < 3) {
+        feedback = await call('pseudonym', { sql: reply.sql });
+        fedTokens = true;
+        status(tokenStatus(feedback));
         continue;
       }
       if (queried.answer.rows.length === 0 && attempt < 3) {

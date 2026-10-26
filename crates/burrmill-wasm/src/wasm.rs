@@ -62,6 +62,41 @@ impl WasmSession {
             .await
             .map_err(|e| JsError::new(&e))
     }
+
+    pub fn proposals(&self) -> String {
+        serde_json::to_string(&self.inner.proposals()).unwrap_or_else(|_| "[]".into())
+    }
+
+    pub fn bind(&mut self, names_json: &str) -> Result<(), JsError> {
+        let names: Vec<String> =
+            serde_json::from_str(names_json).map_err(|e| JsError::new(&e.to_string()))?;
+        self.inner.bind(&names);
+        Ok(())
+    }
+
+    pub async fn pseudonym_feedback(&self, sql: &str) -> Result<String, JsError> {
+        self.inner
+            .pseudonym_feedback(sql)
+            .await
+            .map_err(|e| JsError::new(&e))
+    }
+
+    pub fn present_answer(
+        &self,
+        answer_json: &str,
+        chart_json: &str,
+        narration: &str,
+        group: &str,
+        decimal: &str,
+    ) -> Result<String, JsError> {
+        let answer = serde_json::from_str(answer_json).map_err(|e| JsError::new(&e.to_string()))?;
+        let chart: Chart =
+            serde_json::from_str(chart_json).map_err(|e| JsError::new(&e.to_string()))?;
+        json_out(
+            self.inner
+                .present_bound(&answer, &chart, narration, group, decimal),
+        )
+    }
 }
 
 fn json_out(value: impl serde::Serialize) -> Result<String, JsError> {

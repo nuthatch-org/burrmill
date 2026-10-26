@@ -3,7 +3,6 @@ import init, {
   parse_model,
   shape_feedback,
   error_feedback,
-  present_answer,
 } from './pkg/burrmill_wasm.js';
 
 const ready = init();
@@ -27,6 +26,7 @@ async function handle(msg) {
     return {
       columns: JSON.parse(session.columns()),
       preview: JSON.parse(session.preview(20)),
+      proposals: JSON.parse(session.proposals()),
     };
   }
   if (!session) {
@@ -57,9 +57,16 @@ async function handle(msg) {
   if (msg.op === 'aggregates') {
     return session.aggregate_feedback(msg.sql);
   }
+  if (msg.op === 'bind') {
+    session.bind(JSON.stringify(msg.identifiers || []));
+    return {};
+  }
+  if (msg.op === 'pseudonym') {
+    return session.pseudonym_feedback(msg.sql);
+  }
   if (msg.op === 'present') {
     return JSON.parse(
-      present_answer(
+      session.present_answer(
         JSON.stringify(msg.answer),
         JSON.stringify(msg.chart),
         msg.narration,

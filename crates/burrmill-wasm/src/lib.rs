@@ -1,11 +1,12 @@
-//! Schema mode and aggregates mode for a browser tab. Ingest, the engine, and the
-//! checks on a model's answer. The page does the HTTP.
+//! Schema mode, aggregates mode, and pseudonymised mode for a browser tab.
+//! Ingest, the engine, and the checks on a model's answer. The page does the HTTP.
 
 mod aggregates;
 mod chart;
 mod format;
 mod model;
 mod narrate;
+mod pseudonym;
 mod redact;
 mod session;
 

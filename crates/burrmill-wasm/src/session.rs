@@ -1,6 +1,6 @@
 //! One uploaded table, named `t`, and the card the page is allowed to send.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use arrow::array::{Array, AsArray};
@@ -17,7 +17,8 @@ use crate::format::{
     cell_string, format_date, format_number, format_timestamp, is_ident, is_numeric,
     reserved_suffix, type_name,
 };
-use crate::narrate::narrate;
+use crate::narrate::narrate_with;
+use crate::pseudonym::{self, TokenMap};
 use crate::redact::redact;
 
 /// How many result rows the page is handed. The engine's memory budget is what
@@ -62,6 +63,8 @@ pub struct Session {
     names: Vec<String>,
     secrets: Vec<String>,
     report: IngestReport,
+    marked: BTreeSet<String>,
+    tokens: TokenMap,
 }
 
 impl Session {
@@ -85,6 +88,8 @@ impl Session {
             names,
             secrets,
             report,
+            marked: BTreeSet::new(),
+            tokens: TokenMap::default(),
         };
         session.reregister()?;
         Ok(session)
@@ -234,6 +239,81 @@ impl Session {
         Ok(filter_payload(&self.query(&sized).await?))
     }
 
+    /// Replace the token map. An empty list clears it, so a later schema or
+    /// aggregates question neither restores a token nor sends one.
+    pub fn bind(&mut self, identifiers: &[String]) {
+        self.marked = self
+            .names
+            .iter()
+            .filter(|name| identifiers.iter().any(|id| id == *name))
+            .cloned()
+            .collect();
+        self.tokens = pseudonym::assign(&self.names, &self.marked, &self.batches);
+    }
+
+    pub fn proposals(&self) -> Vec<pseudonym::Proposal> {
+        let inferred: Vec<_> = self
+            .report
+            .columns
+            .iter()
+            .map(|c| c.inferred.clone())
+            .collect();
+        pseudonym::proposals(&self.names, &inferred, &self.batches)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn pseudonym_feedback(&self, sql: &str) -> Result<String, String> {
+        let identifiers = self.identifier_names();
+        if let Err(reason) = pseudonym::projection_allows(sql, &self.marked) {
+            return Ok(pseudonym::omitted(&identifiers, reason));
+        }
+        let out = self.query(sql)?;
+        self.masked(&identifiers, out)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn pseudonym_feedback(&self, sql: &str) -> Result<String, String> {
+        let identifiers = self.identifier_names();
+        if let Err(reason) = pseudonym::projection_allows(sql, &self.marked) {
+            return Ok(pseudonym::omitted(&identifiers, reason));
+        }
+        let out = self.query(sql).await?;
+        self.masked(&identifiers, out)
+    }
+
+    pub fn present_bound(
+        &self,
+        answer: &QueryOut,
+        chart: &Chart,
+        narration: &str,
+        group: &str,
+        decimal: &str,
+    ) -> PresentOut {
+        present_with(
+            answer,
+            chart,
+            narration,
+            group,
+            decimal,
+            self.tokens.restorations(),
+        )
+    }
+
+    fn identifier_names(&self) -> Vec<String> {
+        self.names
+            .iter()
+            .filter(|name| self.marked.contains(*name))
+            .cloned()
+            .collect()
+    }
+
+    fn masked(&self, identifiers: &[String], out: QueryOut) -> Result<String, String> {
+        match pseudonym::mask(&out, &self.tokens, !self.marked.is_empty()) {
+            Ok(rows) => Ok(pseudonym::payload(identifiers, &out, rows)),
+            Err(reason) => Ok(pseudonym::omitted(identifiers, reason)),
+        }
+    }
+
     fn guard(&self, sql: &str) -> Result<(), String> {
         let allowed = BTreeSet::from([TABLE.to_string()]);
         burrmill::inspect::reach_uploads(sql, &allowed).map_err(|e| self.fail(&e.to_string()))
@@ -312,6 +392,17 @@ pub fn present(
     group: &str,
     decimal: &str,
 ) -> PresentOut {
+    present_with(answer, chart, narration, group, decimal, &BTreeMap::new())
+}
+
+fn present_with(
+    answer: &QueryOut,
+    chart: &Chart,
+    narration: &str,
+    group: &str,
+    decimal: &str,
+    tokens: &BTreeMap<String, String>,
+) -> PresentOut {
     let chart = check_chart(chart, &answer.columns, answer.rows.len());
     let display = answer
         .rows
@@ -330,7 +421,14 @@ pub fn present(
                 .collect()
         })
         .collect();
-    match narrate(narration, &answer.columns, &answer.rows, group, decimal) {
+    match narrate_with(
+        narration,
+        &answer.columns,
+        &answer.rows,
+        group,
+        decimal,
+        tokens,
+    ) {
         Ok(text) => PresentOut {
             chart,
             display,
