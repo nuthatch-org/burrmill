@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://api.anthropic.com; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<!-- The meta policy is fixed for the document. The page calls only the host for the mode. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://api.anthropic.com http://127.0.0.1:*; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Burrmill</title>
 <link rel="stylesheet" href="style.css">
 </head>
@@ -32,7 +33,11 @@
       <option value="schema" selected>Schema</option>
       <option value="aggregates">Aggregates, k = 10</option>
       <option value="pseudonymised">Pseudonymised</option>
+      <option value="local-model">Local model</option>
     </select>
+  </label>
+  <label id="port-label" hidden>Port on this machine
+    <input id="port" type="text" inputmode="numeric" autocomplete="off">
   </label>
   <label>Question
     <textarea id="question" rows="3"></textarea>

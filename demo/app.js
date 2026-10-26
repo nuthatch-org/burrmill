@@ -65,7 +65,7 @@ function separators() {
   };
 }
 
-function promptText(question, card, grammar, feedback, mode, identifiers) {
+function promptText(question, card, grammar, feedback, mode, identifiers, rows) {
   const lines = [
     'Return one JSON object and no other text.',
     'Keys are sql, chart, and narration. No other keys.',
@@ -97,7 +97,13 @@ function promptText(question, card, grammar, feedback, mode, identifiers) {
       'Use the token or a slot when you mean that entity.',
     );
   }
+  if (mode === 'local-model') {
+    lines.push('Local model on this machine.', 'The rows are included below.');
+  }
   lines.push('', grammar, '', card, '', 'Question: ' + question);
+  if (rows) {
+    lines.push('', 'Rows:', rows);
+  }
   if (feedback) {
     lines.push('', 'Previous attempt:', feedback);
   }
@@ -111,9 +117,12 @@ function describeMode() {
     blurb.textContent = 'Groups of ' + AGGREGATE_K + ' or more can leave. Smaller groups stay.';
   } else if (mode === 'pseudonymised') {
     blurb.textContent = 'Identifier columns leave as tokens. The values stay here.';
+  } else if (mode === 'local-model') {
+    blurb.textContent = 'Rows go to 127.0.0.1. Nothing leaves this machine.';
   } else {
     blurb.textContent = 'The schema leaves this browser. The rows stay.';
   }
+  document.getElementById('port-label').hidden = mode !== 'local-model';
 }
 
 function dropStatus(text) {
@@ -149,12 +158,15 @@ function requestBody(model, text) {
   });
 }
 
-function logBody(body) {
+function modelUrl(mode, port) {
+  if (mode === 'local-model') return 'http://127.0.0.1:' + port + '/v1/messages';
+  return 'https://api.anthropic.com/v1/messages';
+}
+
+function logBody(url, body) {
   const bytes = new TextEncoder().encode(body).length;
   document.getElementById('log').appendChild(
-    document.createTextNode(
-      'POST https://api.anthropic.com/v1/messages\n' + bytes + ' bytes\n' + body + '\n\n',
-    ),
+    document.createTextNode('POST ' + url + '\n' + bytes + ' bytes\n' + body + '\n\n'),
   );
 }
 
@@ -173,17 +185,18 @@ function waitForSend() {
   });
 }
 
-async function post(body, key) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+async function post(url, body, key, mode) {
+  const headers = { 'content-type': 'application/json' };
+  if (mode !== 'local-model') {
+    headers['x-api-key'] = key;
+    headers['anthropic-version'] = '2023-06-01';
+    headers['anthropic-dangerous-direct-browser-access'] = 'true';
+  }
+  const res = await fetch(url, {
     method: 'POST',
     redirect: 'error',
     credentials: 'omit',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': key,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
+    headers,
     body,
   });
   if (!res.ok) {
@@ -401,11 +414,6 @@ function ticked(kind) {
 
 async function ask() {
   if (!fileOpen) return;
-  const key = document.getElementById('key').value;
-  if (!key) {
-    status('The key stays in this tab. Paste one to ask.');
-    return;
-  }
   const question = document.getElementById('question').value.trim();
   if (!question) {
     status('Pick a question.');
@@ -416,22 +424,46 @@ async function ask() {
   try {
     await applyRenames();
     const mode = document.getElementById('mode').value;
+    const key = document.getElementById('key').value;
+    let port = '';
+    if (mode === 'local-model') {
+      port = document.getElementById('port').value.trim();
+      const n = Number(port);
+      if (!/^[0-9]+$/.test(port) || n < 1 || n > 65535) {
+        status('The local model is a port on 127.0.0.1.');
+        return;
+      }
+    } else if (!key) {
+      status('The key stays in this tab. Paste one to ask.');
+      return;
+    }
     const identifiers = mode === 'pseudonymised' ? ticked('identifier') : [];
     await call('bind', { identifiers });
     const packed = await call('card', { signs: ticked('sign'), dates: ticked('date') });
+    let rows = '';
+    if (mode === 'local-model') {
+      const dumped = await call('query', { sql: 'SELECT * FROM t' });
+      if (dumped.error) throw new Error(dumped.error);
+      rows = JSON.stringify({
+        columns: dumped.answer.columns,
+        rows: dumped.answer.rows,
+        truncated: dumped.answer.truncated,
+      });
+    }
     const model = document.getElementById('model').value.trim() || 'claude-sonnet-4-5';
     const locale = separators();
+    const url = modelUrl(mode, port);
     let feedback = '';
     let fedGroups = false;
     let fedTokens = false;
     for (let attempt = 0; attempt < 4; attempt++) {
       const body = requestBody(
         model,
-        promptText(question, packed.card, packed.grammar, feedback, mode, identifiers),
+        promptText(question, packed.card, packed.grammar, feedback, mode, identifiers, rows),
       );
-      logBody(body);
+      logBody(url, body);
       if (document.getElementById('confirm').checked) await waitForSend();
-      const sent = await post(body, key);
+      const sent = await post(url, body, key, mode);
       if (sent.error) {
         feedback = await call('error', { message: sent.error });
         status(sent.error);
