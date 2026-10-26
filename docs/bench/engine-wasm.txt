@@ -1,8 +1,10 @@
 # Ingest plus the Burrmill operator, and the full Engine. RFC-0047, before the page.
 #
-# The 8 MB line is the demo path. That path is the Engine. It produced no .wasm.
+# The 8 MB line is the demo path, ingest plus the Engine. That module is under it.
 # Command: docs/bench/engine-wasm.sh
 # Toolchain: rustc 1.95.0 (59807616e 2026-04-14), host aarch64-apple-darwin.
+# The engine objects are compiled by Homebrew clang 23.1.3. Apple clang has no
+# wasm32 target, so the script points CC_wasm32_unknown_unknown at the LLVM one.
 # Profile: wasm-size. opt-level z, lto, one codegen unit, panic abort, symbols stripped.
 #
 # ingest + operator
@@ -18,15 +20,22 @@
 # recursive-protection pulls recursive, stacker and psm, and psm's build
 # script links an assembly stub with cc. The stub is inside this module.
 #
-# full Engine, and ingest + Engine
-# No artifact. The engine build in the script exits 101 in zstd-sys 2.0.16.
-# datafusion-common 55.0.0
-# depends on arrow-ipc with features lz4 and zstd, and that zstd is the C
-# library. The build script runs clang --target=wasm32-unknown-unknown, which
-# this host's clang cannot target, and it also compiles
-# zstd/lib/decompress/huf_decompress_amd64.S. The tree check names zstd-sys
-# and cc.
+# full Engine
+# Artifact: target/wasm32-unknown-unknown/wasm-size/engine-wasm.wasm
+# uncompressed   28469653
+# gzip -9         7411636
 #
-# Arrow in Cargo.lock stayed 59.2.0. Nothing here trims that edge to force a
-# number: a module that linked only because zstd was switched off would be a
-# different engine from the one the questions run on.
+# ingest + Engine, the single download
+# Artifact: target/wasm32-unknown-unknown/wasm-size/ingest-engine.wasm
+# uncompressed   28495604
+# gzip -9         7425144
+#
+# 8 MiB is 8388608. Both engine figures are under it. wasm-opt was not run.
+#
+# datafusion-common 55.0.0 depends on arrow-ipc with zstd, and that zstd is
+# the C library. zstd-sys would also compile huf_decompress_amd64.S into a
+# wasm32 object. The probe turns on zstd-sys's no_asm feature, which keeps the
+# C decoder and drops that file. zstd is not switched off. The tree check
+# names cc and zstd-sys for this graph.
+#
+# Arrow in Cargo.lock stayed 59.2.0.

@@ -41,7 +41,16 @@ cargo build -p burrmill-size --locked --target wasm32-unknown-unknown \
     --features link-wasm --bin ingest-operator --profile wasm-size
 measure target/wasm32-unknown-unknown/wasm-size/ingest-operator.wasm
 
-# Does not link. datafusion-common enables arrow-ipc/zstd; see engine-wasm.txt.
+# Apple clang has no wasm32 target. zstd-sys needs one; psm already linked without it.
+if ! printf 'int x;\n' | clang --target=wasm32-unknown-unknown -c -x c - -o /dev/null 2>/dev/null; then
+    llvm=/opt/homebrew/opt/llvm/bin/clang
+    if [ ! -x "$llvm" ]; then
+        printf 'no clang that accepts wasm32-unknown-unknown\n' >&2
+        exit 1
+    fi
+    export CC_wasm32_unknown_unknown="$llvm"
+fi
+
 cargo build -p burrmill-size --locked --target wasm32-unknown-unknown \
     --features engine --bins --profile wasm-size
 measure target/wasm32-unknown-unknown/wasm-size/engine-wasm.wasm

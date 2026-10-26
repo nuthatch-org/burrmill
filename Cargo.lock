@@ -821,6 +821,7 @@ dependencies = [
  "burrmill",
  "burrmill-ingest",
  "serde_json",
+ "zstd-sys",
 ]
 
 [[package]]

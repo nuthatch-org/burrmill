@@ -12,13 +12,17 @@ burrmill = { path = "../burrmill" }
 burrmill-ingest = { path = "../burrmill-ingest" }
 serde_json = { version = "1", optional = true }
 
+# datafusion-common turns on arrow-ipc's zstd. The default zstd-sys build then
+# compiles huf_decompress_amd64.S, which is not a wasm32 object. `no_asm` keeps
+# the C decoder. The crate is still C, and the tree check still fails on it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+zstd-sys = { version = "=2.0.16", optional = true, default-features = false, features = ["no_asm"] }
+
 [features]
 # Off by default, so a workspace test does not build the probes.
 link-wasm = []
 # The full Engine. Off for the operator measurement, or the two graphs unify.
-# datafusion-common enables arrow-ipc/zstd, and zstd-sys does not compile for
-# wasm32-unknown-unknown. The feature stays so that failure is the measurement.
-engine = ["link-wasm", "burrmill/datafusion", "dep:serde_json"]
+engine = ["link-wasm", "burrmill/datafusion", "dep:serde_json", "dep:zstd-sys"]
 
 [[bin]]
 name = "ingest-operator"

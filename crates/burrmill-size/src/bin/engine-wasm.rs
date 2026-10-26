@@ -11,5 +11,5 @@ fn main() {
     };
     let rows: &[serde_json::Value] = &[];
     black_box(engine.register_rows("t", rows).err());
-    black_box(engine.sql_async("SELECT 1"));
+    let _ = black_box(engine.sql_async("SELECT 1"));
 }
