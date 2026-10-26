@@ -35,6 +35,9 @@ let seq = 0;
 const pending = new Map();
 const fields = [];
 let fileOpen = false;
+// The buffer posted to the worker is detached. This copy is what a later tick can store.
+let held = null;
+let heldName = '';
 
 worker.onmessage = (event) => {
   const msg = event.data;
@@ -381,16 +384,137 @@ function tick(row, label, className) {
   return box;
 }
 
-async function openFile(file) {
+function showStored(name) {
+  const el = document.getElementById('stored');
+  if (name == null) {
+    el.hidden = true;
+    el.textContent = '';
+    return;
+  }
+  el.hidden = false;
+  el.textContent = (name || 'A file') + ' is stored on this machine.';
+}
+
+async function storeDir(create) {
+  const root = await navigator.storage.getDirectory();
+  return root.getDirectoryHandle('burrmill', create ? { create: true } : undefined);
+}
+
+async function storeFile(name, bytes) {
+  const dir = await storeDir(true);
+  const bin = await dir.getFileHandle('upload.bin', { create: true });
+  const binOut = await bin.createWritable({ keepExistingData: false });
+  await binOut.write(new Blob([bytes]));
+  await binOut.close();
+  const nameHandle = await dir.getFileHandle('upload.name', { create: true });
+  const nameOut = await nameHandle.createWritable({ keepExistingData: false });
+  await nameOut.write(new Blob([new TextEncoder().encode(name)]));
+  await nameOut.close();
+}
+
+async function loadStore() {
+  try {
+    const dir = await storeDir(false);
+    const bin = await (await dir.getFileHandle('upload.bin')).getFile();
+    const nameFile = await (await dir.getFileHandle('upload.name')).getFile();
+    const bytes = await bin.arrayBuffer();
+    if (!bytes.byteLength) return null;
+    return { name: await nameFile.text(), bytes };
+  } catch (err) {
+    if (err && err.name === 'NotFoundError') return null;
+    throw err;
+  }
+}
+
+async function clearStore() {
+  const root = await navigator.storage.getDirectory();
+  try {
+    await root.removeEntry('burrmill', { recursive: true });
+  } catch (err) {
+    if (err && err.name === 'NotFoundError') return;
+    throw err;
+  }
+}
+
+async function openFile(file, persist) {
   status('Reading ' + file.name);
   const bytes = await file.arrayBuffer();
+  held = bytes.slice(0);
+  heldName = file.name;
+  let storageNote = '';
+  if (persist) {
+    try {
+      await storeFile(heldName, held);
+      showStored(heldName);
+    } catch (err) {
+      document.getElementById('keep').checked = false;
+      showStored(null);
+      await clearStore();
+      storageNote = err.message || String(err);
+    }
+  }
   const info = await call('open', { bytes }, [bytes]);
   fileOpen = true;
   document.getElementById('setup').hidden = false;
   document.getElementById('ask').disabled = false;
   showColumns(info.columns, info.proposals);
   renderTable(document.getElementById('preview'), info.columns, info.preview);
+  status(storageNote);
+}
+
+async function keepHeld() {
+  const keep = document.getElementById('keep');
+  if (!held) {
+    keep.checked = false;
+    status('Drop a file before keeping it.');
+    return;
+  }
+  try {
+    await storeFile(heldName, held);
+  } catch (err) {
+    keep.checked = false;
+    showStored(null);
+    await clearStore();
+    throw err;
+  }
+  showStored(heldName);
   status('');
+}
+
+async function forgetHeld() {
+  await clearStore();
+  showStored(null);
+}
+
+function bindStore() {
+  const keep = document.getElementById('keep');
+  keep.addEventListener('change', () => {
+    const job = keep.checked ? keepHeld() : forgetHeld();
+    job.catch((err) => status(err.message || String(err)));
+  });
+  document.getElementById('clear-all').addEventListener('click', () => {
+    clearStore()
+      .then(() => {
+        keep.checked = false;
+        showStored(null);
+      })
+      .catch((err) => status(err.message || String(err)));
+  });
+}
+
+async function restoreStore() {
+  try {
+    const stored = await loadStore();
+    if (!stored) return;
+    showStored(stored.name);
+    if (fileOpen) return;
+    document.getElementById('keep').checked = true;
+    await openFile(new File([stored.bytes], stored.name), false);
+  } catch (err) {
+    status(err.message || String(err));
+  } finally {
+    document.documentElement.dataset.store = 'ready';
+  }
 }
 
 async function applyRenames() {
@@ -549,9 +673,14 @@ function bindQuestions() {
   }
 }
 
+function openDropped(file) {
+  const persist = document.getElementById('keep').checked;
+  openFile(file, persist).catch((err) => status(err.message || String(err)));
+}
+
 document.getElementById('file-input').addEventListener('change', (event) => {
   const file = event.target.files && event.target.files[0];
-  if (file) openFile(file).catch((err) => status(err.message || String(err)));
+  if (file) openDropped(file);
 });
 
 const drop = document.getElementById('drop');
@@ -559,7 +688,7 @@ drop.addEventListener('dragover', (event) => event.preventDefault());
 drop.addEventListener('drop', (event) => {
   event.preventDefault();
   const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
-  if (file) openFile(file).catch((err) => status(err.message || String(err)));
+  if (file) openDropped(file);
 });
 
 document.getElementById('ask').addEventListener('click', () => {
@@ -570,3 +699,5 @@ document.getElementById('mode').addEventListener('change', describeMode);
 bindKey();
 bindQuestions();
 describeMode();
+bindStore();
+restoreStore();
