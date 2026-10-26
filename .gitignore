@@ -3,3 +3,5 @@
 Cargo.lock.bak
 .DS_Store
 /scratchpad
+# wasm-bindgen output for the schema-mode page
+/demo/pkg

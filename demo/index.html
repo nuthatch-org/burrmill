@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://api.anthropic.com; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Burrmill</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Burrmill</h1>
+  <p>The schema leaves this browser. The rows stay.</p>
+</header>
+
+<section>
+  <label id="drop">Drop a CSV
+    <input id="file-input" type="file" accept=".csv,text/csv">
+  </label>
+</section>
+
+<section id="setup" hidden>
+  <div id="columns"></div>
+  <h2>Preview</h2>
+  <div id="preview"></div>
+</section>
+
+<section>
+  <div id="questions"></div>
+  <label>Question
+    <textarea id="question" rows="3"></textarea>
+  </label>
+  <label>Key
+    <input id="key" type="password" autocomplete="off">
+  </label>
+  <label><input id="remember" type="checkbox"> Remember the key in this tab</label>
+  <label>Model
+    <input id="model" type="text" value="claude-sonnet-4-5">
+  </label>
+  <label><input id="confirm" type="checkbox"> Confirm before sending</label>
+  <button id="ask" type="button" disabled>Ask</button>
+  <button id="send" type="button" hidden>Send this request</button>
+</section>
+
+<section>
+  <h2>Outbound</h2>
+  <pre id="log"></pre>
+</section>
+
+<section id="answer" hidden>
+  <p id="narration"></p>
+  <p id="narration-error"></p>
+  <div id="chart"></div>
+  <div id="table"></div>
+  <h2>SQL</h2>
+  <pre id="sql"></pre>
+</section>
+<p id="status"></p>
+<script src="app.js" type="module"></script>
+</body>
+</html>

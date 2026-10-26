@@ -825,6 +825,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrmill-wasm"
+version = "0.0.1"
+dependencies = [
+ "arrow 59.2.0",
+ "burrmill",
+ "burrmill-ingest",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "zstd-sys",
+]
+
+[[package]]
 name = "bytecheck"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

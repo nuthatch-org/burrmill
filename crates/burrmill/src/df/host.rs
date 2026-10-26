@@ -299,6 +299,21 @@ impl Engine {
             .map_err(df_err)
     }
 
+    /// Arrow batches the caller already typed, as one table. Same `MemTable` as
+    /// [`Self::register_rows`]. Whether an upload should be Parquet instead is not decided here.
+    pub fn register_batch(&mut self, name: &str, batches: Vec<RecordBatch>) -> Result<()> {
+        let Some(schema) = batches.first().map(|b| b.schema()) else {
+            return Err(crate::BurrmillError::NotAllowed("no batches".into()));
+        };
+        self.session.register_table(
+            name,
+            Arc::new(MemTable::try_new(schema, vec![batches]).map_err(df_err)?),
+        );
+        self.session
+            .build_information_schema(hidden)
+            .map_err(df_err)
+    }
+
     /// Whether `name` is a table or view the host or the nest defined.
     pub fn has_table(&self, name: &str) -> bool {
         let lower = name.to_ascii_lowercase();

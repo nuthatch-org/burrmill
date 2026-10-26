@@ -1,0 +1,62 @@
+:root {
+  color: #f3ecdf;
+  background: #1c1917;
+  font: 16px/1.45 ui-monospace, "JetBrains Mono", monospace;
+}
+
+body {
+  margin: 0 auto;
+  max-width: 52rem;
+  padding: 1.5rem;
+}
+
+h1, h2 { font-weight: 500; }
+h1 { font-size: 1.4rem; margin-bottom: 0.2rem; }
+h2 { font-size: 1rem; margin: 1.2rem 0 0.4rem; }
+
+label, button, input, textarea { font: inherit; color: inherit; }
+textarea, input[type="text"], input[type="password"] {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 0.25rem;
+  background: #12100e;
+  border: 1px solid #3a332c;
+  padding: 0.4rem;
+}
+
+button {
+  background: #c45c26;
+  color: #1c1917;
+  border: 0;
+  padding: 0.4rem 0.8rem;
+  margin: 0.4rem 0.4rem 0.4rem 0;
+  cursor: pointer;
+}
+
+button:disabled { opacity: 0.45; cursor: default; }
+
+#drop {
+  display: block;
+  border: 1px dashed #8a6232;
+  padding: 1.2rem;
+  margin: 1rem 0;
+}
+
+#questions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.6rem; }
+#questions button { background: #3d5a6c; color: #f3ecdf; }
+
+#log, #sql {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #12100e;
+  padding: 0.6rem;
+  min-height: 2rem;
+}
+
+table { border-collapse: collapse; width: 100%; }
+th, td { border-bottom: 1px solid #3a332c; text-align: left; padding: 0.25rem 0.5rem; vertical-align: top; }
+.column { display: flex; gap: 0.6rem; align-items: center; margin: 0.3rem 0; }
+.column input[type="text"] { width: 16rem; margin: 0; }
+svg { width: 100%; height: auto; background: #12100e; }
+#status { color: #d7a15f; }

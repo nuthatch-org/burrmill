@@ -7,11 +7,19 @@
 # workspace layout rather than as a promise.
 #
 # `burrmill-ingest` is RFC-0047 slice 1. It never depends on the engine, so nuthatch can take the
-# reader without taking the query layer. `burrmill-size` only links the two, so the wasm gzip is
-# of code a tab would download; it is not the JS package. `fuzz/` is its own workspace (cargo-fuzz).
+# reader without taking the query layer. `burrmill-wasm` is the JS package for the
+# page: ingest, the engine, and the checks on an answer. It does no network. `burrmill-size` only
+# links the two so the wasm gzip can be measured; it is not the JS package. `fuzz/` is its own
+# workspace (cargo-fuzz).
 [workspace]
 resolver = "2"
-members = ["crates/burrmill", "crates/burrmill-bench", "crates/burrmill-ingest", "crates/burrmill-size"]
+members = [
+    "crates/burrmill",
+    "crates/burrmill-bench",
+    "crates/burrmill-ingest",
+    "crates/burrmill-size",
+    "crates/burrmill-wasm",
+]
 
 [workspace.package]
 edition = "2021"

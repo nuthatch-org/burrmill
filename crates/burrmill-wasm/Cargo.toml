@@ -1,0 +1,29 @@
+[package]
+name = "burrmill-wasm"
+version = "0.0.1"
+description = "RFC-0047 schema mode. The JS package: ingest, the engine, and the answer checks. No network."
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+burrmill = { path = "../burrmill", features = ["datafusion"] }
+burrmill-ingest = { path = "../burrmill-ingest" }
+arrow = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# datafusion-common turns on arrow-ipc's zstd. The default zstd-sys build then
+# compiles huf_decompress_amd64.S, which is not a wasm32 object. `no_asm` keeps
+# the C decoder. The crate is still C.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.127"
+wasm-bindgen-futures = "=0.4.77"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+zstd-sys = { version = "=2.0.16", default-features = false, features = ["no_asm"] }
