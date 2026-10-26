@@ -6,6 +6,9 @@ const QUESTIONS = [
   'Year-over-year change',
 ];
 
+// RFC-0047's stated default. Whether k should differ, or be per column, is open.
+const AGGREGATE_K = 10;
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const FILLS = ['#c45c26', '#3d5a6c', '#8a6232', '#5c6b45'];
 
@@ -62,7 +65,7 @@ function separators() {
   };
 }
 
-function promptText(question, card, grammar, feedback) {
+function promptText(question, card, grammar, feedback, mode) {
   const lines = [
     'Return one JSON object and no other text.',
     'Keys are sql, chart, and narration. No other keys.',
@@ -72,17 +75,45 @@ function promptText(question, card, grammar, feedback) {
     'narration is one sentence. A slot is {rN.column} or {column} for the first row.',
     'A digit outside a slot is refused. Do not write a number except inside a slot.',
     'The schema below has no cell values. Do not invent values.',
-    '',
-    grammar,
-    '',
-    card,
-    '',
-    'Question: ' + question,
   ];
+  if (mode === 'aggregates') {
+    lines.push(
+      'Aggregates mode, k = ' + AGGREGATE_K + '.',
+      'Write one SELECT that reads table t and has a GROUP BY.',
+      'The next message lists groups of size at least ' +
+        AGGREGATE_K +
+        ', and how many groups were dropped.',
+      'A smaller group is not in that list. Rows that are not groups are not sent.',
+      'group_n is the measured size of a group.',
+    );
+  }
+  lines.push('', grammar, '', card, '', 'Question: ' + question);
   if (feedback) {
     lines.push('', 'Previous attempt:', feedback);
   }
   return lines.join('\n');
+}
+
+function describeMode() {
+  const mode = document.getElementById('mode').value;
+  document.getElementById('blurb').textContent =
+    mode === 'aggregates'
+      ? 'Groups of ' + AGGREGATE_K + ' or more can leave. Smaller groups stay.'
+      : 'The schema leaves this browser. The rows stay.';
+}
+
+function dropStatus(text) {
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    return '';
+  }
+  if (typeof payload.dropped === 'number') {
+    return payload.dropped + ' groups under ' + payload.k + ' were left out of the request.';
+  }
+  if (payload.omitted) return 'No groups were sent.';
+  return '';
 }
 
 function requestBody(model, text) {
@@ -357,9 +388,14 @@ async function ask() {
     const packed = await call('card', { signs: ticked('sign'), dates: ticked('date') });
     const model = document.getElementById('model').value.trim() || 'claude-sonnet-4-5';
     const locale = separators();
+    const mode = document.getElementById('mode').value;
     let feedback = '';
+    let fedGroups = false;
     for (let attempt = 0; attempt < 4; attempt++) {
-      const body = requestBody(model, promptText(question, packed.card, packed.grammar, feedback));
+      const body = requestBody(
+        model,
+        promptText(question, packed.card, packed.grammar, feedback, mode),
+      );
       logBody(body);
       if (document.getElementById('confirm').checked) await waitForSend();
       const sent = await post(body, key);
@@ -380,6 +416,12 @@ async function ask() {
       if (queried.error) {
         feedback = queried.feedback;
         status(queried.error);
+        continue;
+      }
+      if (mode === 'aggregates' && !fedGroups && attempt < 3) {
+        feedback = await call('aggregates', { sql: reply.sql });
+        fedGroups = true;
+        status(dropStatus(feedback));
         continue;
       }
       if (queried.answer.rows.length === 0 && attempt < 3) {
@@ -452,6 +494,8 @@ drop.addEventListener('drop', (event) => {
 document.getElementById('ask').addEventListener('click', () => {
   ask();
 });
+document.getElementById('mode').addEventListener('change', describeMode);
 
 bindKey();
 bindQuestions();
+describeMode();

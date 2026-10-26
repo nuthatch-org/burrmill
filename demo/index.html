@@ -10,7 +10,7 @@
 <body>
 <header>
   <h1>Burrmill</h1>
-  <p>The schema leaves this browser. The rows stay.</p>
+  <p id="blurb">The schema leaves this browser. The rows stay.</p>
 </header>
 
 <section>
@@ -27,6 +27,12 @@
 
 <section>
   <div id="questions"></div>
+  <label>What the model sees
+    <select id="mode">
+      <option value="schema" selected>Schema</option>
+      <option value="aggregates">Aggregates, k = 10</option>
+    </select>
+  </label>
   <label>Question
     <textarea id="question" rows="3"></textarea>
   </label>

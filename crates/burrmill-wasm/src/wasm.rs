@@ -55,6 +55,13 @@ impl WasmSession {
         let out = self.inner.query(sql).await.map_err(|e| JsError::new(&e))?;
         serde_json::to_string(&out).map_err(|e| JsError::new(&e.to_string()))
     }
+
+    pub async fn aggregate_feedback(&self, sql: &str) -> Result<String, JsError> {
+        self.inner
+            .aggregate_feedback(sql)
+            .await
+            .map_err(|e| JsError::new(&e))
+    }
 }
 
 fn json_out(value: impl serde::Serialize) -> Result<String, JsError> {

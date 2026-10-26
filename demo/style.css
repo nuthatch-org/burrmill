@@ -15,7 +15,7 @@ h1 { font-size: 1.4rem; margin-bottom: 0.2rem; }
 h2 { font-size: 1rem; margin: 1.2rem 0 0.4rem; }
 
 label, button, input, textarea { font: inherit; color: inherit; }
-textarea, input[type="text"], input[type="password"] {
+textarea, input[type="text"], input[type="password"], select {
   display: block;
   width: 100%;
   box-sizing: border-box;

@@ -54,6 +54,9 @@ async function handle(msg) {
       return { error: message, feedback: error_feedback(message) };
     }
   }
+  if (msg.op === 'aggregates') {
+    return session.aggregate_feedback(msg.sql);
+  }
   if (msg.op === 'present') {
     return JSON.parse(
       present_answer(

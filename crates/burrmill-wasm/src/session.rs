@@ -11,6 +11,7 @@ use burrmill_ingest::{IngestReport, Issue, Locale, RowIssue, Table};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::aggregates::{filter_payload, measure_sql, skipped};
 use crate::chart::{Chart, check_chart};
 use crate::format::{
     cell_string, format_date, format_number, format_timestamp, is_ident, is_numeric,
@@ -213,6 +214,24 @@ impl Session {
             Ok(batches) => Ok(self.pack(batches)),
             Err(e) => Err(self.fail(&e.to_string())),
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn aggregate_feedback(&self, sql: &str) -> Result<String, String> {
+        let sized = match measure_sql(sql) {
+            Ok(sql) => sql,
+            Err(reason) => return Ok(skipped(reason)),
+        };
+        Ok(filter_payload(&self.query(&sized)?))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn aggregate_feedback(&self, sql: &str) -> Result<String, String> {
+        let sized = match measure_sql(sql) {
+            Ok(sql) => sql,
+            Err(reason) => return Ok(skipped(reason)),
+        };
+        Ok(filter_payload(&self.query(&sized).await?))
     }
 
     fn guard(&self, sql: &str) -> Result<(), String> {

@@ -17,6 +17,7 @@ burrmill-ingest = { path = "../burrmill-ingest" }
 arrow = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlparser = { workspace = true, features = ["visitor"] }
 
 # datafusion-common turns on arrow-ipc's zstd. The default zstd-sys build then
 # compiles huf_decompress_amd64.S, which is not a wasm32 object. `no_asm` keeps
