@@ -1,0 +1,32 @@
+# Ingest plus the Burrmill operator, and the full Engine. RFC-0047, before the page.
+#
+# The 8 MB line is the demo path. That path is the Engine. It produced no .wasm.
+# Command: docs/bench/engine-wasm.sh
+# Toolchain: rustc 1.95.0 (59807616e 2026-04-14), host aarch64-apple-darwin.
+# Profile: wasm-size. opt-level z, lto, one codegen unit, panic abort, symbols stripped.
+#
+# ingest + operator
+# Artifact: target/wasm32-unknown-unknown/wasm-size/ingest-operator.wasm
+# uncompressed    1895101
+# gzip -9          557700
+#
+# wasm-opt -Oz is not in CI. Run locally it was 1673607 bytes, gzip -9 546683.
+# The module imports the same four wasm-bindgen symbols as the ingest probe.
+# js-sys is the one *-sys name the tree check allows.
+#
+# The operator graph is not otherwise pure. sqlparser's default
+# recursive-protection pulls recursive, stacker and psm, and psm's build
+# script links an assembly stub with cc. The stub is inside this module.
+#
+# full Engine, and ingest + Engine
+# No artifact. The engine build in the script exits 101 in zstd-sys 2.0.16.
+# datafusion-common 55.0.0
+# depends on arrow-ipc with features lz4 and zstd, and that zstd is the C
+# library. The build script runs clang --target=wasm32-unknown-unknown, which
+# this host's clang cannot target, and it also compiles
+# zstd/lib/decompress/huf_decompress_amd64.S. The tree check names zstd-sys
+# and cc.
+#
+# Arrow in Cargo.lock stayed 59.2.0. Nothing here trims that edge to force a
+# number: a module that linked only because zstd was switched off would be a
+# different engine from the one the questions run on.

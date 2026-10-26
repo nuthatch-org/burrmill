@@ -1,0 +1,36 @@
+[package]
+name = "burrmill-size"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "RFC-0047 size probe. Links ingest with the operator, and with the engine. Not a JS API."
+
+[dependencies]
+burrmill = { path = "../burrmill" }
+burrmill-ingest = { path = "../burrmill-ingest" }
+serde_json = { version = "1", optional = true }
+
+[features]
+# Off by default, so a workspace test does not build the probes.
+link-wasm = []
+# The full Engine. Off for the operator measurement, or the two graphs unify.
+# datafusion-common enables arrow-ipc/zstd, and zstd-sys does not compile for
+# wasm32-unknown-unknown. The feature stays so that failure is the measurement.
+engine = ["link-wasm", "burrmill/datafusion", "dep:serde_json"]
+
+[[bin]]
+name = "ingest-operator"
+path = "src/bin/ingest-operator.rs"
+required-features = ["link-wasm"]
+
+[[bin]]
+name = "engine-wasm"
+path = "src/bin/engine-wasm.rs"
+required-features = ["engine"]
+
+[[bin]]
+name = "ingest-engine"
+path = "src/bin/ingest-engine.rs"
+required-features = ["engine"]

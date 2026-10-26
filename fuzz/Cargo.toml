@@ -1,0 +1,23 @@
+[package]
+name = "burrmill-ingest-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+burrmill-ingest = { path = "../crates/burrmill-ingest" }
+
+# Own workspace, so `cargo test` at the repo root does not build it and a resolve here
+# cannot move the engine lock off arrow 59.2.0.
+[workspace]
+
+[[bin]]
+name = "csv"
+path = "fuzz_targets/csv.rs"
+test = false
+doc = false
+bench = false

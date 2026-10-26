@@ -1,14 +1,17 @@
 # Burrmill: a query engine-layer for sealed Parquet segments plus a live tip.
 #
-# Two members, and the split is load-bearing rather than tidy-minded. `burrmill` default graph is
-# **pure Rust** - no DuckDB, no DataFusion, no C++. DataFusion enters only behind the optional
-# `datafusion` feature (roadmap 6.0 route C). `burrmill-bench` is where the oracles live, and it is
-# `publish = false` precisely so that the incumbent engines we are measuring against can never
-# reach the release graph. RFC-0042 §3a's binary rule, expressed as a workspace layout rather
-# than as a promise.
+# `burrmill`'s default graph is pure Rust - no DuckDB, no DataFusion, no C++. DataFusion enters
+# only behind the optional `datafusion` feature (roadmap 6.0 route C). `burrmill-bench` is where
+# the oracles live, and it is `publish = false` precisely so that the incumbent engines we are
+# measuring against can never reach the release graph. RFC-0042 §3a's binary rule, expressed as a
+# workspace layout rather than as a promise.
+#
+# `burrmill-ingest` is RFC-0047 slice 1. It never depends on the engine, so nuthatch can take the
+# reader without taking the query layer. `burrmill-size` only links the two, so the wasm gzip is
+# of code a tab would download; it is not the JS package. `fuzz/` is its own workspace (cargo-fuzz).
 [workspace]
 resolver = "2"
-members = ["crates/burrmill", "crates/burrmill-bench"]
+members = ["crates/burrmill", "crates/burrmill-bench", "crates/burrmill-ingest", "crates/burrmill-size"]
 
 [workspace.package]
 edition = "2021"
@@ -31,3 +34,12 @@ rustc-hash = "2"
 hashbrown = "0.16"
 rayon = "1"
 sqlparser = "0.62"
+
+# Gzip size of the ingest reader. Selected by hand. Does not change `release`.
+[profile.wasm-size]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

@@ -1,0 +1,2 @@
+item,note
+rent,"=cmd|'/C calc'!A0"

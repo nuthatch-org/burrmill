@@ -1,0 +1,16 @@
+# burrmill-ingest, linked, wasm32-unknown-unknown. RFC-0047 slice 2.
+#
+# The reader only. No engine and no page, so this is not the 8 MB demo gate.
+# Command: docs/bench/ingest-wasm.sh
+# Toolchain: rustc 1.95.0 (59807616e 2026-04-14), host aarch64-apple-darwin.
+# Profile: wasm-size. opt-level z, lto, one codegen unit, panic abort, symbols stripped.
+# Artifact: target/wasm32-unknown-unknown/wasm-size/ingest-wasm.wasm
+#
+# uncompressed    471710
+# gzip -9         127593
+#
+# wasm-opt -Oz is not in CI. Run locally it was 412796 bytes, gzip -9 123193.
+# The module imports four wasm-bindgen symbols (describe, throw, externref grow
+# and set-null). That is the JS backend getrandom needs in order to compile
+# for this target. The graph has no C crate. js-sys is pure Rust; the tree
+# check allows that one name and fails on any other *-sys, and on cc or cmake.
