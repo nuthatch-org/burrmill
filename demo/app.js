@@ -9,6 +9,9 @@ const QUESTIONS = [
 // RFC-0047's stated default. Whether k should differ, or be per column, is open.
 const AGGREGATE_K = 10;
 
+// A label check only. The RFC says this is not a compliance claim.
+const IDENTIFIER_LABELS = new Set(['email', 'phone', 'iban', 'ssn', 'patient', 'hiv', 'id']);
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const FILLS = ['#c45c26', '#3d5a6c', '#8a6232', '#5c6b45'];
 
@@ -362,6 +365,44 @@ function render(shown, sql, answer) {
   if (answer.truncated) status('Result truncated at 5000 rows.');
 }
 
+function identifierHits(text) {
+  const raw = String(text || '');
+  const hits = [];
+  const email = raw.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+  if (email) hits.push(email[0]);
+  const phone = raw.match(/\+?\d[\d\s().-]{8,}\d/);
+  if (phone && phone[0].replace(/\D/g, '').length >= 10) hits.push(phone[0]);
+  for (const token of raw.toLowerCase().split(/[^a-z0-9]+/)) {
+    if (!token) continue;
+    const stem = token.endsWith('s') ? token.slice(0, -1) : token;
+    if (IDENTIFIER_LABELS.has(token) || IDENTIFIER_LABELS.has(stem)) hits.push(token);
+  }
+  return hits;
+}
+
+function warnNames() {
+  const el = document.getElementById('name-warn');
+  const names = [];
+  for (const field of fields) {
+    const name = field.input.value.trim();
+    if (name && identifierHits(name).length) names.push(name);
+  }
+  const questionHit = identifierHits(document.getElementById('question').value).length > 0;
+  if (!names.length && !questionHit) {
+    el.hidden = true;
+    el.textContent = '';
+    return;
+  }
+  const many = names.length + (questionHit ? 1 : 0) > 1;
+  let who = names.join(', ');
+  if (names.length && questionHit) who += ' and the question';
+  else if (questionHit) who = 'The question';
+  el.hidden = false;
+  el.textContent =
+    who +
+    (many ? ' look like identifiers. Rename them before asking.' : ' looks like an identifier. Rename it before asking.');
+}
+
 function showColumns(columns, proposals) {
   const host = document.getElementById('columns');
   host.replaceChildren();
@@ -374,6 +415,7 @@ function showColumns(columns, proposals) {
     input.type = 'text';
     input.value = column.name;
     input.dataset.name = column.name;
+    input.addEventListener('input', warnNames);
     row.appendChild(input);
     const field = { input, sign: null, date: null, identifier: null };
     if (column.numeric) {
@@ -388,6 +430,7 @@ function showColumns(columns, proposals) {
     host.appendChild(row);
     fields.push(field);
   }
+  warnNames();
 }
 
 function tick(row, label, className) {
@@ -685,6 +728,7 @@ function bindQuestions() {
     button.textContent = question;
     button.addEventListener('click', () => {
       document.getElementById('question').value = question;
+      warnNames();
     });
     host.appendChild(button);
   }
@@ -708,6 +752,7 @@ drop.addEventListener('drop', (event) => {
   if (file) openDropped(file);
 });
 
+document.getElementById('question').addEventListener('input', warnNames);
 document.getElementById('ask').addEventListener('click', () => {
   ask();
 });

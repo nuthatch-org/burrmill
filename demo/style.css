@@ -59,4 +59,4 @@ th, td { border-bottom: 1px solid #3a332c; text-align: left; padding: 0.25rem 0.
 .column { display: flex; gap: 0.6rem; align-items: center; margin: 0.3rem 0; }
 .column input[type="text"] { width: 16rem; margin: 0; }
 svg { width: 100%; height: auto; background: #12100e; }
-#status, #stored { color: #d7a15f; }
+#status, #stored, #name-warn { color: #d7a15f; }
