@@ -329,6 +329,23 @@ function draw(host, chart, columns, rows, display) {
   host.appendChild(svg);
 }
 
+// Queries and charts stay in the tab. The model call is the one that leaves.
+async function localChart(sql, chart, narration) {
+  const queried = await call('query', { sql });
+  if (queried.error) throw new Error(queried.error);
+  const locale = separators();
+  const shown = await call('present', {
+    answer: queried.answer,
+    chart,
+    narration,
+    group: locale.group,
+    decimal: locale.decimal,
+  });
+  if (shown.narration_error) throw new Error(shown.narration_error);
+  render(shown, sql, queried.answer);
+  return shown.narration || '';
+}
+
 function render(shown, sql, answer) {
   document.getElementById('answer').hidden = false;
   document.getElementById('narration').textContent = shown.narration || '';
@@ -696,8 +713,15 @@ document.getElementById('ask').addEventListener('click', () => {
 });
 document.getElementById('mode').addEventListener('change', describeMode);
 
+function bindOffline() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('./sw.js').catch((err) => status(err.message || String(err)));
+}
+
 bindKey();
 bindQuestions();
 describeMode();
 bindStore();
+bindOffline();
 restoreStore();
+globalThis.burrmillLocal = localChart;
