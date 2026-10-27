@@ -104,6 +104,13 @@ impl SharedPool {
     }
 }
 
+/// Statements that have computed their selection in this process, for a host's test that a statement
+/// it ran unmetered paid nothing for it.
+#[doc(hidden)]
+pub fn selection_passes() -> u64 {
+    catalog::SELECTIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// What one statement did once it has run (nuthatch RFC-0073 FR4).
 ///
 /// `sealed_bytes_scanned` is the figure meant to repeat: decided from immutable footers before the
@@ -458,16 +465,27 @@ impl Engine {
     /// caller's memory and not the engine's. An encoder writing to a socket wants this instead.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn sql_for_each(&self, sql: &str, f: impl FnMut(RecordBatch) -> Result<()>) -> Result<()> {
-        self.sql_for_each_metered(sql, &mut QueryMetrics::default(), f)
+        self.run(sql, None, f)
     }
 
     /// As [`Engine::sql_for_each`], adding what the statement did to `metrics`: as far as it got, so a
-    /// statement `f` stopped or the engine refused still reports what it read.
+    /// statement `f` stopped or the engine refused still reports what it read. The selection is a
+    /// footer pass over every segment the plan scans, which [`Engine::sql_for_each`] does not pay.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn sql_for_each_metered(
         &self,
         sql: &str,
         metrics: &mut QueryMetrics,
+        f: impl FnMut(RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        self.run(sql, Some(metrics), f)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run(
+        &self,
+        sql: &str,
+        mut metrics: Option<&mut QueryMetrics>,
         mut f: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
         // Parsed first, so malformed SQL is a syntax error as DuckDB reports it, not a refusal.
@@ -482,15 +500,17 @@ impl Engine {
         let _pass = self.gate.enter();
         let started = std::time::Instant::now();
         if tokio::runtime::Handle::try_current().is_err() {
-            let r = self
-                .runtime()
-                .block_on(self.stream(logical, sql, &mut f, metrics));
-            metrics.exec_nanos += started.elapsed().as_nanos() as u64;
+            let r =
+                self.runtime()
+                    .block_on(self.stream(logical, sql, &mut f, metrics.as_deref_mut()));
+            if let Some(m) = metrics {
+                m.exec_nanos += started.elapsed().as_nanos() as u64;
+            }
             return r;
         }
         // A host's runtime drives this thread and tokio will not block it, so the statement runs on
         // a thread of its own; its batches come back here, and `f` stays on the caller's thread.
-        let held = &mut *metrics;
+        let held = metrics.as_deref_mut();
         let r = std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             let run = s.spawn(move || {
@@ -503,7 +523,9 @@ impl Engine {
             let run = run.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
             taken.and(run)
         });
-        metrics.exec_nanos += started.elapsed().as_nanos() as u64;
+        if let Some(m) = metrics {
+            m.exec_nanos += started.elapsed().as_nanos() as u64;
+        }
         r
     }
 
@@ -534,8 +556,7 @@ impl Engine {
         if self.cancel.is_cancelled() {
             return Err(BurrmillError::Cancelled);
         }
-        self.stream(logical, sql, &mut f, &mut QueryMetrics::default())
-            .await
+        self.stream(logical, sql, &mut f, None).await
     }
 
     /// Addresses are read as fixed binary while every value in an address column is one. The
@@ -546,7 +567,7 @@ impl Engine {
         logical: datafusion_expr::LogicalPlan,
         sql: &str,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
-        metrics: &mut QueryMetrics,
+        mut metrics: Option<&mut QueryMetrics>,
     ) -> Result<()> {
         let mut sent = 0usize;
         let r = self
@@ -556,7 +577,7 @@ impl Engine {
                     sent += 1;
                     f(b)
                 },
-                metrics,
+                metrics.as_deref_mut(),
             )
             .await;
         match r {
@@ -578,7 +599,7 @@ impl Engine {
         &self,
         logical: datafusion_expr::LogicalPlan,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
-        metrics: &mut QueryMetrics,
+        metrics: Option<&mut QueryMetrics>,
     ) -> Result<()> {
         let physical = self
             .session
@@ -587,6 +608,11 @@ impl Engine {
             .map_err(plan_err)?;
         // A host sees an address as the text it wrote.
         let physical = addresses::rendered(physical, &self.session).map_err(df_err)?;
+        let Some(metrics) = metrics else {
+            let stream =
+                sequential::execute_stream(physical, self.session.task_ctx()).map_err(df_err)?;
+            return self.drain(stream, f, &mut 0).await;
+        };
         // Its own recorder over the engine's pool, so a peak is this statement's and not a neighbour's.
         let pool = Arc::new(datafusion_execution::memory_pool::PeakRecordingPool::new(
             Arc::clone(&self.session.runtime_env().memory_pool),
@@ -611,9 +637,40 @@ impl Engine {
         let mut selecting = Abort(tokio::spawn(selecting));
         let mut counters = Vec::new();
         catalog::sealed_counters(&physical, &mut counters);
-        let mut stream = sequential::execute_stream(physical, ctx).map_err(df_err)?;
+        let stream = sequential::execute_stream(physical, ctx).map_err(df_err)?;
         let mut rows = 0u64;
-        let r = async {
+        let r = self.drain(stream, f, &mut rows).await;
+        #[cfg(not(target_arch = "wasm32"))]
+        let selected = match &r {
+            Err(BurrmillError::Cancelled) => Ok(0),
+            _ => (&mut selecting.0)
+                .await
+                .map_err(|e| BurrmillError::Substrate(e.to_string()))?,
+        };
+        #[cfg(target_arch = "wasm32")]
+        let selected = selecting.await;
+        let selected = selected.map_err(df_err)?;
+        let folded: u64 = counters
+            .iter()
+            .filter(|c| c.1)
+            .map(|c| c.0.value() as u64)
+            .sum();
+        metrics.sealed_bytes_scanned += selected + folded;
+        metrics.sealed_bytes_read += counters.iter().map(|c| c.0.value() as u64).sum::<u64>();
+        metrics.output_rows += rows;
+        metrics.peak_memory_bytes = metrics.peak_memory_bytes.max(pool.max_reserved() as u64);
+        r
+    }
+
+    /// Each batch of `stream` to `f`, counted into `rows`, until it ends, `f` refuses or the token
+    /// stops it. The stream is dropped on return, which aborts the partition tasks under it.
+    async fn drain(
+        &self,
+        mut stream: datafusion_execution::SendableRecordBatchStream,
+        f: &mut impl FnMut(RecordBatch) -> Result<()>,
+        rows: &mut u64,
+    ) -> Result<()> {
+        {
             use futures::StreamExt;
             // A plan with no nest scan (`range`, a recursive CTE) never meets `CancelExec`, so the
             // token is also raced here; dropping the stream aborts the partition tasks under it.
@@ -641,33 +698,11 @@ impl Engine {
                     Err(_) if self.cancel.is_cancelled() => return Err(BurrmillError::Cancelled),
                     Err(e) => return Err(df_err(e)),
                 };
-                rows += b.num_rows() as u64;
+                *rows += b.num_rows() as u64;
                 f(dialect::strip_dup_suffix(b))?;
             }
             Ok(())
         }
-        .await;
-        drop(stream);
-        #[cfg(not(target_arch = "wasm32"))]
-        let selected = match &r {
-            Err(BurrmillError::Cancelled) => Ok(0),
-            _ => (&mut selecting.0)
-                .await
-                .map_err(|e| BurrmillError::Substrate(e.to_string()))?,
-        };
-        #[cfg(target_arch = "wasm32")]
-        let selected = selecting.await;
-        let selected = selected.map_err(df_err)?;
-        let folded: u64 = counters
-            .iter()
-            .filter(|c| c.1)
-            .map(|c| c.0.value() as u64)
-            .sum();
-        metrics.sealed_bytes_scanned += selected + folded;
-        metrics.sealed_bytes_read += counters.iter().map(|c| c.0.value() as u64).sum::<u64>();
-        metrics.output_rows += rows;
-        metrics.peak_memory_bytes = metrics.peak_memory_bytes.max(pool.max_reserved() as u64);
-        r
     }
 
     #[cfg(not(target_arch = "wasm32"))]

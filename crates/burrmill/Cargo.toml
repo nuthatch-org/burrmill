@@ -247,6 +247,11 @@ path = "tests/df_metrics.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_metrics_off"
+path = "tests/df_metrics_off.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_scanpool"
 path = "tests/df_scanpool.rs"
 required-features = ["datafusion"]

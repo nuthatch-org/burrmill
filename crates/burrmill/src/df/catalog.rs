@@ -241,6 +241,8 @@ pub(super) struct Selection {
 }
 
 /// Every segment scan in `plan`, owned, so the plan is not held while the bytes are summed.
+pub(super) static SELECTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub(super) fn selections(
     plan: &Arc<dyn ExecutionPlan>,
     env: &datafusion_execution::runtime_env::RuntimeEnv,
@@ -248,6 +250,7 @@ pub(super) fn selections(
     use datafusion_physical_expr::utils::collect_columns;
     use datafusion_physical_optimizer::pruning::PruningPredicateBuilder;
 
+    SELECTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut out = Vec::new();
     let mut stack = vec![Arc::clone(plan)];
     while let Some(p) = stack.pop() {
