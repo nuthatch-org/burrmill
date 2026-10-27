@@ -104,6 +104,26 @@ impl SharedPool {
     }
 }
 
+/// What one statement did once it has run (nuthatch RFC-0073 FR4).
+///
+/// `sealed_bytes_scanned` is the only figure meant to repeat: the same statement over the same
+/// segments reads the same byte ranges. Not under `ORDER BY .. LIMIT`, whose dynamic filter prunes by
+/// what the other partitions have found so far. Time and memory move with the machine and its load.
+///
+/// There is no CPU time: DataFusion's per-operator `elapsed_compute` is only readable from a plan
+/// held until it ends, and holding a scan keeps its per-segment metrics alive (#86).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueryMetrics {
+    /// Bytes of segment data the scans and owned folds read, footers excluded.
+    pub sealed_bytes_scanned: u64,
+    /// Rows the statement answered with.
+    pub output_rows: u64,
+    /// Wall time from admission to the last batch, planning and the caller's handling of each included.
+    pub exec_nanos: u64,
+    /// The most the statement held against the memory pool at once.
+    pub peak_memory_bytes: u64,
+}
+
 /// Concrete engine: SQL in, RecordBatches out. Generics stay inside this crate.
 pub struct Engine {
     /// Taken only by `Drop`. A tab has no runtime; its event loop drives `sql_async`.
@@ -432,11 +452,17 @@ impl Engine {
     /// `sql` collects; a million-row answer is then a million rows live at once, which is the
     /// caller's memory and not the engine's. An encoder writing to a socket wants this instead.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn sql_for_each(
+    pub fn sql_for_each(&self, sql: &str, f: impl FnMut(RecordBatch) -> Result<()>) -> Result<()> {
+        self.sql_for_each_metered(sql, f).map(|_| ())
+    }
+
+    /// As [`Engine::sql_for_each`], and what the plan did once it has run: [`QueryMetrics`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn sql_for_each_metered(
         &self,
         sql: &str,
         mut f: impl FnMut(RecordBatch) -> Result<()>,
-    ) -> Result<()> {
+    ) -> Result<QueryMetrics> {
         // Parsed first, so malformed SQL is a syntax error as DuckDB reports it, not a refusal.
         refuse_hidden_names(sql)?;
         let logical = plan_query(&self.session, sql)?;
@@ -447,8 +473,16 @@ impl Engine {
             return Err(BurrmillError::Cancelled);
         }
         let _pass = self.gate.enter();
+        let started = std::time::Instant::now();
+        let timed = |m: QueryMetrics| QueryMetrics {
+            exec_nanos: started.elapsed().as_nanos() as u64,
+            ..m
+        };
         if tokio::runtime::Handle::try_current().is_err() {
-            return self.runtime().block_on(self.stream(logical, sql, &mut f));
+            return self
+                .runtime()
+                .block_on(self.stream(logical, sql, &mut f))
+                .map(timed);
         }
         // A host's runtime drives this thread and tokio will not block it, so the statement runs on
         // a thread of its own; its batches come back here, and `f` stays on the caller's thread.
@@ -462,7 +496,7 @@ impl Engine {
             // Refused by `f`: `rx` goes with the loop, the next send fails and the statement ends.
             let taken = rx.into_iter().try_for_each(&mut f);
             let run = run.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
-            taken.and(run)
+            taken.and(run).map(timed)
         })
     }
 
@@ -493,7 +527,7 @@ impl Engine {
         if self.cancel.is_cancelled() {
             return Err(BurrmillError::Cancelled);
         }
-        self.stream(logical, sql, &mut f).await
+        self.stream(logical, sql, &mut f).await.map(|_| ())
     }
 
     /// Addresses are read as fixed binary while every value in an address column is one. The
@@ -504,7 +538,7 @@ impl Engine {
         logical: datafusion_expr::LogicalPlan,
         sql: &str,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
-    ) -> Result<()> {
+    ) -> Result<QueryMetrics> {
         let mut sent = 0usize;
         let r = self
             .stream_once(logical, &mut |b| {
@@ -531,7 +565,7 @@ impl Engine {
         &self,
         logical: datafusion_expr::LogicalPlan,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
-    ) -> Result<()> {
+    ) -> Result<QueryMetrics> {
         use futures::StreamExt;
         let physical = self
             .session
@@ -540,8 +574,25 @@ impl Engine {
             .map_err(plan_err)?;
         // A host sees an address as the text it wrote.
         let physical = addresses::rendered(physical, &self.session).map_err(df_err)?;
-        let mut stream =
-            sequential::execute_stream(physical, self.session.task_ctx()).map_err(df_err)?;
+        // Its own recorder over the engine's pool, so a peak is this statement's and not a neighbour's.
+        let pool = Arc::new(datafusion_execution::memory_pool::PeakRecordingPool::new(
+            Arc::clone(&self.session.runtime_env().memory_pool),
+        ));
+        let runtime = datafusion_execution::runtime_env::RuntimeEnvBuilder::from_runtime_env(
+            self.session.runtime_env(),
+        )
+        .with_memory_pool(Arc::clone(&pool) as _)
+        .build_arc()
+        .map_err(df_err)?;
+        let ctx = Arc::new(
+            Arc::try_unwrap(self.session.task_ctx())
+                .map_err(|_| BurrmillError::Substrate("a task context already shared".into()))?
+                .with_runtime(runtime),
+        );
+        let mut counters = Vec::new();
+        catalog::sealed_counters(&physical, &mut counters);
+        let mut stream = sequential::execute_stream(physical, ctx).map_err(df_err)?;
+        let mut rows = 0u64;
         // A plan with no nest scan (`range`, a recursive CTE) never meets `CancelExec`, so the
         // token is also raced here; dropping the stream aborts the partition tasks under it.
         // A tab has no timer to poll it on; there the token is seen at each batch instead.
@@ -568,9 +619,16 @@ impl Engine {
                 Err(_) if self.cancel.is_cancelled() => return Err(BurrmillError::Cancelled),
                 Err(e) => return Err(df_err(e)),
             };
+            rows += b.num_rows() as u64;
             f(dialect::strip_dup_suffix(b))?;
         }
-        Ok(())
+        drop(stream);
+        Ok(QueryMetrics {
+            sealed_bytes_scanned: counters.iter().map(|c| c.value() as u64).sum(),
+            output_rows: rows,
+            exec_nanos: 0,
+            peak_memory_bytes: pool.max_reserved() as u64,
+        })
     }
 
     #[cfg(not(target_arch = "wasm32"))]

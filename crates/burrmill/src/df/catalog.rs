@@ -22,7 +22,9 @@ use datafusion_execution::object_store::ObjectStoreUrl;
 use datafusion_expr::utils::conjunction;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion_physical_plan::ExecutionPlan;
-use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion_physical_plan::metrics::{
+    Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue,
+};
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 use parquet::arrow::async_reader::AsyncFileReader;
 
@@ -184,9 +186,13 @@ pub(super) fn bookkeeping(plan: &Arc<dyn ExecutionPlan>, partition: usize) -> us
 }
 
 /// DataFusion's reader, its per-file metrics registered into a set dropped as soon as it is made.
-/// Kept, they held 4 KiB a segment until the scan ended (#86).
+/// Kept, they held 4 KiB a segment until the scan ended (#86). The data bytes it reads go to the
+/// scan's one counter instead, which [`crate::QueryMetrics`] reports.
 #[derive(Debug)]
-struct Unmetered(Arc<dyn ParquetFileReaderFactory>);
+struct Unmetered(Arc<dyn ParquetFileReaderFactory>, Count);
+
+/// The [`crate::QueryMetrics::sealed_bytes_scanned`] counter in a scan's metrics.
+pub(super) const SEALED_BYTES: &str = "sealed_bytes_scanned";
 
 impl ParquetFileReaderFactory for Unmetered {
     fn create_reader(
@@ -197,8 +203,64 @@ impl ParquetFileReaderFactory for Unmetered {
         _metrics: &ExecutionPlanMetricsSet,
     ) -> DFResult<Box<dyn AsyncFileReader + Send>> {
         let unread = ExecutionPlanMetricsSet::new();
-        self.0
-            .create_reader(partition_index, file, metadata_size_hint, &unread)
+        let inner = self
+            .0
+            .create_reader(partition_index, file, metadata_size_hint, &unread)?;
+        Ok(Box::new(Counted {
+            inner,
+            bytes: self.1.clone(),
+        }))
+    }
+}
+
+/// The counter a plan's segment scan or owned fold reads into, taken before it runs: holding the
+/// plan itself through the statement would keep every segment's DataFusion metrics alive (#86).
+pub(super) fn sealed_counters(plan: &Arc<dyn ExecutionPlan>, out: &mut Vec<Count>) {
+    for m in plan.metrics().iter().flat_map(|s| s.iter()) {
+        if let MetricValue::Count { name, count } = m.value()
+            && name == SEALED_BYTES
+        {
+            out.push(count.clone());
+        }
+    }
+    for c in plan.children() {
+        sealed_counters(c, out);
+    }
+}
+
+/// Counts the byte ranges a scan reads. Footers come through `get_metadata` and the footer cache,
+/// so a warm cache and a cold one count the same.
+struct Counted {
+    inner: Box<dyn AsyncFileReader + Send>,
+    bytes: Count,
+}
+
+impl AsyncFileReader for Counted {
+    fn get_bytes(
+        &mut self,
+        range: std::ops::Range<u64>,
+    ) -> futures::future::BoxFuture<'_, parquet::errors::Result<bytes::Bytes>> {
+        self.bytes.add((range.end - range.start) as usize);
+        self.inner.get_bytes(range)
+    }
+
+    fn get_byte_ranges(
+        &mut self,
+        ranges: Vec<std::ops::Range<u64>>,
+    ) -> futures::future::BoxFuture<'_, parquet::errors::Result<Vec<bytes::Bytes>>> {
+        self.bytes
+            .add(ranges.iter().map(|r| (r.end - r.start) as usize).sum());
+        self.inner.get_byte_ranges(ranges)
+    }
+
+    fn get_metadata<'a>(
+        &'a mut self,
+        options: Option<&'a ArrowReaderOptions>,
+    ) -> futures::future::BoxFuture<
+        'a,
+        parquet::errors::Result<Arc<parquet::file::metadata::ParquetMetaData>>,
+    > {
+        self.inner.get_metadata(options)
     }
 }
 
@@ -290,11 +352,12 @@ impl TableProvider for SegmentTable {
         // The session's footer cache is read only through this factory; a limit on the cache
         // manager alone leaves every statement reading every footer again (burrmill#98).
         let footers = state.runtime_env().cache_manager.get_file_metadata_cache();
-        let mut source = ParquetSource::new(self.schema.clone())
-            .with_table_parquet_options(opts)
-            .with_parquet_file_reader_factory(Arc::new(Unmetered(Arc::new(
-                CachedParquetFileReaderFactory::new(store, footers),
-            ))));
+        let source = ParquetSource::new(self.schema.clone()).with_table_parquet_options(opts);
+        let bytes = MetricBuilder::new(source.metrics()).global_counter(SEALED_BYTES);
+        let mut source = source.with_parquet_file_reader_factory(Arc::new(Unmetered(
+            Arc::new(CachedParquetFileReaderFactory::new(store, footers)),
+            bytes,
+        )));
         let filters = filters
             .iter()
             .map(|f| unlowered(f.clone(), &self.lowercase))
