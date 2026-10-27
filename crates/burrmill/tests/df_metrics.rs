@@ -76,6 +76,7 @@ fn a_statement_the_caller_stops_still_reports_what_it_read() {
     });
     assert!(r.is_err());
     assert!(m.sealed_bytes_scanned > 0);
+    assert!(m.sealed_bytes_read > 0);
     assert!(m.output_rows > 0);
 }
 
@@ -86,7 +87,12 @@ const STATEMENTS: &[&str] = &[
     "SELECT block_number, who FROM transfer ORDER BY amount DESC, block_number LIMIT 5",
     "SELECT t.who FROM transfer t JOIN transfer u ON t.block_number = u.block_number WHERE u.block_number < 600",
     "SELECT who, SUM(CAST(amount AS DECIMAL(38,0))) AS s FROM transfer GROUP BY who",
+    // A TopK's dynamic filter, and a limit that stops the scan: what is read depends on the race.
+    TOPK,
+    "SELECT * FROM transfer LIMIT 10",
 ];
+
+const TOPK: &str = "SELECT * FROM transfer ORDER BY block_number DESC LIMIT 5";
 
 #[test]
 fn sealed_bytes_repeat_for_the_same_statement_in_one_engine_and_across_engines() {
@@ -98,9 +104,9 @@ fn sealed_bytes_repeat_for_the_same_statement_in_one_engine_and_across_engines()
         let want = metered(&first, sql);
         assert!(want.sealed_bytes_scanned > 0, "{sql}: nothing counted");
         for _ in 0..10 {
+            let again = metered(&first, sql);
             assert_eq!(
-                metered(&first, sql).sealed_bytes_scanned,
-                want.sealed_bytes_scanned,
+                again.sealed_bytes_scanned, want.sealed_bytes_scanned,
                 "{sql}, warm"
             );
         }
@@ -184,4 +190,21 @@ fn sql_for_each_answers_as_before() {
     })
     .unwrap();
     assert_eq!(rows, 10);
+}
+
+/// Why `sealed_bytes_scanned` is not the bytes read: under a TopK the read moves between runs.
+#[test]
+fn a_topk_reads_by_the_race_and_selects_the_same() {
+    let tmp = tempfile::tempdir().unwrap();
+    nest(tmp.path());
+    let e = engine(tmp.path());
+    let runs: Vec<QueryMetrics> = (0..30).map(|_| metered(&e, TOPK)).collect();
+    let read: std::collections::BTreeSet<u64> = runs.iter().map(|m| m.sealed_bytes_read).collect();
+    let selected: std::collections::BTreeSet<u64> =
+        runs.iter().map(|m| m.sealed_bytes_scanned).collect();
+    assert_eq!(selected.len(), 1, "{selected:?}");
+    assert!(
+        read.len() > 1,
+        "the fixture no longer races, so this proves nothing: {read:?}"
+    );
 }

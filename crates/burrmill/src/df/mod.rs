@@ -106,16 +106,21 @@ impl SharedPool {
 
 /// What one statement did once it has run (nuthatch RFC-0073 FR4).
 ///
-/// `sealed_bytes_scanned` is the only figure meant to repeat: the same statement over the same
-/// segments reads the same byte ranges. Not under `ORDER BY .. LIMIT`, whose dynamic filter prunes by
-/// what the other partitions have found so far. Time and memory move with the machine and its load.
+/// `sealed_bytes_scanned` is the figure meant to repeat: decided from immutable footers before the
+/// plan runs, it is the same for the same statement over the same segments. `sealed_bytes_read` is what
+/// was fetched, which a TopK's dynamic filter or a `LIMIT` cuts by how the partitions raced. Time and
+/// memory move with the machine and its load.
 ///
-/// There is no CPU time: DataFusion's per-operator `elapsed_compute` is only readable from a plan
-/// held until it ends, and holding a scan keeps its per-segment metrics alive (#86).
+/// There is no CPU time. A scan registers each segment's compute time into its metrics set as it opens
+/// the segment, so reading it at the end means holding that set through the scan: 7 KiB a segment
+/// outside the pool in `tests/df_scanpool.rs`, against 1 KiB without (#86).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QueryMetrics {
-    /// Bytes of segment data the scans and owned folds read, footers excluded.
+    /// Data bytes of the column chunks the plan selects: its projection and filter columns, in every
+    /// row group its static predicate keeps by row-group statistics. Footers excluded.
     pub sealed_bytes_scanned: u64,
+    /// Data bytes the scans and owned folds actually read, footers excluded.
+    pub sealed_bytes_read: u64,
     /// Rows the statement answered with.
     pub output_rows: u64,
     /// Wall time from admission to the last batch, planning and the caller's handling of each included.
@@ -597,6 +602,13 @@ impl Engine {
                 .map_err(|_| BurrmillError::Substrate("a task context already shared".into()))?
                 .with_runtime(runtime),
         );
+        let selecting = catalog::selected_bytes(
+            catalog::selections(&physical, ctx.runtime_env().as_ref()).map_err(df_err)?,
+            ctx.runtime_env().cache_manager.get_file_metadata_cache(),
+        );
+        // Beside the statement rather than before it: a footer pass over every segment is not free.
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut selecting = Abort(tokio::spawn(selecting));
         let mut counters = Vec::new();
         catalog::sealed_counters(&physical, &mut counters);
         let mut stream = sequential::execute_stream(physical, ctx).map_err(df_err)?;
@@ -636,7 +648,23 @@ impl Engine {
         }
         .await;
         drop(stream);
-        metrics.sealed_bytes_scanned += counters.iter().map(|c| c.value() as u64).sum::<u64>();
+        #[cfg(not(target_arch = "wasm32"))]
+        let selected = match &r {
+            Err(BurrmillError::Cancelled) => Ok(0),
+            _ => (&mut selecting.0)
+                .await
+                .map_err(|e| BurrmillError::Substrate(e.to_string()))?,
+        };
+        #[cfg(target_arch = "wasm32")]
+        let selected = selecting.await;
+        let selected = selected.map_err(df_err)?;
+        let folded: u64 = counters
+            .iter()
+            .filter(|c| c.1)
+            .map(|c| c.0.value() as u64)
+            .sum();
+        metrics.sealed_bytes_scanned += selected + folded;
+        metrics.sealed_bytes_read += counters.iter().map(|c| c.0.value() as u64).sum::<u64>();
         metrics.output_rows += rows;
         metrics.peak_memory_bytes = metrics.peak_memory_bytes.max(pool.max_reserved() as u64);
         r
@@ -645,6 +673,17 @@ impl Engine {
     #[cfg(not(target_arch = "wasm32"))]
     fn runtime(&self) -> &tokio::runtime::Runtime {
         self.rt.as_ref().expect("taken only by drop")
+    }
+}
+
+/// A task stopped with the statement that spawned it, refused or cancelled.
+#[cfg(not(target_arch = "wasm32"))]
+struct Abort<T>(tokio::task::JoinHandle<T>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T> Drop for Abort<T> {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

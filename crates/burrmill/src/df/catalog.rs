@@ -215,17 +215,130 @@ impl ParquetFileReaderFactory for Unmetered {
 
 /// The counter a plan's segment scan or owned fold reads into, taken before it runs: holding the
 /// plan itself through the statement would keep every segment's DataFusion metrics alive (#86).
-pub(super) fn sealed_counters(plan: &Arc<dyn ExecutionPlan>, out: &mut Vec<Count>) {
+/// An owned fold's counter is flagged: it reads exactly what its footers select, so it counts as both.
+pub(super) fn sealed_counters(plan: &Arc<dyn ExecutionPlan>, out: &mut Vec<(Count, bool)>) {
+    let fold = plan.name() == "OwnedSignedFoldExec";
     for m in plan.metrics().iter().flat_map(|s| s.iter()) {
         if let MetricValue::Count { name, count } = m.value()
             && name == SEALED_BYTES
         {
-            out.push(count.clone());
+            out.push((count.clone(), fold));
         }
     }
     for c in plan.children() {
         sealed_counters(c, out);
     }
+}
+
+/// One segment scan's static selection: what its footers decide it may read, taken from the plan
+/// before it runs. A dynamic filter is still `true` then, so the predicate here is the static one.
+pub(super) struct Selection {
+    schema: SchemaRef,
+    pruning: Option<Arc<datafusion_physical_optimizer::pruning::PruningPredicate>>,
+    columns: Option<HashSet<String>>,
+    store: Arc<dyn object_store::ObjectStore>,
+    files: Vec<object_store::ObjectMeta>,
+}
+
+/// Every segment scan in `plan`, owned, so the plan is not held while the bytes are summed.
+pub(super) fn selections(
+    plan: &Arc<dyn ExecutionPlan>,
+    env: &datafusion_execution::runtime_env::RuntimeEnv,
+) -> DFResult<Vec<Selection>> {
+    use datafusion_physical_expr::utils::collect_columns;
+    use datafusion_physical_optimizer::pruning::PruningPredicateBuilder;
+
+    let mut out = Vec::new();
+    let mut stack = vec![Arc::clone(plan)];
+    while let Some(p) = stack.pop() {
+        stack.extend(p.children().into_iter().cloned());
+        let Some(c) = p
+            .downcast_ref::<DataSourceExec>()
+            .and_then(|d| d.data_source().downcast_ref::<FileScanConfig>())
+        else {
+            continue;
+        };
+        let Some(source) = c.file_source().downcast_ref::<ParquetSource>() else {
+            continue;
+        };
+        let schema = Arc::clone(c.file_schema());
+        let predicate = source.filter();
+        let pruning = predicate.clone().and_then(|e| {
+            PruningPredicateBuilder::new()
+                .with_file_schema(Arc::clone(&schema))
+                .build(e)
+        });
+        let columns = source.projection().map(|proj| {
+            let mut names: HashSet<String> = proj
+                .column_indices()
+                .into_iter()
+                .filter_map(|i| schema.fields().get(i).map(|f| f.name().clone()))
+                .collect();
+            if let Some(e) = &predicate {
+                names.extend(collect_columns(e).into_iter().map(|c| c.name().to_string()));
+            }
+            names
+        });
+        out.push(Selection {
+            schema,
+            pruning,
+            columns,
+            store: env.object_store(&c.object_store_url)?,
+            files: c
+                .file_groups
+                .iter()
+                .flat_map(|g| g.iter().map(|f| f.object_meta.clone()))
+                .collect(),
+        });
+    }
+    Ok(out)
+}
+
+/// The data bytes the scans select: the projected and filtered column chunks of every row group
+/// their row-group statistics keep, read from the footers. Unlike the bytes a scan reads, which a
+/// TopK's dynamic filter or a `LIMIT` cut by how the partitions race, this repeats for the same
+/// statement over the same segments.
+pub(super) async fn selected_bytes(
+    scans: Vec<Selection>,
+    footers: Arc<datafusion_execution::cache::cache_manager::FileMetadataCache>,
+) -> DFResult<u64> {
+    use datafusion_datasource_parquet::metadata::DFParquetMetadata;
+    use datafusion_datasource_parquet::{
+        ParquetAccessPlan, ParquetFileMetrics, RowGroupAccessPlanFilter,
+    };
+    use parquet::arrow::ProjectionMask;
+
+    let unread = ParquetFileMetrics::new(0, "selected", &ExecutionPlanMetricsSet::new());
+    let mut total = 0u64;
+    for s in scans {
+        for f in s.files {
+            let meta = DFParquetMetadata::new(s.store.as_ref(), &f)
+                .with_file_metadata_cache(Some(Arc::clone(&footers)))
+                .with_page_index_policy(Some(parquet::file::metadata::PageIndexPolicy::Skip))
+                .fetch_metadata()
+                .await?;
+            let groups = meta.row_groups();
+            let descr = meta.file_metadata().schema_descr();
+            let mut keep = RowGroupAccessPlanFilter::new(ParquetAccessPlan::new_all(groups.len()));
+            if let Some(p) = &s.pruning {
+                keep.prune_by_statistics(&s.schema, descr, groups, p, &unread);
+            }
+            let mask = s
+                .columns
+                .as_ref()
+                .map(|n| ProjectionMask::columns(descr, n.iter().map(String::as_str)));
+            for g in keep.row_group_indexes() {
+                total += groups[g]
+                    .columns()
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| mask.as_ref().is_none_or(|m| m.leaf_included(*i)))
+                    .map(|(_, c)| c.compressed_size().max(0) as u64)
+                    .sum::<u64>();
+            }
+        }
+    }
+    Ok(total)
 }
 
 /// Counts the byte ranges a scan reads. Footers come through `get_metadata` and the footer cache,
