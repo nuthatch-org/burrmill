@@ -120,6 +120,8 @@ rayon.workspace = true
 # shipped graph, and the .slt files stay runnable by any other engine's runner - which is the whole
 # point of not inventing a format.
 sqllogictest = "0.28"
+# Arbitrary text through the pre-parse rewrites, which must refuse rather than panic.
+proptest = "1"
 
 [[test]]
 name = "df_engine"
