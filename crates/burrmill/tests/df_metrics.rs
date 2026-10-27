@@ -61,7 +61,8 @@ fn engine(root: &Path) -> Engine {
 
 fn metered(e: &Engine, sql: &str) -> QueryMetrics {
     let mut m = QueryMetrics::default();
-    e.sql_for_each_metered(sql, &mut m, |_| Ok(())).unwrap();
+    e.sql_for_each_metered(sql, Some(&mut m), |_| Ok(()))
+        .unwrap();
     m
 }
 
@@ -71,7 +72,7 @@ fn a_statement_the_caller_stops_still_reports_what_it_read() {
     nest(tmp.path());
     let e = engine(tmp.path());
     let mut m = QueryMetrics::default();
-    let r = e.sql_for_each_metered("SELECT * FROM transfer", &mut m, |_| {
+    let r = e.sql_for_each_metered("SELECT * FROM transfer", Some(&mut m), |_| {
         Err(burrmill::BurrmillError::LimitExceeded("cap".into()))
     });
     assert!(r.is_err());

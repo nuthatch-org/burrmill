@@ -40,10 +40,12 @@ fn only_a_metered_statement_runs_the_selection_pass() {
         10
     );
     e.sql_for_each(sql, |_| Ok(())).unwrap();
+    e.sql_for_each_metered(sql, None, |_| Ok(())).unwrap();
     assert_eq!(burrmill::df::selection_passes(), before, "unmetered");
 
     let mut m = QueryMetrics::default();
-    e.sql_for_each_metered(sql, &mut m, |_| Ok(())).unwrap();
+    e.sql_for_each_metered(sql, Some(&mut m), |_| Ok(()))
+        .unwrap();
     assert_eq!(burrmill::df::selection_passes(), before + 1, "metered");
     assert!(m.sealed_bytes_scanned > 0);
 }

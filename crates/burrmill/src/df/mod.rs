@@ -465,24 +465,15 @@ impl Engine {
     /// caller's memory and not the engine's. An encoder writing to a socket wants this instead.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn sql_for_each(&self, sql: &str, f: impl FnMut(RecordBatch) -> Result<()>) -> Result<()> {
-        self.run(sql, None, f)
+        self.sql_for_each_metered(sql, None, f)
     }
 
     /// As [`Engine::sql_for_each`], adding what the statement did to `metrics`: as far as it got, so a
     /// statement `f` stopped or the engine refused still reports what it read. The selection is a
-    /// footer pass over every segment the plan scans, which [`Engine::sql_for_each`] does not pay.
+    /// footer pass over every segment the plan scans, which `None` does not pay: it runs exactly as
+    /// [`Engine::sql_for_each`] does.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn sql_for_each_metered(
-        &self,
-        sql: &str,
-        metrics: &mut QueryMetrics,
-        f: impl FnMut(RecordBatch) -> Result<()>,
-    ) -> Result<()> {
-        self.run(sql, Some(metrics), f)
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn run(
         &self,
         sql: &str,
         mut metrics: Option<&mut QueryMetrics>,
