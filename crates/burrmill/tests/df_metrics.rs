@@ -60,7 +60,23 @@ fn engine(root: &Path) -> Engine {
 }
 
 fn metered(e: &Engine, sql: &str) -> QueryMetrics {
-    e.sql_for_each_metered(sql, |_| Ok(())).unwrap()
+    let mut m = QueryMetrics::default();
+    e.sql_for_each_metered(sql, &mut m, |_| Ok(())).unwrap();
+    m
+}
+
+#[test]
+fn a_statement_the_caller_stops_still_reports_what_it_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    nest(tmp.path());
+    let e = engine(tmp.path());
+    let mut m = QueryMetrics::default();
+    let r = e.sql_for_each_metered("SELECT * FROM transfer", &mut m, |_| {
+        Err(burrmill::BurrmillError::LimitExceeded("cap".into()))
+    });
+    assert!(r.is_err());
+    assert!(m.sealed_bytes_scanned > 0);
+    assert!(m.output_rows > 0);
 }
 
 const STATEMENTS: &[&str] = &[

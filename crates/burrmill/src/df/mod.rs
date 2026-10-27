@@ -453,16 +453,18 @@ impl Engine {
     /// caller's memory and not the engine's. An encoder writing to a socket wants this instead.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn sql_for_each(&self, sql: &str, f: impl FnMut(RecordBatch) -> Result<()>) -> Result<()> {
-        self.sql_for_each_metered(sql, f).map(|_| ())
+        self.sql_for_each_metered(sql, &mut QueryMetrics::default(), f)
     }
 
-    /// As [`Engine::sql_for_each`], and what the plan did once it has run: [`QueryMetrics`].
+    /// As [`Engine::sql_for_each`], adding what the statement did to `metrics`: as far as it got, so a
+    /// statement `f` stopped or the engine refused still reports what it read.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn sql_for_each_metered(
         &self,
         sql: &str,
+        metrics: &mut QueryMetrics,
         mut f: impl FnMut(RecordBatch) -> Result<()>,
-    ) -> Result<QueryMetrics> {
+    ) -> Result<()> {
         // Parsed first, so malformed SQL is a syntax error as DuckDB reports it, not a refusal.
         refuse_hidden_names(sql)?;
         let logical = plan_query(&self.session, sql)?;
@@ -474,30 +476,30 @@ impl Engine {
         }
         let _pass = self.gate.enter();
         let started = std::time::Instant::now();
-        let timed = |m: QueryMetrics| QueryMetrics {
-            exec_nanos: started.elapsed().as_nanos() as u64,
-            ..m
-        };
         if tokio::runtime::Handle::try_current().is_err() {
-            return self
+            let r = self
                 .runtime()
-                .block_on(self.stream(logical, sql, &mut f))
-                .map(timed);
+                .block_on(self.stream(logical, sql, &mut f, metrics));
+            metrics.exec_nanos += started.elapsed().as_nanos() as u64;
+            return r;
         }
         // A host's runtime drives this thread and tokio will not block it, so the statement runs on
         // a thread of its own; its batches come back here, and `f` stays on the caller's thread.
-        std::thread::scope(|s| {
+        let held = &mut *metrics;
+        let r = std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             let run = s.spawn(move || {
                 let mut send = |b| tx.send(b).map_err(|_| BurrmillError::Cancelled);
                 self.runtime()
-                    .block_on(self.stream(logical, sql, &mut send))
+                    .block_on(self.stream(logical, sql, &mut send, held))
             });
             // Refused by `f`: `rx` goes with the loop, the next send fails and the statement ends.
             let taken = rx.into_iter().try_for_each(&mut f);
             let run = run.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
-            taken.and(run).map(timed)
-        })
+            taken.and(run)
+        });
+        metrics.exec_nanos += started.elapsed().as_nanos() as u64;
+        r
     }
 
     /// Run a query on the caller's event loop, for a host with one thread and no runtime: a
@@ -527,7 +529,8 @@ impl Engine {
         if self.cancel.is_cancelled() {
             return Err(BurrmillError::Cancelled);
         }
-        self.stream(logical, sql, &mut f).await.map(|_| ())
+        self.stream(logical, sql, &mut f, &mut QueryMetrics::default())
+            .await
     }
 
     /// Addresses are read as fixed binary while every value in an address column is one. The
@@ -538,13 +541,18 @@ impl Engine {
         logical: datafusion_expr::LogicalPlan,
         sql: &str,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
-    ) -> Result<QueryMetrics> {
+        metrics: &mut QueryMetrics,
+    ) -> Result<()> {
         let mut sent = 0usize;
         let r = self
-            .stream_once(logical, &mut |b| {
-                sent += 1;
-                f(b)
-            })
+            .stream_once(
+                logical,
+                &mut |b| {
+                    sent += 1;
+                    f(b)
+                },
+                metrics,
+            )
             .await;
         match r {
             Err(BurrmillError::Substrate(ref m))
@@ -555,7 +563,7 @@ impl Engine {
                 log::warn!("{m}: addresses are read as text from now on");
                 // Planned afresh: the plan that refused holds what its shared subqueries ran.
                 let fresh = plan_query(&self.session, sql)?;
-                self.stream_once(fresh, f).await
+                self.stream_once(fresh, f, metrics).await
             }
             r => r,
         }
@@ -565,8 +573,8 @@ impl Engine {
         &self,
         logical: datafusion_expr::LogicalPlan,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
-    ) -> Result<QueryMetrics> {
-        use futures::StreamExt;
+        metrics: &mut QueryMetrics,
+    ) -> Result<()> {
         let physical = self
             .session
             .create_physical_plan(&logical)
@@ -593,42 +601,45 @@ impl Engine {
         catalog::sealed_counters(&physical, &mut counters);
         let mut stream = sequential::execute_stream(physical, ctx).map_err(df_err)?;
         let mut rows = 0u64;
-        // A plan with no nest scan (`range`, a recursive CTE) never meets `CancelExec`, so the
-        // token is also raced here; dropping the stream aborts the partition tasks under it.
-        // A tab has no timer to poll it on; there the token is seen at each batch instead.
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut stopped = std::pin::pin!(async {
-            while !self.cancel.is_cancelled() {
-                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let r = async {
+            use futures::StreamExt;
+            // A plan with no nest scan (`range`, a recursive CTE) never meets `CancelExec`, so the
+            // token is also raced here; dropping the stream aborts the partition tasks under it.
+            // A tab has no timer to poll it on; there the token is seen at each batch instead.
+            #[cfg(not(target_arch = "wasm32"))]
+            let mut stopped = std::pin::pin!(async {
+                while !self.cancel.is_cancelled() {
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+            });
+            #[cfg(target_arch = "wasm32")]
+            let mut stopped = std::pin::pin!(futures::future::pending::<()>());
+            loop {
+                let b = match futures::future::select(stream.next(), stopped.as_mut()).await {
+                    futures::future::Either::Left((Some(b), _)) => b,
+                    futures::future::Either::Left((None, _)) => break,
+                    futures::future::Either::Right(_) => return Err(BurrmillError::Cancelled),
+                };
+                if self.cancel.is_cancelled() {
+                    return Err(BurrmillError::Cancelled);
+                }
+                let b = match b {
+                    Ok(b) => b,
+                    // A scan stopped by the token surfaces here as its error; say what it was.
+                    Err(_) if self.cancel.is_cancelled() => return Err(BurrmillError::Cancelled),
+                    Err(e) => return Err(df_err(e)),
+                };
+                rows += b.num_rows() as u64;
+                f(dialect::strip_dup_suffix(b))?;
             }
-        });
-        #[cfg(target_arch = "wasm32")]
-        let mut stopped = std::pin::pin!(futures::future::pending::<()>());
-        loop {
-            let b = match futures::future::select(stream.next(), stopped.as_mut()).await {
-                futures::future::Either::Left((Some(b), _)) => b,
-                futures::future::Either::Left((None, _)) => break,
-                futures::future::Either::Right(_) => return Err(BurrmillError::Cancelled),
-            };
-            if self.cancel.is_cancelled() {
-                return Err(BurrmillError::Cancelled);
-            }
-            let b = match b {
-                Ok(b) => b,
-                // A scan stopped by the token surfaces here as its error; say what it was.
-                Err(_) if self.cancel.is_cancelled() => return Err(BurrmillError::Cancelled),
-                Err(e) => return Err(df_err(e)),
-            };
-            rows += b.num_rows() as u64;
-            f(dialect::strip_dup_suffix(b))?;
+            Ok(())
         }
+        .await;
         drop(stream);
-        Ok(QueryMetrics {
-            sealed_bytes_scanned: counters.iter().map(|c| c.value() as u64).sum(),
-            output_rows: rows,
-            exec_nanos: 0,
-            peak_memory_bytes: pool.max_reserved() as u64,
-        })
+        metrics.sealed_bytes_scanned += counters.iter().map(|c| c.value() as u64).sum::<u64>();
+        metrics.output_rows += rows;
+        metrics.peak_memory_bytes = metrics.peak_memory_bytes.max(pool.max_reserved() as u64);
+        r
     }
 
     #[cfg(not(target_arch = "wasm32"))]
