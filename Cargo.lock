@@ -782,6 +782,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "indexmap",
  "itertools 0.14.0",
+ "libc",
  "log",
  "object_store",
  "parquet",

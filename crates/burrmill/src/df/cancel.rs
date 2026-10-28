@@ -12,7 +12,10 @@
 //! checked, and so is every evaluation of its filter.
 
 use std::fmt;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 
 use arrow::datatypes::{FieldRef, Schema};
 use arrow::record_batch::RecordBatch;
@@ -23,6 +26,7 @@ use datafusion_execution::memory_pool::MemoryConsumer;
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_plan::RecordBatchStream;
 use datafusion_physical_plan::filter_pushdown::{
     ChildPushdownResult, FilterDescription, FilterPushdownPhase, FilterPushdownPropagation,
 };
@@ -30,6 +34,7 @@ use datafusion_physical_plan::joins::utils::JoinFilter;
 use datafusion_physical_plan::joins::{
     HashJoinExec, NestedLoopJoinExec, NestedLoopJoinExecBuilder,
 };
+use datafusion_physical_plan::metrics::Count;
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_session::PhysicalOptimizerRule;
@@ -41,6 +46,14 @@ use crate::CancelToken;
 pub(super) struct CancelExec {
     inner: Arc<dyn ExecutionPlan>,
     token: CancelToken,
+    /// A segment scan's thread-CPU meter, off until a metered statement arms it.
+    cpu: Option<ScanCpu>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct ScanCpu {
+    armed: Arc<AtomicBool>,
+    nanos: Count,
 }
 
 impl CancelExec {
@@ -48,7 +61,38 @@ impl CancelExec {
         inner: Arc<dyn ExecutionPlan>,
         token: CancelToken,
     ) -> Arc<dyn ExecutionPlan> {
-        Arc::new(Self { inner, token })
+        Arc::new(Self {
+            inner,
+            token,
+            cpu: None,
+        })
+    }
+
+    /// [`CancelExec::wrap`] for a segment scan, whose decoding [`arm_scan_cpu`] can time.
+    pub(super) fn wrap_scan(
+        inner: Arc<dyn ExecutionPlan>,
+        token: CancelToken,
+    ) -> Arc<dyn ExecutionPlan> {
+        Arc::new(Self {
+            inner,
+            token,
+            cpu: Some(ScanCpu::default()),
+        })
+    }
+}
+
+/// Arm every segment scan in `plan` to time its polls, and hand back their counters, before it runs.
+/// A scan decodes inside its own `poll_next`, so the thread CPU spent there is the scan's.
+pub(super) fn arm_scan_cpu(plan: &Arc<dyn ExecutionPlan>, out: &mut Vec<Count>) {
+    if let Some(cpu) = plan
+        .downcast_ref::<CancelExec>()
+        .and_then(|c| c.cpu.as_ref())
+    {
+        cpu.armed.store(true, Ordering::Relaxed);
+        out.push(cpu.nanos.clone());
+    }
+    for c in plan.children() {
+        arm_scan_cpu(c, out);
     }
 }
 
@@ -81,6 +125,7 @@ impl ExecutionPlan for CancelExec {
         Ok(Arc::new(Self {
             inner: children.pop().expect("one child"),
             token: self.token.clone(),
+            cpu: self.cpu.clone(),
         }))
     }
     // Passes a top-k's dynamic filter through, which would otherwise stop here short of the scan.
@@ -123,7 +168,17 @@ impl ExecutionPlan for CancelExec {
             r.grow(bytes);
             r
         });
-        let stream = self.inner.execute(partition, ctx)?;
+        let mut stream = self.inner.execute(partition, ctx)?;
+        if let Some(cpu) = self
+            .cpu
+            .as_ref()
+            .filter(|c| c.armed.load(Ordering::Relaxed))
+        {
+            stream = Box::pin(Timed {
+                inner: stream,
+                nanos: cpu.nanos.clone(),
+            });
+        }
         let schema = stream.schema();
         let token = self.token.clone();
         let checked = stream.map(move |item| {
@@ -135,6 +190,53 @@ impl ExecutionPlan for CancelExec {
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, checked)))
     }
+}
+
+/// A scan's stream, adding the thread CPU each poll takes to `nanos`. A poll runs on one thread from
+/// start to finish, so the two readings are the same thread's clock.
+struct Timed {
+    inner: SendableRecordBatchStream,
+    nanos: Count,
+}
+
+impl futures::Stream for Timed {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let started = thread_cpu_nanos();
+        let out = self.inner.poll_next_unpin(cx);
+        self.nanos
+            .add(thread_cpu_nanos().saturating_sub(started) as usize);
+        out
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl RecordBatchStream for Timed {
+    fn schema(&self) -> arrow::datatypes::SchemaRef {
+        self.inner.schema()
+    }
+}
+
+#[cfg(unix)]
+fn thread_cpu_nanos() -> u64 {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `t` is a valid, writable timespec for the duration of the call.
+    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) } != 0 {
+        return 0;
+    }
+    t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
+}
+
+#[cfg(not(unix))]
+fn thread_cpu_nanos() -> u64 {
+    0
 }
 
 /// Wraps every join's output in [`CancelExec`] and its filter in [`CancelExpr`]. Last among the

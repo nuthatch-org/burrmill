@@ -498,7 +498,7 @@ impl TableProvider for SegmentTable {
             .with_projection_indices(projection.cloned())?
             .with_limit(limit)
             .build();
-        Ok(super::cancel::CancelExec::wrap(
+        Ok(super::cancel::CancelExec::wrap_scan(
             DataSourceExec::from_data_source(cfg),
             self.cancel.clone(),
         ))

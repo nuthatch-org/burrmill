@@ -50,6 +50,7 @@ datafusion = [
     "dep:datafusion-physical-plan",
     "dep:datafusion-session",
     "dep:datafusion-sql",
+    "dep:libc",
 ]
 
 [dependencies]
@@ -96,6 +97,10 @@ datafusion-sql = { version = "=55.0.0", default-features = false, features = ["r
 # its randomness from the browser.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"], optional = true }
+
+# The scan clock (`CLOCK_THREAD_CPUTIME_ID`); elsewhere a scan reports no CPU.
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { version = "1", features = ["js"] }
@@ -246,6 +251,11 @@ required-features = ["datafusion"]
 [[test]]
 name = "df_metrics"
 path = "tests/df_metrics.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_scancpu"
+path = "tests/df_scancpu.rs"
 required-features = ["datafusion"]
 
 [[test]]
