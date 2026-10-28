@@ -118,9 +118,10 @@ pub fn selection_passes() -> u64 {
 /// was fetched, which a TopK's dynamic filter or a `LIMIT` cuts by how the partitions raced. Time and
 /// memory move with the machine and its load.
 ///
-/// There is no CPU time. A scan registers each segment's compute time into its metrics set as it opens
-/// the segment, so reading it at the end means holding that set through the scan: 7 KiB a segment
-/// outside the pool in `tests/df_scanpool.rs`, against 1 KiB without (#86).
+/// CPU is the scans' alone, timed around their polls by the thread clock. DataFusion's per-operator
+/// `elapsed_compute` would cover the rest, but a scan registers it per segment, so reading it at the
+/// end means holding that set through the scan: 7 KiB a segment outside the pool in
+/// `tests/df_scanpool.rs`, against 1 KiB without (#86).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QueryMetrics {
     /// Data bytes of the column chunks the plan selects: its projection and filter columns, in every
@@ -134,6 +135,9 @@ pub struct QueryMetrics {
     pub exec_nanos: u64,
     /// The most the statement held against the memory pool at once.
     pub peak_memory_bytes: u64,
+    /// Thread CPU the segment scans spent inside their own polls: fetching what was already read,
+    /// decoding, filtering. Operators above the scans, and an owned fold, are not counted.
+    pub scan_cpu_nanos: u64,
 }
 
 /// Concrete engine: SQL in, RecordBatches out. Generics stay inside this crate.
@@ -628,6 +632,8 @@ impl Engine {
         let mut selecting = Abort(tokio::spawn(selecting));
         let mut counters = Vec::new();
         catalog::sealed_counters(&physical, &mut counters);
+        let mut cpu = Vec::new();
+        cancel::arm_scan_cpu(&physical, &mut cpu);
         let stream = sequential::execute_stream(physical, ctx).map_err(df_err)?;
         let mut rows = 0u64;
         let r = self.drain(stream, f, &mut rows).await;
@@ -650,6 +656,7 @@ impl Engine {
         metrics.sealed_bytes_read += counters.iter().map(|c| c.0.value() as u64).sum::<u64>();
         metrics.output_rows += rows;
         metrics.peak_memory_bytes = metrics.peak_memory_bytes.max(pool.max_reserved() as u64);
+        metrics.scan_cpu_nanos += cpu.iter().map(|c| c.value() as u64).sum::<u64>();
         r
     }
 
