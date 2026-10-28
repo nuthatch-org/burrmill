@@ -269,6 +269,11 @@ path = "tests/df_scanpool.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_valuebound"
+path = "tests/df_valuebound.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_sharedpool"
 path = "tests/df_sharedpool.rs"
 required-features = ["datafusion"]

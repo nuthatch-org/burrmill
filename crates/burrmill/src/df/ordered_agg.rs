@@ -110,11 +110,15 @@ impl AggregateUDFImpl for OrderedArrayAgg {
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SelfSortingStringAgg {
     inner: Arc<AggregateUDF>,
+    limits: Arc<super::bound::Limits>,
 }
 
 impl SelfSortingStringAgg {
-    pub fn udaf(inner: Arc<AggregateUDF>) -> Arc<AggregateUDF> {
-        Arc::new(AggregateUDF::from(Self { inner }))
+    pub fn udaf(inner: Arc<AggregateUDF>, limits: &Arc<super::bound::Limits>) -> Arc<AggregateUDF> {
+        Arc::new(AggregateUDF::from(Self {
+            inner,
+            limits: Arc::clone(limits),
+        }))
     }
 }
 
@@ -144,7 +148,12 @@ impl AggregateUDFImpl for SelfSortingStringAgg {
         Ok(Some(self))
     }
     fn accumulator(&self, args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
-        self.inner.accumulator(args)
+        let delimiter = super::bound::delimiter_len(&args);
+        Ok(Box::new(super::bound::BoundedAgg::new(
+            self.inner.accumulator(args)?,
+            delimiter,
+            &self.limits,
+        )))
     }
     fn reverse_expr(&self) -> ReversedUDAF {
         ReversedUDAF::NotSupported
@@ -156,7 +165,12 @@ impl AggregateUDFImpl for SelfSortingStringAgg {
         &self,
         args: AccumulatorArgs,
     ) -> Result<Box<dyn GroupsAccumulator>> {
-        self.inner.create_groups_accumulator(args)
+        let delimiter = super::bound::delimiter_len(&args);
+        Ok(Box::new(super::bound::BoundedGroups::new(
+            self.inner.create_groups_accumulator(args)?,
+            delimiter,
+            &self.limits,
+        )))
     }
 }
 
