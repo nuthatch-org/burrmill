@@ -99,6 +99,11 @@ fn no_statement_builds_values_past_its_pool() {
         format!("SELECT length({encode}) AS m FROM (VALUES ('a')) t(x)"),
         format!("SELECT length(list_reduce([{doubles}], lambda a, x: a || a)) AS m"),
         "SELECT repeat('a', 10000000) AS s FROM range(100000)".into(),
+        format!("SELECT '{}' AS s FROM range(100000)", "a".repeat(64 << 10)),
+        format!(
+            "SELECT CASE WHEN r >= 0 THEN '{}' END AS s FROM range(100000) t(r)",
+            "a".repeat(64 << 10)
+        ),
         "SELECT CASE WHEN r >= 0 THEN repeat('a', 1000000) END AS s FROM range(100000) t(r)".into(),
         "SELECT repeat(x, 1000000) AS s FROM (SELECT 'a' AS x FROM range(1000))".into(),
         format!("SELECT {columns} FROM (VALUES ('a')) t(x)"),
