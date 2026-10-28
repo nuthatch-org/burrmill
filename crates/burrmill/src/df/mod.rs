@@ -17,6 +17,7 @@ use crate::error::{BurrmillError, Result};
 use crate::limits::Limits;
 
 mod addresses;
+mod bound;
 mod cancel;
 mod catalog;
 mod checked;
@@ -432,6 +433,12 @@ impl Engine {
     /// Bytes the statements in flight hold against the engine's memory pool.
     pub fn memory_reserved(&self) -> usize {
         self.session.runtime_env().memory_pool.reserved()
+    }
+
+    /// The most one value a statement builds may hold: a function's result, a `||`, a
+    /// `string_agg`, a literal repeated per row. Past it the statement is refused. 16 MiB unless set.
+    pub fn set_value_limit(&self, bytes: usize) {
+        self.session.limits().set_value_limit(bytes);
     }
 
     /// Bytes of Parquet footers the engine keeps between statements, outside the pool: at most an

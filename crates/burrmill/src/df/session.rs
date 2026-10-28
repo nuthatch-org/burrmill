@@ -81,6 +81,7 @@ pub struct MiniSession {
     alias_generator: Arc<AliasGenerator>,
     query_start: DateTime<Utc>,
     query_planner: Arc<dyn QueryPlanner + Send + Sync>,
+    limits: Arc<super::bound::Limits>,
 }
 
 impl std::fmt::Debug for MiniSession {
@@ -158,6 +159,7 @@ impl MiniSession {
                 }),
         }
         .build_arc()?;
+        let limits = super::bound::Limits::new(budget.map(|_| &runtime.memory_pool));
         // Under every name DataFusion gives a function: `length` is `character_length`'s, and
         // registering primary names alone refused it.
         let mut scalar = HashMap::new();
@@ -221,6 +223,13 @@ impl MiniSession {
             }
             scalar.insert(f.name().to_string(), f);
         }
+        let mut bounded: HashMap<*const ScalarUDF, Arc<ScalarUDF>> = HashMap::new();
+        for f in scalar.values_mut() {
+            let b = bounded
+                .entry(Arc::as_ptr(f))
+                .or_insert_with(|| super::bound::wrap(Arc::clone(f), &limits));
+            *f = Arc::clone(b);
+        }
         let mut higher = HashMap::new();
         for f in datafusion_functions_nested::all_default_higher_order_functions()
             .into_iter()
@@ -252,7 +261,7 @@ impl MiniSession {
             aggregate.insert("list".into(), f);
         }
         if let Some(f) = aggregate.get("string_agg").cloned() {
-            let f = super::ordered_agg::SelfSortingStringAgg::udaf(f);
+            let f = super::ordered_agg::SelfSortingStringAgg::udaf(f, &limits);
             for a in f.aliases() {
                 aggregate.insert(a.clone(), Arc::clone(&f));
             }
@@ -347,6 +356,8 @@ impl MiniSession {
                             as Arc<dyn AnalyzerRule + Send + Sync>
                     }),
                 )
+                .chain([Arc::new(super::bound::BoundValues(Arc::clone(&limits)))
+                    as Arc<dyn AnalyzerRule + Send + Sync>])
                 .collect(),
             ),
             // Without `eliminate_group_by_constant`: it recomputes a key that is a function of
@@ -358,8 +369,11 @@ impl MiniSession {
                     .into_iter()
                     .filter(|r| r.name() != "eliminate_group_by_constant")
                     // Last in each pass, so the next pass optimizes what it cut.
-                    .chain([Arc::new(super::sharing::PruneShared)
-                        as Arc<dyn datafusion_optimizer::OptimizerRule + Send + Sync>])
+                    .chain([
+                        Arc::new(super::bound::BoundValues(Arc::clone(&limits)))
+                            as Arc<dyn datafusion_optimizer::OptimizerRule + Send + Sync>,
+                        Arc::new(super::sharing::PruneShared),
+                    ])
                     .collect(),
             ),
             // Last, so it sees the join filter after projection pushdown has made its operands columns.
@@ -408,7 +422,12 @@ impl MiniSession {
             alias_generator: Arc::new(AliasGenerator::new()),
             query_start: Utc::now(),
             query_planner: Arc::new(MiniQueryPlanner),
+            limits,
         })
+    }
+
+    pub fn limits(&self) -> &super::bound::Limits {
+        &self.limits
     }
 
     /// `information_schema.tables` and `.columns` as DuckDB shows them to nuthatch's `.tables` and
@@ -494,6 +513,7 @@ impl MiniSession {
 
     /// A scalar function under its name and aliases, replacing any of the same name.
     pub fn register_udf(&mut self, f: Arc<ScalarUDF>) {
+        let f = super::bound::wrap(f, &self.limits);
         for a in f.aliases() {
             self.scalar.insert(a.clone(), Arc::clone(&f));
         }
@@ -698,8 +718,12 @@ fn integer_argument(e: &Expr) -> Option<i64> {
 /// DuckDB's `range(stop)`, `range(start, stop[, step])` and `generate_series` (the same, the stop
 /// included): one BIGINT column named after the function. The only table functions nuthatch
 /// admits besides `unnest`, which DataFusion plans itself. Computed while planning, from literal
-/// arguments, and refused past ten million rows rather than held in memory.
-fn series(name: &str, args: &[Expr]) -> DFResult<Arc<dyn TableSource>> {
+/// arguments, refused past ten million rows, and charged to the pool while the plan holds it.
+fn series(
+    name: &str,
+    args: &[Expr],
+    limits: &super::bound::Limits,
+) -> DFResult<Arc<dyn TableSource>> {
     use arrow::array::Int64Array;
     use arrow::datatypes::{DataType, Field, Schema};
     let n: Vec<i64> = args
@@ -730,23 +754,24 @@ fn series(name: &str, args: &[Expr]) -> DFResult<Arc<dyn TableSource>> {
             "{name} of more than ten million rows is refused here"
         ));
     }
-    let mut values = Vec::with_capacity(span.max(0) as usize);
-    let mut v = start as i128;
-    let within = |v: i128| match (step > 0, inclusive) {
-        (true, true) => v <= stop as i128,
-        (true, false) => v < stop as i128,
-        (false, true) => v >= stop as i128,
-        (false, false) => v > stop as i128,
-    };
-    while within(v) {
-        values.push(v as i64);
-        v += step as i128;
-    }
+    let rows = span.max(0) as usize;
+    let column = super::bound::charge_column(limits, rows * 8, || {
+        let mut values = Vec::with_capacity(rows);
+        let mut v = start as i128;
+        let within = |v: i128| match (step > 0, inclusive) {
+            (true, true) => v <= stop as i128,
+            (true, false) => v < stop as i128,
+            (false, true) => v >= stop as i128,
+            (false, false) => v > stop as i128,
+        };
+        while within(v) {
+            values.push(v as i64);
+            v += step as i128;
+        }
+        Arc::new(Int64Array::from(values))
+    })?;
     let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Int64, false)]));
-    let batch = arrow::record_batch::RecordBatch::try_new(
-        Arc::clone(&schema),
-        vec![Arc::new(Int64Array::from(values))],
-    )?;
+    let batch = arrow::record_batch::RecordBatch::try_new(Arc::clone(&schema), vec![column])?;
     let table = datafusion_catalog::MemTable::try_new(schema, vec![vec![batch]])?;
     Ok(provider_as_source(Arc::new(table)))
 }
@@ -758,7 +783,7 @@ impl ContextProvider for MiniSession {
         args: Vec<Expr>,
     ) -> DFResult<Arc<dyn TableSource>> {
         match name.to_ascii_lowercase().as_str() {
-            n @ ("range" | "generate_series") => series(n, &args),
+            n @ ("range" | "generate_series") => series(n, &args, &self.limits),
             other => {
                 datafusion_common::not_impl_err!("table function {other} is not supported here")
             }
@@ -838,6 +863,7 @@ impl Session for MiniSession {
         Arc::clone(&self.query_planner)
     }
     fn optimize(&self, plan: &LogicalPlan) -> DFResult<LogicalPlan> {
+        let _planning = super::bound::Planning::enter();
         let LogicalPlan::Explain(e) = plan else {
             let analyzed = self.analyzer.execute_and_check(
                 plan.clone(),
