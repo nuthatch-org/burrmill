@@ -515,11 +515,15 @@ impl Engine {
         let held = metrics.as_deref_mut();
         let r = std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            let run = s.spawn(move || {
-                let mut send = |b| tx.send(b).map_err(|_| BurrmillError::Cancelled);
-                self.runtime()
-                    .block_on(self.stream(logical, sql, &mut send, held))
-            });
+            let run = std::thread::Builder::new()
+                .name("burrmill-statement".into())
+                .stack_size(PLAN_STACK_BYTES)
+                .spawn_scoped(s, move || {
+                    let mut send = |b| tx.send(b).map_err(|_| BurrmillError::Cancelled);
+                    self.runtime()
+                        .block_on(self.stream(logical, sql, &mut send, held))
+                })
+                .map_err(|e| BurrmillError::Substrate(format!("statement thread: {e}")))?;
             // Refused by `f`: `rx` goes with the loop, the next send fails and the statement ends.
             let taken = rx.into_iter().try_for_each(&mut f);
             let run = run.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
@@ -756,10 +760,17 @@ impl Engine {
             plan()
         } else {
             std::thread::scope(|s| {
-                s.spawn(plan)
-                    .join()
-                    .unwrap_or_else(|p| std::panic::resume_unwind(p))
-            })
+                let handle = std::thread::Builder::new()
+                    .name("burrmill-plan".into())
+                    .stack_size(PLAN_STACK_BYTES)
+                    .spawn_scoped(s, plan)
+                    .map_err(|e| BurrmillError::Substrate(format!("planner thread: {e}")))?;
+                Ok::<_, BurrmillError>(
+                    handle
+                        .join()
+                        .unwrap_or_else(|p| std::panic::resume_unwind(p)),
+                )
+            })?
         }
         .map_err(plan_err)?;
         scans(&physical)
@@ -819,8 +830,9 @@ fn scans(p: &Arc<dyn datafusion_physical_plan::ExecutionPlan>) -> Result<u64> {
         .try_fold(own, |n, c| Ok(n.saturating_add(scans(c)?)))
 }
 
-/// The planner recurses. The caller's stack is whatever the host gave its worker, and a stack
-/// overflow aborts the process. What the depth bound let through is planned on a stack of a known size.
+/// The planner recurses, and so does executing what it planned. The caller's stack is whatever the
+/// host gave its worker, and a stack overflow aborts the process, so each thread this module starts
+/// for a statement gets a stack of a known size (nuthatch#2460: 2 MiB overflowed in a debug build).
 #[cfg(not(target_arch = "wasm32"))]
 const PLAN_STACK_BYTES: usize = 8 * 1024 * 1024;
 
