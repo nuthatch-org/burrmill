@@ -13,9 +13,9 @@ use datafusion_common::Result;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_physical_expr::PhysicalExpr;
-use datafusion_physical_plan::ExecutionPlan;
 use datafusion_physical_plan::sorts::sort::SortExec;
 use datafusion_physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
+use datafusion_physical_plan::{ExecutionPlan, replace_children_if_necessary};
 use datafusion_session::PhysicalOptimizerRule;
 
 #[derive(Debug, Default)]
@@ -102,7 +102,7 @@ impl PhysicalOptimizerRule for TopKMergeOrder {
             let sort = SortExec::new(order, Arc::clone(s.input()))
                 .with_preserve_partitioning(s.preserve_partitioning())
                 .with_fetch(s.fetch());
-            let merge = Arc::clone(&p).with_new_children(vec![Arc::new(sort)])?;
+            let merge = replace_children_if_necessary(p, vec![Arc::new(sort)])?;
             Ok(Transformed::yes(merge))
         })
         .map(|t| t.data)

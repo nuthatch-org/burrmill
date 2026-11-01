@@ -169,7 +169,8 @@ fn a_where_beside_a_lambda_is_not_pushed_again() {
 
 /// nuthatch #2583: each arm of a union sorted without the literal that tells the arms apart, and the
 /// arms shared one filter. The mint arm filled its heap first and ruled out every burn after its own
-/// last block, though every burn sorts before every mint.
+/// last block, though every burn sorts before every mint. Which arm fills first is the scheduler's
+/// choice here, and a tab's is always the first arm, so the plan is checked as well as the answer.
 #[test]
 fn a_union_arms_top_k_keeps_the_rows_its_literal_puts_first() {
     let rows = |from: u64| -> Vec<serde_json::Value> {
@@ -206,6 +207,19 @@ fn a_union_arms_top_k_keeps_the_rows_its_literal_puts_first() {
                 .map(|r| format!("{} {}", r["kind"], r["block_number"]).replace('"', ""))
                 .collect();
             assert_eq!(got, want, "{threads} threads, {a} first");
+            let plan = analyze(&e, sql);
+            let topk = plan
+                .split("\\n")
+                .find(|l| l.contains("SortExec: TopK"))
+                .unwrap_or_else(|| panic!("no top-k in {plan}"));
+            let keys = topk
+                .split("expr=[")
+                .nth(1)
+                .and_then(|k| k.split(']').next());
+            assert!(
+                keys.is_some_and(|k| k.contains("kind@")),
+                "{threads} threads, {a} first: {topk}"
+            );
         }
     }
 }
