@@ -166,3 +166,46 @@ fn a_where_beside_a_lambda_is_not_pushed_again() {
         assert_eq!(rows, 2_000, "budget {budget}");
     }
 }
+
+/// nuthatch #2583: each arm of a union sorted without the literal that tells the arms apart, and the
+/// arms shared one filter. The mint arm filled its heap first and ruled out every burn after its own
+/// last block, though every burn sorts before every mint.
+#[test]
+fn a_union_arms_top_k_keeps_the_rows_its_literal_puts_first() {
+    let rows = |from: u64| -> Vec<serde_json::Value> {
+        (from..from + 40)
+            .map(|b| serde_json::json!({"block_number": b, "amount": 50}))
+            .collect()
+    };
+    let want: Vec<String> = (100..125).map(|b| format!("burn {b}")).collect();
+    for threads in [1, 8] {
+        for (a, b) in [("mint", "burn"), ("burn", "mint")] {
+            let mut e = Engine::open_empty_budgeted(burrmill::Budget {
+                memory_bytes: 256 << 20,
+                threads,
+                spill: None,
+            })
+            .unwrap();
+            e.register_rows("mint", &rows(0)).unwrap();
+            e.register_rows("burn", &rows(100)).unwrap();
+            e.register_view(
+                "supply",
+                &format!(
+                    "SELECT '{a}' AS kind, block_number, amount FROM {a} \
+                     UNION ALL SELECT '{b}', block_number, amount FROM {b}"
+                ),
+            )
+            .unwrap();
+            let sql = "SELECT kind, block_number FROM supply \
+                       ORDER BY amount DESC, kind, block_number LIMIT 25";
+            let got: Vec<String> = e
+                .sql(sql)
+                .unwrap()
+                .iter()
+                .flat_map(|b| burrmill::df::encode::rows(b).unwrap())
+                .map(|r| format!("{} {}", r["kind"], r["block_number"]).replace('"', ""))
+                .collect();
+            assert_eq!(got, want, "{threads} threads, {a} first");
+        }
+    }
+}

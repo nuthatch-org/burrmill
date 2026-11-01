@@ -386,10 +386,19 @@ impl MiniSession {
             // Straight after DataFusion's own choice of sides, which without statistics is none.
             .flat_map(|r| {
                 let after_selection = r.name() == "join_selection";
-                std::iter::once(r).chain(after_selection.then(|| {
-                    Arc::new(super::buildside::BuildOnSmaller)
-                        as Arc<dyn PhysicalOptimizerRule + Send + Sync>
-                }))
+                // Before the top-k filters are pushed, so the scans get the corrected one.
+                let before_post = r.name() == "FilterPushdown(Post)";
+                before_post
+                    .then(|| {
+                        Arc::new(super::topkfilter::TopKMergeOrder)
+                            as Arc<dyn PhysicalOptimizerRule + Send + Sync>
+                    })
+                    .into_iter()
+                    .chain(std::iter::once(r))
+                    .chain(after_selection.then(|| {
+                        Arc::new(super::buildside::BuildOnSmaller)
+                            as Arc<dyn PhysicalOptimizerRule + Send + Sync>
+                    }))
             })
             .chain([
                 Arc::new(super::topkfilter::TopKFilters)

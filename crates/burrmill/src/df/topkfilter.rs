@@ -15,6 +15,7 @@ use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_plan::ExecutionPlan;
 use datafusion_physical_plan::sorts::sort::SortExec;
+use datafusion_physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion_session::PhysicalOptimizerRule;
 
 #[derive(Debug, Default)]
@@ -64,6 +65,51 @@ impl PhysicalOptimizerRule for TopKFilters {
 
     fn name(&self) -> &str {
         "topk_filters"
+    }
+
+    fn schema_check(&self) -> bool {
+        true
+    }
+}
+
+/// `TopKMergeOrder`: a top-k below a merge sorts by the merge's whole order.
+///
+/// Pushed below the merge, the sort drops each key that is constant within every partition, such as
+/// a `UNION ALL` arm's literal. Its partitions share one dynamic filter, so the first to fill its
+/// heap ruled out the others' rows by the keys left, rows the dropped key put first (nuthatch #2583).
+/// Which partition fills first is the scheduler's choice, so the answer was too.
+#[derive(Debug, Default)]
+pub struct TopKMergeOrder;
+
+impl PhysicalOptimizerRule for TopKMergeOrder {
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        _config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        plan.transform_up(|p| {
+            let Some(m) = p.downcast_ref::<SortPreservingMergeExec>() else {
+                return Ok(Transformed::no(p));
+            };
+            let Some(s) = m.input().downcast_ref::<SortExec>() else {
+                return Ok(Transformed::no(p));
+            };
+            if s.fetch().is_none() || s.expr().starts_with(m.expr()) {
+                return Ok(Transformed::no(p));
+            }
+            let mut order = m.expr().clone();
+            order.extend(s.expr().iter().cloned());
+            let sort = SortExec::new(order, Arc::clone(s.input()))
+                .with_preserve_partitioning(s.preserve_partitioning())
+                .with_fetch(s.fetch());
+            let merge = Arc::clone(&p).with_new_children(vec![Arc::new(sort)])?;
+            Ok(Transformed::yes(merge))
+        })
+        .map(|t| t.data)
+    }
+
+    fn name(&self) -> &str {
+        "topk_merge_order"
     }
 
     fn schema_check(&self) -> bool {
