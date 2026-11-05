@@ -311,3 +311,8 @@ required-features = ["datafusion"]
 name = "df_running"
 path = "tests/df_running.rs"
 required-features = ["datafusion"]
+
+[[test]]
+name = "df_footers"
+path = "tests/df_footers.rs"
+required-features = ["datafusion"]
