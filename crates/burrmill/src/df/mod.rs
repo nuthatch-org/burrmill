@@ -112,6 +112,12 @@ pub fn selection_passes() -> u64 {
     catalog::SELECTIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Local segment footers read in this process, for a test that a second engine reads none again.
+#[doc(hidden)]
+pub fn footer_reads() -> u64 {
+    host::FOOTER_READS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// What one statement did once it has run (nuthatch RFC-0073 FR4).
 ///
 /// `sealed_bytes_scanned` is the figure meant to repeat: decided from immutable footers before the
@@ -158,8 +164,8 @@ pub struct Engine {
     cancel: crate::CancelToken,
     /// Inside a host transaction: what each name it has touched was bound to before it.
     txn: Option<HashMap<String, Option<Arc<dyn datafusion_expr::TableSource>>>>,
-    /// Each segment's columns, as `register_facts` read them from its footer. Sealed segments never
-    /// change, so once.
+    /// Each store segment's columns, as `register_store_facts` read them from its footer. Sealed
+    /// segments never change, so once. Local files share a process-wide cache instead.
     bound_segments: HashMap<(std::path::PathBuf, u64), arrow::datatypes::SchemaRef>,
 }
 

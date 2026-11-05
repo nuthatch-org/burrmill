@@ -397,11 +397,18 @@ impl SegmentTable {
         groups: usize,
         cancel: crate::CancelToken,
     ) -> crate::Result<Self> {
+        // A table's segments share one or two directories; canonicalising each file walked every
+        // component of its path per request (nuthatch#2669).
+        let mut parents: HashMap<PathBuf, PathBuf> = HashMap::new();
         let files = table
             .files
             .iter()
             .map(|(p, size)| {
-                let loc = store_location(p, table.keyed)?;
+                let loc = if table.keyed {
+                    store_location(p, true)?
+                } else {
+                    local_location(p, &mut parents)?
+                };
                 Ok(PartitionedFile::new(loc.to_string(), *size))
             })
             .collect::<crate::Result<Vec<_>>>()?;
@@ -572,6 +579,41 @@ pub async fn footer_schema(
     Ok(Arc::new(view_schema(meta.schema())))
 }
 
+/// What `store_location` gives a local file, canonicalising its directory once per `parents`.
+#[cfg(not(target_arch = "wasm32"))]
+fn local_location(
+    p: &Path,
+    parents: &mut HashMap<PathBuf, PathBuf>,
+) -> crate::Result<object_store::path::Path> {
+    let (Some(parent), Some(name)) = (p.parent(), p.file_name()) else {
+        return store_location(p, false);
+    };
+    // A symlinked file canonicalises to its target, which the directory alone cannot say, and a
+    // missing one must still fail here as canonicalising it did.
+    if !std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file()) {
+        return store_location(p, false);
+    }
+    let dir = match parents.get(parent) {
+        Some(dir) => dir.clone(),
+        None => {
+            let dir = std::fs::canonicalize(parent)
+                .map_err(|e| crate::BurrmillError::Substrate(format!("{}: {e}", p.display())))?;
+            parents.insert(parent.to_path_buf(), dir.clone());
+            dir
+        }
+    };
+    object_store::path::Path::from_absolute_path(dir.join(name))
+        .map_err(|e| crate::BurrmillError::Substrate(e.to_string()))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn local_location(
+    p: &Path,
+    _: &mut HashMap<PathBuf, PathBuf>,
+) -> crate::Result<object_store::path::Path> {
+    store_location(p, false)
+}
+
 /// A segment's location: a key in the engine's store, or a file on this machine.
 fn store_location(p: &Path, keyed: bool) -> crate::Result<object_store::path::Path> {
     let sub = |e: object_store::path::Error| crate::BurrmillError::Substrate(e.to_string());
@@ -585,4 +627,35 @@ fn store_location(p: &Path, keyed: bool) -> crate::Result<object_store::path::Pa
         "{} is a local path, and a tab has no files",
         p.display()
     )))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_local_location_is_what_canonicalising_the_file_gives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("a.parquet"), b"x").unwrap();
+        std::fs::write(real.join("target.parquet"), b"y").unwrap();
+        std::os::unix::fs::symlink(&real, tmp.path().join("linked")).unwrap();
+        std::os::unix::fs::symlink(real.join("target.parquet"), real.join("b.parquet")).unwrap();
+        let mut parents = HashMap::new();
+        for p in [
+            real.join("a.parquet"),
+            tmp.path().join("linked/a.parquet"),
+            real.join("b.parquet"),
+            tmp.path().join("linked/b.parquet"),
+        ] {
+            assert_eq!(
+                local_location(&p, &mut parents).unwrap(),
+                object_store::path::Path::from_filesystem_path(&p).unwrap(),
+                "{}",
+                p.display()
+            );
+        }
+        assert!(local_location(&real.join("missing.parquet"), &mut parents).is_err());
+    }
 }
