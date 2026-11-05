@@ -381,12 +381,16 @@ fn fixed_literal(bytes: [u8; 20]) -> Expr {
     lit(ScalarValue::FixedSizeBinary(WIDTH, Some(bytes.to_vec())))
 }
 
-/// The address a text literal spells, if it is one.
+/// The address a text literal spells, or a 20-byte `X'...'` literal is, if it is one. Without the
+/// byte case, `address = X'...'` compared the address's text with its bytes and matched nothing.
 fn literal_address(e: &Expr) -> Option<[u8; 20]> {
     match e {
         Expr::Literal(ScalarValue::Utf8(Some(s)), _)
         | Expr::Literal(ScalarValue::Utf8View(Some(s)), _)
         | Expr::Literal(ScalarValue::LargeUtf8(Some(s)), _) => decode(s),
+        Expr::Literal(ScalarValue::Binary(Some(b)), _)
+        | Expr::Literal(ScalarValue::LargeBinary(Some(b)), _)
+        | Expr::Literal(ScalarValue::BinaryView(Some(b)), _) => b.as_slice().try_into().ok(),
         _ => None,
     }
 }

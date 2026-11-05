@@ -57,6 +57,9 @@ pub struct NestTable {
     pub keyed: bool,
     /// Columns the host writes lower-case: nuthatch renders every `address` as `0x` and lower hex.
     pub lowercase: Vec<String>,
+    /// Addresses are stored as 20 raw bytes (a relic's), not as a nest's hex text, so a byte
+    /// literal must reach the scan as bytes.
+    pub binary_addresses: bool,
 }
 
 /// Where an engine opened from an object store finds it.
@@ -98,6 +101,7 @@ pub fn discover_tables(segments: &Path) -> crate::Result<Vec<NestTable>> {
             uint256: Vec::new(),
             keyed: false,
             lowercase: Vec::new(),
+            binary_addresses: false,
         });
     }
     tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -166,6 +170,7 @@ pub fn apply_schema_text(tables: &mut Vec<NestTable>, raw: &str) -> crate::Resul
             uint256: Vec::new(),
             keyed: false,
             lowercase,
+            binary_addresses: false,
         });
     }
     tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -216,6 +221,7 @@ pub struct SegmentTable {
     /// The engine's token; every scan of this table stops at it.
     cancel: crate::CancelToken,
     lowercase: HashSet<String>,
+    binary_addresses: bool,
 }
 
 impl SegmentTable {
@@ -244,6 +250,7 @@ impl SegmentTable {
             },
             cancel,
             lowercase: table.lowercase.iter().cloned().collect(),
+            binary_addresses: table.binary_addresses,
         })
     }
 }
@@ -304,10 +311,17 @@ impl TableProvider for SegmentTable {
             .iter()
             .map(|f| unlowered(f.clone(), &self.lowercase))
             .collect::<DFResult<Vec<_>>>()?;
-        let filters = filters
-            .into_iter()
-            .filter_map(|f| super::addresses::as_text_filter(f).transpose())
-            .collect::<DFResult<Vec<_>>>()?;
+        // Rewriting a byte literal as hex text is right for a nest and wrong for a relic: with row
+        // filters pushed into the scan, bytes compared against text drop every row before the
+        // filter above the scan ever sees them.
+        let filters = if self.binary_addresses {
+            filters
+        } else {
+            filters
+                .into_iter()
+                .filter_map(|f| super::addresses::as_text_filter(f).transpose())
+                .collect::<DFResult<Vec<_>>>()?
+        };
         if let Some(pred) = conjunction(filters) {
             let df_schema = DFSchema::try_from(self.schema.as_ref().clone())?;
             source = source.with_predicate(state.create_physical_expr(pred, &df_schema)?);
@@ -374,6 +388,7 @@ pub async fn discover_store_tables(
             uint256: Vec::new(),
             keyed: true,
             lowercase: Vec::new(),
+            binary_addresses: false,
         });
     }
     tables.sort_by(|a, b| a.name.cmp(&b.name));

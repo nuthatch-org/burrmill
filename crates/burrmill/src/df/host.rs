@@ -189,6 +189,7 @@ impl Engine {
                     uint256: Vec::new(),
                     keyed,
                     lowercase: addresses.clone(),
+                    binary_addresses: false,
                 },
                 self.threads,
                 self.cancel.clone(),

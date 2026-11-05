@@ -237,6 +237,7 @@ pub(super) fn open(root: &Path) -> Result<(Vec<NestTable>, RecordBatch)> {
             uint256: uint256.iter().map(|c| c.to_string()).collect(),
             keyed: false,
             lowercase: Vec::new(),
+            binary_addresses: true,
         });
     }
     Ok((tables, relics_batch(&relics, &anchor)?))

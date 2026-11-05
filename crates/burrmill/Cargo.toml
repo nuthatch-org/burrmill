@@ -273,6 +273,10 @@ required-features = ["datafusion"]
 name = "hosted_fold"
 required-features = ["datafusion"]
 
+[[example]]
+name = "relics_sql"
+required-features = ["relics"]
+
 [[test]]
 name = "df_store"
 path = "tests/df_store.rs"

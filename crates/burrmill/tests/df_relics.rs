@@ -243,3 +243,41 @@ fn the_withdrawals_showcase_answers_from_the_shapella_block() {
         17_031_171
     );
 }
+
+#[test]
+fn a_byte_literal_address_filter_matches_what_is_stored() {
+    // Every fixture log is from 0x66..66 with topic0 0x01..01. Before the fix the address half
+    // compared the address's text with these bytes and matched nothing, without an error.
+    let e = Engine::open_relics(&fixture()).unwrap();
+    let all = count(&e, "SELECT COUNT(*) FROM logs");
+    assert!(all > 0);
+    assert_eq!(
+        count(
+            &e,
+            "SELECT COUNT(*) FROM logs WHERE address = X'6666666666666666666666666666666666666666'"
+        ),
+        all
+    );
+    assert_eq!(
+        count(
+            &e,
+            "SELECT COUNT(*) FROM logs WHERE address = X'6666666666666666666666666666666666666666' \
+             AND topic0 = X'0101010101010101010101010101010101010101010101010101010101010101'"
+        ),
+        all
+    );
+    assert_eq!(
+        count(
+            &e,
+            "SELECT COUNT(*) FROM logs WHERE address = '0x6666666666666666666666666666666666666666'"
+        ),
+        all
+    );
+    assert_eq!(
+        count(
+            &e,
+            "SELECT COUNT(*) FROM logs WHERE address = X'7777777777777777777777777777777777777777'"
+        ),
+        0
+    );
+}
