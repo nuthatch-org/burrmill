@@ -50,6 +50,9 @@ pub struct NestTable {
     pub schema: SchemaRef,
     pub files: Vec<(PathBuf, u64)>,
     pub wide: Vec<String>,
+    /// uint256 magnitudes stored as bytes (a relic's, RFC-0004 §11.4): `_dec` and `_overflow`
+    /// come from `u256_dec`, which has no text to `TRY_CAST`.
+    pub uint256: Vec<String>,
     /// `files` are keys in the store at [`NEST_STORE`], not paths on this machine.
     pub keyed: bool,
     /// Columns the host writes lower-case: nuthatch renders every `address` as `0x` and lower hex.
@@ -92,6 +95,7 @@ pub fn discover_tables(segments: &Path) -> crate::Result<Vec<NestTable>> {
             schema,
             files,
             wide: Vec::new(),
+            uint256: Vec::new(),
             keyed: false,
             lowercase: Vec::new(),
         });
@@ -159,6 +163,7 @@ pub fn apply_schema_text(tables: &mut Vec<NestTable>, raw: &str) -> crate::Resul
             schema: Arc::new(Schema::new(fields)),
             files: Vec::new(),
             wide,
+            uint256: Vec::new(),
             keyed: false,
             lowercase,
         });
@@ -366,6 +371,7 @@ pub async fn discover_store_tables(
             schema,
             files,
             wide: Vec::new(),
+            uint256: Vec::new(),
             keyed: true,
             lowercase: Vec::new(),
         });

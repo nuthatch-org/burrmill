@@ -312,6 +312,9 @@ impl MiniSession {
                     Arc::new(super::nullsub::NullableSubqueries::default()),
                     // Before coercion: DuckDB's text comparisons depend on what was written.
                     Arc::new(super::dialect::DuckComparisons),
+                    // Before coercion and the checked rewrite, which then see a lossy cast.
+                    #[cfg(feature = "relics")]
+                    Arc::new(super::relics::RelicScalars::new()),
                     Arc::new(super::rule::CheckedShifts::default()),
                     Arc::new(TypeCoercion::new()),
                     Arc::new(super::dialect::DuckSemantics::default()),

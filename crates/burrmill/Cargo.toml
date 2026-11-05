@@ -52,6 +52,11 @@ datafusion = [
     "dep:datafusion-sql",
 ]
 
+# RFC-0004 §11: relic corpora from The Legacy, read through Burrmill's own providers. Off by
+# default so nuthatch's graph does not carry the relic format until it asks for it (RFC-0045).
+# Relic Parquet is zstd, which the nest path never needed.
+relics = ["datafusion", "dep:legacy-format", "dep:legacy-parquet", "parquet/zstd"]
+
 [dependencies]
 arrow.workspace = true
 parquet.workspace = true
@@ -61,6 +66,9 @@ rayon.workspace = true
 # `visitor` for `inspect`, the AST walk that answers what a statement reaches (roadmap 6.7).
 sqlparser = { workspace = true, features = ["visitor"] }
 
+# Pinned to a revision of nuthatch-org/the-legacy, as nuthatch pins Burrmill (RFC-0004 §11.1).
+legacy-format = { git = "https://github.com/nuthatch-org/the-legacy", rev = "8d6425c2e790e38b8d206ecac74b4c0d3c40e9a7", optional = true }
+legacy-parquet = { git = "https://github.com/nuthatch-org/the-legacy", rev = "8d6425c2e790e38b8d206ecac74b4c0d3c40e9a7", optional = true }
 async-trait = { version = "0.1", optional = true }
 # Grows the stack in burrmill's own plan walks, as DataFusion's `recursive_protection` does.
 recursive = { version = "0.1.1", optional = true }
@@ -284,3 +292,8 @@ required-features = ["datafusion"]
 name = "df_running"
 path = "tests/df_running.rs"
 required-features = ["datafusion"]
+
+[[test]]
+name = "df_relics"
+path = "tests/df_relics.rs"
+required-features = ["relics"]

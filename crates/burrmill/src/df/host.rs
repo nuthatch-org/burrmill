@@ -186,6 +186,7 @@ impl Engine {
                     schema: raw_schema.clone(),
                     files,
                     wide: Vec::new(),
+                    uint256: Vec::new(),
                     keyed,
                     lowercase: addresses.clone(),
                 },

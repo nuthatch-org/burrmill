@@ -53,6 +53,8 @@ mod ordered_agg;
 mod printf;
 mod rangebounds;
 mod rangejoin;
+#[cfg(feature = "relics")]
+mod relics;
 mod rule;
 mod sequential;
 mod session;
@@ -164,6 +166,23 @@ impl Engine {
         )
     }
 
+    /// Open a corpus of sealed relics from The Legacy (RFC-0004 §11): one relic directory, or a
+    /// root holding `relics/<index>/manifest.json`. Each relic is admitted on its file sizes and
+    /// BLAKE3 and on pact linkage, and listed in a `relics` table whether it was or not; one that
+    /// fails exposes no rows. Tries, headers and blooms are not checked here.
+    #[cfg(feature = "relics")]
+    pub fn open_relics(root: &Path) -> Result<Self> {
+        let (tables, relics) = relics::open(root)?;
+        let mut engine = Self::from_tables(tables, Limits::default().max_threads, None, None)?;
+        let table = MemTable::try_new(relics.schema(), vec![vec![relics]]).map_err(df_err)?;
+        engine.session.register_table("relics", Arc::new(table));
+        engine
+            .session
+            .build_information_schema(|n| n.ends_with("__raw"))
+            .map_err(df_err)?;
+        Ok(engine)
+    }
+
     /// As `open_nest`, held to `budget`: the session a host opens, batch size included.
     pub fn open_nest_budgeted(root: &Path, budget: Budget) -> Result<Self> {
         Self::from_tables(nest_tables(root)?, budget.threads, Some(budget), None)
@@ -245,7 +264,7 @@ impl Engine {
         // The owned fold opens segment files itself, so a table in a store has none; the
         // substitution then declines and DataFusion's aggregate runs instead.
         for t in tables.iter().filter(|t| !t.files.is_empty() && !t.keyed) {
-            let name = if t.wide.is_empty() {
+            let name = if t.wide.is_empty() && t.uint256.is_empty() {
                 t.name.clone()
             } else {
                 format!("{}__raw", t.name)
@@ -273,6 +292,10 @@ impl Engine {
         let cancel = crate::CancelToken::new();
         let mut session = MiniSession::new(threads, fold, budget.as_ref(), shared, cancel.clone())
             .map_err(df_err)?;
+        #[cfg(feature = "relics")]
+        for f in relics::udfs() {
+            session.register_udf(f);
+        }
         let groups = threads.max(1);
         for t in &tables {
             let provider: Arc<dyn TableProvider> = if t.files.is_empty() {
@@ -280,7 +303,7 @@ impl Engine {
             } else {
                 Arc::new(SegmentTable::new(t, groups, cancel.clone())?)
             };
-            if t.wide.is_empty() {
+            if t.wide.is_empty() && t.uint256.is_empty() {
                 session.note_addresses(&t.name, t.lowercase.iter().cloned());
                 session.register_table(&t.name, provider);
             } else {
@@ -298,7 +321,17 @@ impl Engine {
                         )
                     })
                     .collect();
-                let sql = format!("SELECT *{dec} FROM \"{raw}\"");
+                let bytes: String = t
+                    .uint256
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            ", u256_dec(\"{c}\") AS \"{c}_dec\", \
+                             (\"{c}\" IS NOT NULL AND u256_dec(\"{c}\") IS NULL) AS \"{c}_overflow\""
+                        )
+                    })
+                    .collect();
+                let sql = format!("SELECT *{dec}{bytes} FROM \"{raw}\"");
                 let logical = plan_query(&session, &sql)?;
                 session.register_table(&t.name, Arc::new(ViewTable::new(logical, Some(sql))));
             }
