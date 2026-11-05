@@ -8,8 +8,9 @@
 //! A table registered this way is not in the fold substitution's table map, which is fixed when the
 //! engine opens; its aggregates run as DataFusion plans them, to the same answer.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use arrow::array::{ArrayRef, StringViewArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -81,30 +82,8 @@ impl Engine {
         self.refuse_replacing_a_table(name)?;
         // Every footer, as DuckDB's `read_parquet` binds them all, so a file that is not Parquet
         // refuses the definition here and a host can define the table from what remains.
-        for (path, len) in &files {
-            if self.bound_segments.contains_key(&(path.clone(), *len)) {
-                continue;
-            }
-            let bound = std::fs::File::open(path)
-                .map_err(|e| e.to_string())
-                .and_then(|f| {
-                    ArrowReaderMetadata::load(&f, ArrowReaderOptions::new())
-                        .map_err(|e| e.to_string())
-                });
-            match bound {
-                Ok(meta) => {
-                    let schema = Arc::new(view_schema(meta.schema()));
-                    self.bound_segments.insert((path.clone(), *len), schema);
-                }
-                Err(e) => {
-                    return Err(crate::BurrmillError::Substrate(format!(
-                        "segment {} will not bind: {e}",
-                        path.display()
-                    )));
-                }
-            }
-        }
-        self.define_facts(name, declared, files, hot, window, false)
+        let schemas = footer_schemas(&files)?;
+        self.define_facts(name, declared, files, schemas, hot, window, false)
     }
 
     /// As [`Engine::register_facts`], over segments in the engine's store
@@ -128,7 +107,7 @@ impl Engine {
             async move {
                 super::catalog::footer_schema(store, key, *len)
                     .await
-                    .map(|s| ((PathBuf::from(key), *len), s))
+                    .map(|s| ((PathBuf::from(key), *len), intern(s.as_ref().clone())))
                     .map_err(|e| {
                         crate::BurrmillError::Substrate(format!("segment {key} will not bind: {e}"))
                     })
@@ -136,18 +115,22 @@ impl Engine {
         }))
         .await?;
         self.bound_segments.extend(read);
-        let files = keys
+        let files: Vec<(PathBuf, u64)> = keys
             .into_iter()
             .map(|(k, l)| (PathBuf::from(k), l))
             .collect();
-        self.define_facts(name, declared, files, hot, window, true)
+        let schemas = distinct(files.iter().map(|f| Arc::clone(&self.bound_segments[f])));
+        self.define_facts(name, declared, files, schemas, hot, window, true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn define_facts(
         &mut self,
         name: &str,
         declared: &[(String, String)],
         files: Vec<(PathBuf, u64)>,
+        // Each distinct segment schema, in the order the files first carry it.
+        schemas: Vec<SchemaRef>,
         hot: &[Value],
         window: (Option<u64>, Option<u64>),
         keyed: bool,
@@ -163,10 +146,7 @@ impl Engine {
         } else {
             // Every segment's columns by name, as DuckDB's `union_by_name`: a column the ABI gained
             // is in the later segments only, and the first one's schema would read it as NULL.
-            let schemas: Vec<Schema> = files
-                .iter()
-                .map(|(p, l)| self.bound_segments[&(p.clone(), *l)].as_ref().clone())
-                .collect();
+            let schemas: Vec<Schema> = schemas.iter().map(|s| s.as_ref().clone()).collect();
             Arc::new(Schema::try_merge(widen_integers(schemas)).map_err(|e| {
                 crate::BurrmillError::Substrate(format!("the segments of {name} disagree: {e}"))
             })?)
@@ -372,6 +352,91 @@ fn json_batch(rows: &[Value], typed: bool) -> Result<(SchemaRef, RecordBatch)> {
     let batch = RecordBatch::try_new(schema.clone(), arrays)
         .map_err(|e| crate::BurrmillError::Substrate(e.to_string()))?;
     Ok((schema, batch))
+}
+
+/// Footer schemas of local segment files, shared by every engine in the process. A host rebuilds
+/// its session whenever the sealed watermark moves, and a catalogue read binds every table, so a
+/// per-engine cache re-read every footer of a wide nest per request (nuthatch#2669). Segments never
+/// change once sealed, so an entry never goes stale.
+struct Footers {
+    by_file: HashMap<(PathBuf, u64), SchemaRef>,
+    schemas: HashSet<SchemaRef>,
+}
+
+static FOOTERS: LazyLock<Mutex<Footers>> = LazyLock::new(|| {
+    Mutex::new(Footers {
+        by_file: HashMap::new(),
+        schemas: HashSet::new(),
+    })
+});
+
+pub(super) static FOOTER_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Entries before the file map is emptied, about 70 MiB at the longest paths nuthatch writes.
+const FOOTERS_CAP: usize = 1 << 19;
+
+fn footers() -> MutexGuard<'static, Footers> {
+    FOOTERS.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// One shared copy per distinct schema: a nest's segments carry a handful of schemas between them.
+fn intern(schema: Schema) -> SchemaRef {
+    let mut f = footers();
+    if let Some(s) = f.schemas.get(&schema) {
+        return Arc::clone(s);
+    }
+    let s = Arc::new(schema);
+    f.schemas.insert(Arc::clone(&s));
+    s
+}
+
+fn distinct(schemas: impl Iterator<Item = SchemaRef>) -> Vec<SchemaRef> {
+    let mut out: Vec<SchemaRef> = Vec::new();
+    for s in schemas {
+        if !out.iter().any(|o| Arc::ptr_eq(o, &s)) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// The distinct schemas of `files`, reading only footers no engine in this process has read.
+fn footer_schemas(files: &[(PathBuf, u64)]) -> Result<Vec<SchemaRef>> {
+    let known: Vec<Option<SchemaRef>> = {
+        let f = footers();
+        files.iter().map(|k| f.by_file.get(k).cloned()).collect()
+    };
+    let mut read = Vec::new();
+    let mut each = Vec::with_capacity(files.len());
+    for ((path, len), known) in files.iter().zip(known) {
+        if let Some(s) = known {
+            each.push(s);
+            continue;
+        }
+        let meta = std::fs::File::open(path)
+            .map_err(|e| e.to_string())
+            .and_then(|f| {
+                ArrowReaderMetadata::load(&f, ArrowReaderOptions::new()).map_err(|e| e.to_string())
+            })
+            .map_err(|e| {
+                crate::BurrmillError::Substrate(format!(
+                    "segment {} will not bind: {e}",
+                    path.display()
+                ))
+            })?;
+        FOOTER_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let s = intern(view_schema(meta.schema()));
+        read.push(((path.clone(), *len), Arc::clone(&s)));
+        each.push(s);
+    }
+    if !read.is_empty() {
+        let mut f = footers();
+        if f.by_file.len() + read.len() > FOOTERS_CAP {
+            f.by_file.clear();
+        }
+        f.by_file.extend(read);
+    }
+    Ok(distinct(each.into_iter()))
 }
 
 /// One column at two integer widths across segments takes the type DuckDB's `union_by_name` gives
