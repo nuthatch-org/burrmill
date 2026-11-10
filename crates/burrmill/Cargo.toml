@@ -50,6 +50,7 @@ datafusion = [
     "dep:datafusion-physical-plan",
     "dep:datafusion-session",
     "dep:datafusion-sql",
+    "dep:libc",
 ]
 
 [dependencies]
@@ -97,6 +98,10 @@ datafusion-sql = { version = "=55.0.0", default-features = false, features = ["r
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"], optional = true }
 
+# The scan clock (`CLOCK_THREAD_CPUTIME_ID`); elsewhere a scan reports no CPU.
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { version = "1", features = ["js"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
@@ -120,6 +125,8 @@ rayon.workspace = true
 # shipped graph, and the .slt files stay runnable by any other engine's runner - which is the whole
 # point of not inventing a format.
 sqllogictest = "0.28"
+# Arbitrary text through the pre-parse rewrites, which must refuse rather than panic.
+proptest = "1"
 
 [[test]]
 name = "df_engine"
@@ -242,8 +249,28 @@ path = "tests/df_windowslices.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_metrics"
+path = "tests/df_metrics.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_scancpu"
+path = "tests/df_scancpu.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_metrics_off"
+path = "tests/df_metrics_off.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_scanpool"
 path = "tests/df_scanpool.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_valuebound"
+path = "tests/df_valuebound.rs"
 required-features = ["datafusion"]
 
 [[test]]
@@ -283,4 +310,9 @@ required-features = ["datafusion"]
 [[test]]
 name = "df_running"
 path = "tests/df_running.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_footers"
+path = "tests/df_footers.rs"
 required-features = ["datafusion"]

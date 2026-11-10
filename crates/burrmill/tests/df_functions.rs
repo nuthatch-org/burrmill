@@ -530,3 +530,79 @@ fn duckdb_answers_still_refused_say_so_by_name() {
         );
     }
 }
+
+/// What a statement builds is bounded per value (`df_valuebound` measures the heap), and nothing
+/// under the bound answers differently for it: `||` keeps DataFusion's NULL and its column name, a
+/// literal repeated per row keeps its name, a long constant left unfolded still answers, and the
+/// pool holds nothing once the statement is done.
+#[test]
+fn built_values_answer_as_before_under_their_bound() {
+    let e = Engine::open_empty_budgeted(burrmill::Budget {
+        memory_bytes: 256 << 20,
+        threads: 2,
+        spill: None,
+    })
+    .unwrap();
+    let one = |sql: &str| -> serde_json::Value {
+        let got = e.sql(sql).unwrap_or_else(|err| panic!("{sql}: {err}"));
+        got.iter()
+            .flat_map(|b| burrmill::df::encode::rows(b).unwrap())
+            .next()
+            .unwrap()
+    };
+    assert_eq!(
+        one("SELECT 'a' || x AS s, NULL || x AS n FROM (VALUES ('b')) t(x)"),
+        serde_json::json!({"s": "ab", "n": null})
+    );
+    let names: Vec<String> = e
+        .sql("SELECT x || 'b', repeat('é', 1000) FROM (VALUES ('a')) t(x)")
+        .unwrap()[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    assert_eq!(names[0], "(x || 'b')");
+    for (sql, want) in [
+        ("SELECT length(repeat('ab', 5000000)) AS n", 10_000_000),
+        (
+            "SELECT length(repeat(x, 10000000)) AS n FROM (VALUES ('a')) t(x)",
+            10_000_000,
+        ),
+        (
+            "SELECT sum(length(s)) AS n FROM (SELECT repeat('a', 100000) AS s FROM range(1000))",
+            100_000_000,
+        ),
+        (
+            "SELECT sum(length(lpad(CAST(r AS VARCHAR), 64, '0'))) AS n FROM range(100000) t(r)",
+            6_400_000,
+        ),
+        (
+            "WITH RECURSIVE r(s, n) AS (SELECT 'ab', 0 UNION ALL SELECT s || s, n + 1 FROM r WHERE n < 20) \
+             SELECT max(length(s)) AS n FROM r",
+            2 << 20,
+        ),
+        (
+            "SELECT length(string_agg(CAST(r AS VARCHAR), ',')) AS n FROM range(100000) t(r)",
+            588_889,
+        ),
+        ("SELECT count(*) AS n FROM range(1000000)", 1_000_000),
+    ] {
+        let got = one(sql)["n"].to_string();
+        assert_eq!(got.trim_matches('"'), want.to_string(), "{sql}");
+        assert_eq!(e.memory_reserved(), 0, "{sql} left a charge behind");
+    }
+    e.set_value_limit(1 << 10);
+    let err = e
+        .sql("SELECT repeat(x, 2000) AS s FROM (VALUES ('a')) t(x)")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("repeat would build a value of 2000 bytes, past the limit of 1024 bytes"),
+        "{err}"
+    );
+    assert!(
+        e.sql("SELECT repeat(x, 1000) AS s FROM (VALUES ('a')) t(x)")
+            .is_ok()
+    );
+}

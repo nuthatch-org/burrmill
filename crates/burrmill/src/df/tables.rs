@@ -21,8 +21,9 @@ fn io(e: impl std::fmt::Display) -> BurrmillError {
 }
 
 impl Engine {
-    /// `sql`'s result schema, from its plan, with the names a statement's batches carry.
-    fn result_schema(&self, sql: &str) -> Result<SchemaRef> {
+    /// `sql`'s result schema, from its plan and without running it, with the names a statement's
+    /// batches carry. A host writing a result as an Arrow stream needs it when there is no batch.
+    pub fn result_schema(&self, sql: &str) -> Result<SchemaRef> {
         let logical = plan_query(&self.session, sql)?;
         let empty = RecordBatch::new_empty(Arc::new(logical.schema().as_arrow().clone()));
         Ok(dialect::strip_dup_suffix(empty).schema())

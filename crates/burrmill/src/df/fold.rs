@@ -36,6 +36,9 @@ use datafusion_optimizer::analyzer::AnalyzerRule;
 use datafusion_physical_expr::expressions::Column as PhysicalColumn;
 use datafusion_physical_expr::{EquivalenceProperties, PhysicalExpr, PhysicalSortExpr};
 use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion_physical_plan::metrics::{
+    Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
+};
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
@@ -543,11 +546,15 @@ impl ExtensionPlanner for OwnedFoldPlanner {
             EmissionType::Final,
             Boundedness::Bounded,
         ));
+        let metrics = ExecutionPlanMetricsSet::new();
+        let bytes = MetricBuilder::new(&metrics).global_counter(super::catalog::SEALED_BYTES);
         Ok(Some(Arc::new(OwnedFoldExec {
             fold: n.fold.clone(),
             schema,
             tables: n.tables.clone(),
             properties,
+            metrics,
+            bytes,
         })))
     }
 }
@@ -558,6 +565,8 @@ pub struct OwnedFoldExec {
     schema: SchemaRef,
     tables: FoldTables,
     properties: Arc<PlanProperties>,
+    metrics: ExecutionPlanMetricsSet,
+    bytes: Count,
 }
 
 impl DisplayAs for OwnedFoldExec {
@@ -588,11 +597,15 @@ impl ExecutionPlan for OwnedFoldExec {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(self)
     }
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
+    }
     fn execute(
         &self,
         _partition: usize,
         _ctx: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
+        let bytes = self.bytes.clone();
         let (fold, schema, tables) = (
             self.fold.clone(),
             Arc::clone(&self.schema),
@@ -603,7 +616,8 @@ impl ExecutionPlan for OwnedFoldExec {
         // plus a copy of the whole answer.
         let stream = futures::stream::once(async move {
             let rows = tokio::task::spawn_blocking(move || {
-                let rows = fold_rows(&fold, &tables)?;
+                let (rows, read) = fold_rows(&fold, &tables)?;
+                bytes.add(read as usize);
                 Ok::<_, DataFusionError>((Arc::new(rows), fold))
             })
             .await
@@ -628,7 +642,7 @@ const CHUNK: usize = 8192;
 
 /// Runs the fold and checks every sum against 38 digits before a single row is emitted, so a
 /// consumer never sees part of an answer followed by a refusal.
-fn fold_rows(fold: &SignedFold, tables: &FoldTables) -> Result<Rows> {
+fn fold_rows(fold: &SignedFold, tables: &FoldTables) -> Result<(Rows, u64)> {
     // Every value here is read strictly, `TRY_CAST` included, so the owned fold's "the query used
     // CAST" would be wrong about half of them.
     let ext = |e: crate::BurrmillError| {
@@ -643,7 +657,7 @@ fn fold_rows(fold: &SignedFold, tables: &FoldTables) -> Result<Rows> {
         .iter()
         .map(|b| &tables.tables[&b.table])
         .collect();
-    let (rows, _) = tables
+    let (rows, metrics) = tables
         .pool
         .install(|| SignedFoldExec::new(fold, &segments, Limits::default()).run())
         .map_err(ext)?;
@@ -655,7 +669,7 @@ fn fold_rows(fold: &SignedFold, tables: &FoldTables) -> Result<Rows> {
             )));
         }
     }
-    Ok(rows)
+    Ok((rows, metrics.bytes_read))
 }
 
 fn to_batch(

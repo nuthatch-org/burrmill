@@ -228,7 +228,8 @@ fn list_and_if(sql: &str, start: usize, close: usize) -> Option<(usize, Option<&
 fn keyword(sql: &str, i: usize, kw: &str) -> bool {
     let b = sql.as_bytes();
     let n = kw.len();
-    if i + n > b.len() || !sql[i..i + n].eq_ignore_ascii_case(kw) {
+    // On bytes: `i + n` can land inside a multi-byte character, where a `str` slice panics.
+    if i + n > b.len() || !b[i..i + n].eq_ignore_ascii_case(kw.as_bytes()) {
         return false;
     }
     let before = i == 0 || !is_ident(b[i - 1]);
@@ -357,5 +358,46 @@ mod tests {
             expand("[[y + 1 FOR y IN x] FOR x IN [[1], [2]]]"),
             "list_transform([[1], [2]], lambda x: list_transform(x, lambda y: y + 1))"
         );
+    }
+
+    #[test]
+    fn a_multibyte_character_after_a_bracket_does_not_panic() {
+        for sql in [
+            "SELECT [ \tɚ",
+            "SELECT [ɚ",
+            "SELECT [ \tɚ]",
+            "SELECT [x FOR ɚ IN [1]]",
+            "SELECT [x FOR x IN ɚ]",
+            "SELECT [x FOR x IN [1] Iɚ]",
+            "SELECT [x Fɚ x IN [1]]",
+            "SELECT [x FO😀 x IN [1]]",
+            "SELECT [😀 FOR x IN [1]]",
+            "SELECT [x FOR x I\u{301}N [1]]",
+            "SELECT [e\u{301} FOR x IN [1] IF x\u{301} > 0]",
+            "SELECT 1 AS ɚ MATERIALIZED (",
+            "SELECT 1 Aɚ",
+        ] {
+            let _ = before_parse(sql);
+            let _ = crate::inspect::reach(sql);
+        }
+        assert_eq!(
+            expand("[x FOR x IN ['ɚ😀', 'e\u{301}']]"),
+            "list_transform(['ɚ😀', 'e\u{301}'], lambda x: x)"
+        );
+        assert!(crate::inspect::reach("SELECT [ \tɚ").is_err());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn any_text_rewrites_without_panicking(sql in "\\PC*") {
+            let _ = before_parse(&sql);
+        }
+
+        #[test]
+        fn comprehension_shaped_text_rewrites_without_panicking(
+            sql in "(SELECT )?\\[[ \t]*((FOR|IN|IF|AS|NOT|MATERIALIZED|[xɚ😀é\u{301}'\"\\[\\]()-/*]|\\PC)[ \t]*){0,12}\\]?",
+        ) {
+            let _ = before_parse(&sql);
+        }
     }
 }

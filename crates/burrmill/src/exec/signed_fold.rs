@@ -72,6 +72,9 @@ pub struct FoldMetrics {
     /// This is what `mem_pool_bytes` is checked against, and printing it beside peak RSS is how you
     /// tell an aggregation that is too big from an output phase that is.
     pub agg_bytes: usize,
+    /// Compressed bytes of the column chunks the scan reads, each row group once, from the footers:
+    /// the same figure for the same fold over the same segments.
+    pub bytes_read: u64,
 }
 
 /// The aggregation lives in [`crate::exec::agg`]. It is not a `HashMap<String, i128>` and the
@@ -174,6 +177,7 @@ impl<'a> SignedFoldExec<'a> {
             }
         }
         let plan_ms = started.elapsed().as_millis();
+        let bytes_read = self.chunk_bytes(&scans, &morsels);
         let deadline = started + self.limits.timeout;
 
         // **One aggregation per worker, not per work unit.** An earlier version gave every batch its
@@ -308,8 +312,27 @@ impl<'a> SignedFoldExec<'a> {
                 merge_ms,
                 elapsed_ms: started.elapsed().as_millis(),
                 agg_bytes,
+                bytes_read,
             },
         ))
+    }
+
+    fn chunk_bytes(&self, scans: &[(usize, Vec<usize>)], morsels: &[(usize, Morsel)]) -> u64 {
+        let mut seen = std::collections::HashSet::new();
+        let mut total = 0u64;
+        for (scan_ix, m) in morsels {
+            if !seen.insert((*scan_ix, Arc::clone(&m.path), m.row_group)) {
+                continue;
+            }
+            let arms = &scans[*scan_ix].1;
+            let mask = projection_mask(&m.meta, self.plan, arms, self.seam.map(|s| s.block_col));
+            let rg = m.meta.metadata().row_group(m.row_group);
+            total += (0..rg.num_columns())
+                .filter(|c| mask.as_ref().is_none_or(|k| k.leaf_included(*c)))
+                .map(|c| rg.column(c).compressed_size().max(0) as u64)
+                .sum::<u64>();
+        }
+        total
     }
 
     /// One morsel, folded into a table it shares with the rest of its batch.

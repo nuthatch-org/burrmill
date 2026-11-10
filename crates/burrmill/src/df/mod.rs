@@ -17,6 +17,7 @@ use crate::error::{BurrmillError, Result};
 use crate::limits::Limits;
 
 mod addresses;
+mod bound;
 mod cancel;
 mod catalog;
 mod checked;
@@ -104,6 +105,48 @@ impl SharedPool {
     }
 }
 
+/// Statements that have computed their selection in this process, for a host's test that a statement
+/// it ran unmetered paid nothing for it.
+#[doc(hidden)]
+pub fn selection_passes() -> u64 {
+    catalog::SELECTIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Local segment footers read in this process, for a test that a second engine reads none again.
+#[doc(hidden)]
+pub fn footer_reads() -> u64 {
+    host::FOOTER_READS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What one statement did once it has run (nuthatch RFC-0073 FR4).
+///
+/// `sealed_bytes_scanned` is the figure meant to repeat: decided from immutable footers before the
+/// plan runs, it is the same for the same statement over the same segments. `sealed_bytes_read` is what
+/// was fetched, which a TopK's dynamic filter or a `LIMIT` cuts by how the partitions raced. Time and
+/// memory move with the machine and its load.
+///
+/// CPU is the scans' alone, timed around their polls by the thread clock. DataFusion's per-operator
+/// `elapsed_compute` would cover the rest, but a scan registers it per segment, so reading it at the
+/// end means holding that set through the scan: 7 KiB a segment outside the pool in
+/// `tests/df_scanpool.rs`, against 1 KiB without (#86).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueryMetrics {
+    /// Data bytes of the column chunks the plan selects: its projection and filter columns, in every
+    /// row group its static predicate keeps by row-group statistics. Footers excluded.
+    pub sealed_bytes_scanned: u64,
+    /// Data bytes the scans and owned folds actually read, footers excluded.
+    pub sealed_bytes_read: u64,
+    /// Rows the statement answered with.
+    pub output_rows: u64,
+    /// Wall time from admission to the last batch, planning and the caller's handling of each included.
+    pub exec_nanos: u64,
+    /// The most the statement held against the memory pool at once.
+    pub peak_memory_bytes: u64,
+    /// Thread CPU the segment scans spent inside their own polls: fetching what was already read,
+    /// decoding, filtering. Operators above the scans, and an owned fold, are not counted.
+    pub scan_cpu_nanos: u64,
+}
+
 /// Concrete engine: SQL in, RecordBatches out. Generics stay inside this crate.
 pub struct Engine {
     /// Taken only by `Drop`. A tab has no runtime; its event loop drives `sql_async`.
@@ -121,8 +164,8 @@ pub struct Engine {
     cancel: crate::CancelToken,
     /// Inside a host transaction: what each name it has touched was bound to before it.
     txn: Option<HashMap<String, Option<Arc<dyn datafusion_expr::TableSource>>>>,
-    /// Each segment's columns, as `register_facts` read them from its footer. Sealed segments never
-    /// change, so once.
+    /// Each store segment's columns, as `register_store_facts` read them from its footer. Sealed
+    /// segments never change, so once. Local files share a process-wide cache instead.
     bound_segments: HashMap<(std::path::PathBuf, u64), arrow::datatypes::SchemaRef>,
 }
 
@@ -398,6 +441,12 @@ impl Engine {
         self.session.runtime_env().memory_pool.reserved()
     }
 
+    /// The most one value a statement builds may hold: a function's result, a `||`, a
+    /// `string_agg`, a literal repeated per row. Past it the statement is refused. 16 MiB unless set.
+    pub fn set_value_limit(&self, bytes: usize) {
+        self.session.limits().set_value_limit(bytes);
+    }
+
     /// Bytes of Parquet footers the engine keeps between statements, outside the pool: at most an
     /// eighth of a budget, which the pool was sized without.
     pub fn footer_cache_bytes(&self) -> usize {
@@ -432,9 +481,19 @@ impl Engine {
     /// `sql` collects; a million-row answer is then a million rows live at once, which is the
     /// caller's memory and not the engine's. An encoder writing to a socket wants this instead.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn sql_for_each(
+    pub fn sql_for_each(&self, sql: &str, f: impl FnMut(RecordBatch) -> Result<()>) -> Result<()> {
+        self.sql_for_each_metered(sql, None, f)
+    }
+
+    /// As [`Engine::sql_for_each`], adding what the statement did to `metrics`: as far as it got, so a
+    /// statement `f` stopped or the engine refused still reports what it read. The selection is a
+    /// footer pass over every segment the plan scans, which `None` does not pay: it runs exactly as
+    /// [`Engine::sql_for_each`] does.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn sql_for_each_metered(
         &self,
         sql: &str,
+        mut metrics: Option<&mut QueryMetrics>,
         mut f: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
         // Parsed first, so malformed SQL is a syntax error as DuckDB reports it, not a refusal.
@@ -447,23 +506,39 @@ impl Engine {
             return Err(BurrmillError::Cancelled);
         }
         let _pass = self.gate.enter();
+        let started = std::time::Instant::now();
         if tokio::runtime::Handle::try_current().is_err() {
-            return self.runtime().block_on(self.stream(logical, sql, &mut f));
+            let r =
+                self.runtime()
+                    .block_on(self.stream(logical, sql, &mut f, metrics.as_deref_mut()));
+            if let Some(m) = metrics {
+                m.exec_nanos += started.elapsed().as_nanos() as u64;
+            }
+            return r;
         }
         // A host's runtime drives this thread and tokio will not block it, so the statement runs on
         // a thread of its own; its batches come back here, and `f` stays on the caller's thread.
-        std::thread::scope(|s| {
+        let held = metrics.as_deref_mut();
+        let r = std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            let run = s.spawn(move || {
-                let mut send = |b| tx.send(b).map_err(|_| BurrmillError::Cancelled);
-                self.runtime()
-                    .block_on(self.stream(logical, sql, &mut send))
-            });
+            let run = std::thread::Builder::new()
+                .name("burrmill-statement".into())
+                .stack_size(PLAN_STACK_BYTES)
+                .spawn_scoped(s, move || {
+                    let mut send = |b| tx.send(b).map_err(|_| BurrmillError::Cancelled);
+                    self.runtime()
+                        .block_on(self.stream(logical, sql, &mut send, held))
+                })
+                .map_err(|e| BurrmillError::Substrate(format!("statement thread: {e}")))?;
             // Refused by `f`: `rx` goes with the loop, the next send fails and the statement ends.
             let taken = rx.into_iter().try_for_each(&mut f);
             let run = run.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
             taken.and(run)
-        })
+        });
+        if let Some(m) = metrics {
+            m.exec_nanos += started.elapsed().as_nanos() as u64;
+        }
+        r
     }
 
     /// Run a query on the caller's event loop, for a host with one thread and no runtime: a
@@ -493,7 +568,7 @@ impl Engine {
         if self.cancel.is_cancelled() {
             return Err(BurrmillError::Cancelled);
         }
-        self.stream(logical, sql, &mut f).await
+        self.stream(logical, sql, &mut f, None).await
     }
 
     /// Addresses are read as fixed binary while every value in an address column is one. The
@@ -504,13 +579,18 @@ impl Engine {
         logical: datafusion_expr::LogicalPlan,
         sql: &str,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
+        mut metrics: Option<&mut QueryMetrics>,
     ) -> Result<()> {
         let mut sent = 0usize;
         let r = self
-            .stream_once(logical, &mut |b| {
-                sent += 1;
-                f(b)
-            })
+            .stream_once(
+                logical,
+                &mut |b| {
+                    sent += 1;
+                    f(b)
+                },
+                metrics.as_deref_mut(),
+            )
             .await;
         match r {
             Err(BurrmillError::Substrate(ref m))
@@ -521,7 +601,7 @@ impl Engine {
                 log::warn!("{m}: addresses are read as text from now on");
                 // Planned afresh: the plan that refused holds what its shared subqueries ran.
                 let fresh = plan_query(&self.session, sql)?;
-                self.stream_once(fresh, f).await
+                self.stream_once(fresh, f, metrics).await
             }
             r => r,
         }
@@ -531,8 +611,8 @@ impl Engine {
         &self,
         logical: datafusion_expr::LogicalPlan,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
+        metrics: Option<&mut QueryMetrics>,
     ) -> Result<()> {
-        use futures::StreamExt;
         let physical = self
             .session
             .create_physical_plan(&logical)
@@ -540,42 +620,120 @@ impl Engine {
             .map_err(plan_err)?;
         // A host sees an address as the text it wrote.
         let physical = addresses::rendered(physical, &self.session).map_err(df_err)?;
-        let mut stream =
-            sequential::execute_stream(physical, self.session.task_ctx()).map_err(df_err)?;
-        // A plan with no nest scan (`range`, a recursive CTE) never meets `CancelExec`, so the
-        // token is also raced here; dropping the stream aborts the partition tasks under it.
-        // A tab has no timer to poll it on; there the token is seen at each batch instead.
+        let Some(metrics) = metrics else {
+            let stream =
+                sequential::execute_stream(physical, self.session.task_ctx()).map_err(df_err)?;
+            return self.drain(stream, f, &mut 0).await;
+        };
+        // Its own recorder over the engine's pool, so a peak is this statement's and not a neighbour's.
+        let pool = Arc::new(datafusion_execution::memory_pool::PeakRecordingPool::new(
+            Arc::clone(&self.session.runtime_env().memory_pool),
+        ));
+        let runtime = datafusion_execution::runtime_env::RuntimeEnvBuilder::from_runtime_env(
+            self.session.runtime_env(),
+        )
+        .with_memory_pool(Arc::clone(&pool) as _)
+        .build_arc()
+        .map_err(df_err)?;
+        let ctx = Arc::new(
+            Arc::try_unwrap(self.session.task_ctx())
+                .map_err(|_| BurrmillError::Substrate("a task context already shared".into()))?
+                .with_runtime(runtime),
+        );
+        let selecting = catalog::selected_bytes(
+            catalog::selections(&physical, ctx.runtime_env().as_ref()).map_err(df_err)?,
+            ctx.runtime_env().cache_manager.get_file_metadata_cache(),
+        );
+        // Beside the statement rather than before it: a footer pass over every segment is not free.
         #[cfg(not(target_arch = "wasm32"))]
-        let mut stopped = std::pin::pin!(async {
-            while !self.cancel.is_cancelled() {
-                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-            }
-        });
+        let mut selecting = Abort(tokio::spawn(selecting));
+        let mut counters = Vec::new();
+        catalog::sealed_counters(&physical, &mut counters);
+        let mut cpu = Vec::new();
+        cancel::arm_scan_cpu(&physical, &mut cpu);
+        let stream = sequential::execute_stream(physical, ctx).map_err(df_err)?;
+        let mut rows = 0u64;
+        let r = self.drain(stream, f, &mut rows).await;
+        #[cfg(not(target_arch = "wasm32"))]
+        let selected = match &r {
+            Err(BurrmillError::Cancelled) => Ok(0),
+            _ => (&mut selecting.0)
+                .await
+                .map_err(|e| BurrmillError::Substrate(e.to_string()))?,
+        };
         #[cfg(target_arch = "wasm32")]
-        let mut stopped = std::pin::pin!(futures::future::pending::<()>());
-        loop {
-            let b = match futures::future::select(stream.next(), stopped.as_mut()).await {
-                futures::future::Either::Left((Some(b), _)) => b,
-                futures::future::Either::Left((None, _)) => break,
-                futures::future::Either::Right(_) => return Err(BurrmillError::Cancelled),
-            };
-            if self.cancel.is_cancelled() {
-                return Err(BurrmillError::Cancelled);
+        let selected = selecting.await;
+        let selected = selected.map_err(df_err)?;
+        let folded: u64 = counters
+            .iter()
+            .filter(|c| c.1)
+            .map(|c| c.0.value() as u64)
+            .sum();
+        metrics.sealed_bytes_scanned += selected + folded;
+        metrics.sealed_bytes_read += counters.iter().map(|c| c.0.value() as u64).sum::<u64>();
+        metrics.output_rows += rows;
+        metrics.peak_memory_bytes = metrics.peak_memory_bytes.max(pool.max_reserved() as u64);
+        metrics.scan_cpu_nanos += cpu.iter().map(|c| c.value() as u64).sum::<u64>();
+        r
+    }
+
+    /// Each batch of `stream` to `f`, counted into `rows`, until it ends, `f` refuses or the token
+    /// stops it. The stream is dropped on return, which aborts the partition tasks under it.
+    async fn drain(
+        &self,
+        mut stream: datafusion_execution::SendableRecordBatchStream,
+        f: &mut impl FnMut(RecordBatch) -> Result<()>,
+        rows: &mut u64,
+    ) -> Result<()> {
+        {
+            use futures::StreamExt;
+            // A plan with no nest scan (`range`, a recursive CTE) never meets `CancelExec`, so the
+            // token is also raced here; dropping the stream aborts the partition tasks under it.
+            // A tab has no timer to poll it on; there the token is seen at each batch instead.
+            #[cfg(not(target_arch = "wasm32"))]
+            let mut stopped = std::pin::pin!(async {
+                while !self.cancel.is_cancelled() {
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+            });
+            #[cfg(target_arch = "wasm32")]
+            let mut stopped = std::pin::pin!(futures::future::pending::<()>());
+            loop {
+                let b = match futures::future::select(stream.next(), stopped.as_mut()).await {
+                    futures::future::Either::Left((Some(b), _)) => b,
+                    futures::future::Either::Left((None, _)) => break,
+                    futures::future::Either::Right(_) => return Err(BurrmillError::Cancelled),
+                };
+                if self.cancel.is_cancelled() {
+                    return Err(BurrmillError::Cancelled);
+                }
+                let b = match b {
+                    Ok(b) => b,
+                    // A scan stopped by the token surfaces here as its error; say what it was.
+                    Err(_) if self.cancel.is_cancelled() => return Err(BurrmillError::Cancelled),
+                    Err(e) => return Err(df_err(e)),
+                };
+                *rows += b.num_rows() as u64;
+                f(dialect::strip_dup_suffix(b))?;
             }
-            let b = match b {
-                Ok(b) => b,
-                // A scan stopped by the token surfaces here as its error; say what it was.
-                Err(_) if self.cancel.is_cancelled() => return Err(BurrmillError::Cancelled),
-                Err(e) => return Err(df_err(e)),
-            };
-            f(dialect::strip_dup_suffix(b))?;
+            Ok(())
         }
-        Ok(())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn runtime(&self) -> &tokio::runtime::Runtime {
         self.rt.as_ref().expect("taken only by drop")
+    }
+}
+
+/// A task stopped with the statement that spawned it, refused or cancelled.
+#[cfg(not(target_arch = "wasm32"))]
+struct Abort<T>(tokio::task::JoinHandle<T>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<T> Drop for Abort<T> {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -608,10 +766,17 @@ impl Engine {
             plan()
         } else {
             std::thread::scope(|s| {
-                s.spawn(plan)
-                    .join()
-                    .unwrap_or_else(|p| std::panic::resume_unwind(p))
-            })
+                let handle = std::thread::Builder::new()
+                    .name("burrmill-plan".into())
+                    .stack_size(PLAN_STACK_BYTES)
+                    .spawn_scoped(s, plan)
+                    .map_err(|e| BurrmillError::Substrate(format!("planner thread: {e}")))?;
+                Ok::<_, BurrmillError>(
+                    handle
+                        .join()
+                        .unwrap_or_else(|p| std::panic::resume_unwind(p)),
+                )
+            })?
         }
         .map_err(plan_err)?;
         scans(&physical)
@@ -671,8 +836,9 @@ fn scans(p: &Arc<dyn datafusion_physical_plan::ExecutionPlan>) -> Result<u64> {
         .try_fold(own, |n, c| Ok(n.saturating_add(scans(c)?)))
 }
 
-/// The planner recurses. The caller's stack is whatever the host gave its worker, and a stack
-/// overflow aborts the process. What the depth bound let through is planned on a stack of a known size.
+/// The planner recurses, and so does executing what it planned. The caller's stack is whatever the
+/// host gave its worker, and a stack overflow aborts the process, so each thread this module starts
+/// for a statement gets a stack of a known size (nuthatch#2460: 2 MiB overflowed in a debug build).
 #[cfg(not(target_arch = "wasm32"))]
 const PLAN_STACK_BYTES: usize = 8 * 1024 * 1024;
 
