@@ -1,8 +1,6 @@
-import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
 
-const require = createRequire('/Users/pepe/Projects/IRMarket/web/package.json');
-const { chromium } = require('playwright');
+import { chromium } from 'playwright';
 
 const lines = ['merchant,amount'];
 const forbidden = [];
@@ -71,6 +69,7 @@ await page.getByText('CANARY_SMALL_01').first().waitFor({ timeout: 120000 });
 await page.locator('#mode').selectOption('aggregates');
 await page.locator('#key').fill('sk-ant-test-key');
 await page.locator('#question').fill('Which merchant groups are large?');
+await page.locator('#confirm').uncheck();
 await page.locator('#ask').click();
 await page.waitForFunction(
   () =>

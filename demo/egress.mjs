@@ -1,8 +1,6 @@
-import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
 
-const require = createRequire('/Users/pepe/Projects/IRMarket/web/package.json');
-const { chromium } = require('playwright');
+import { chromium } from 'playwright';
 
 const csv = [
   'posted,merchant,amount',
@@ -81,6 +79,7 @@ await page.locator('#file-input').setInputFiles({
 await page.getByText('CANARY_MERCHANT_AAA').waitFor({ timeout: 120000 });
 await page.locator('#key').fill('sk-ant-test-key');
 await page.getByRole('button', { name: 'Largest single debit' }).click();
+await page.locator('#confirm').uncheck();
 await page.locator('#ask').click();
 await page.waitForFunction(
   () => (document.getElementById('narration').textContent || '').includes('-194.50'),

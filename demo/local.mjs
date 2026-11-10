@@ -1,8 +1,6 @@
-import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
 
-const require = createRequire('/Users/pepe/Projects/IRMarket/web/package.json');
-const { chromium } = require('playwright');
+import { chromium } from 'playwright';
 
 const csv = [
   'posted,merchant,amount',
@@ -76,6 +74,7 @@ await page.locator('#mode').selectOption('local-model');
 await page.locator('#port').fill(modelPort);
 await page.locator('#key').fill('sk-ant-test-key');
 await page.locator('#question').fill('Total');
+await page.locator('#confirm').uncheck();
 await page.locator('#ask').click();
 await page.waitForFunction(
   () => (document.getElementById('narration').textContent || '').includes('-103.50'),

@@ -169,26 +169,60 @@ function modelUrl(mode, port) {
   return 'https://api.anthropic.com/v1/messages';
 }
 
+// Whole for an ordinary request; a local-model dump of thousands of rows is cut.
+const LOG_SHOWN = 65536;
+const LOG_KEPT = 8;
+
+// Each request is its own entry, cut to its start until asked; only the last few are kept.
 function logBody(url, body) {
   const bytes = new TextEncoder().encode(body).length;
-  document.getElementById('log').appendChild(
-    document.createTextNode('POST ' + url + '\n' + bytes + ' bytes\n' + body + '\n\n'),
+  const log = document.getElementById('log');
+  const entry = document.createElement('div');
+  const text = document.createTextNode(
+    'POST ' + url + '\n' + bytes + ' bytes\n' + body.slice(0, LOG_SHOWN) + '\n',
   );
+  entry.appendChild(text);
+  if (body.length > LOG_SHOWN) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.textContent = 'Show all ' + bytes + ' bytes';
+    more.addEventListener('click', () => {
+      text.textContent = 'POST ' + url + '\n' + bytes + ' bytes\n' + body + '\n';
+      more.remove();
+    });
+    entry.appendChild(more);
+  }
+  entry.appendChild(document.createTextNode('\n'));
+  log.appendChild(entry);
+  while (log.childElementCount > LOG_KEPT) log.firstElementChild.remove();
 }
 
+class NotSent extends Error {}
+
+// Resolves when the request may go; rejects with NotSent when it may not.
 function waitForSend() {
   const send = document.getElementById('send');
+  const decline = document.getElementById('decline');
   send.hidden = false;
-  return new Promise((resolve) => {
-    send.addEventListener(
-      'click',
-      () => {
-        send.hidden = true;
-        resolve();
-      },
-      { once: true },
-    );
+  decline.hidden = false;
+  return new Promise((resolve, reject) => {
+    const done = (go) => () => {
+      send.hidden = true;
+      decline.hidden = true;
+      send.removeEventListener('click', yes);
+      decline.removeEventListener('click', no);
+      if (go) resolve();
+      else reject(new NotSent('Not sent.'));
+    };
+    const yes = done(true);
+    const no = done(false);
+    send.addEventListener('click', yes);
+    decline.addEventListener('click', no);
   });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function post(url, body, key, mode) {
@@ -206,7 +240,18 @@ async function post(url, body, key, mode) {
     body,
   });
   if (!res.ok) {
-    return { error: 'model http ' + res.status };
+    let message = '';
+    try {
+      message = JSON.parse(await res.text())?.error?.message || '';
+    } catch {}
+    const error = 'model http ' + res.status + (message ? ': ' + message : '');
+    // A rate limit is waited out. Any other refusal is the key, the model name or the request,
+    // and asking the model to fix it would only send the request again.
+    if (res.status === 429) {
+      const after = Number(res.headers.get('retry-after'));
+      return { error, wait: Number.isFinite(after) && after > 0 ? after * 1000 : 5000 };
+    }
+    return { error, fatal: res.status >= 400 && res.status < 500 };
   }
   let data;
   try {
@@ -496,10 +541,32 @@ async function clearStore() {
   }
 }
 
+// Ingest refuses past this too; checking first saves reading a file it will not take.
+const MAX_FILE_BYTES = 200 * 1024 * 1024;
+
+function megabytes(text) {
+  return text.replace(/\b\d{7,}\b/g, (n) => (Number(n) / 1048576).toFixed(1) + ' MB');
+}
+
 async function openFile(file, persist) {
+  if (file.size > MAX_FILE_BYTES) {
+    status(
+      file.name + ' is ' + megabytes(String(file.size)) + '; the limit is ' +
+        megabytes(String(MAX_FILE_BYTES)) + '.',
+    );
+    return;
+  }
   status('Reading ' + file.name);
   const bytes = await file.arrayBuffer();
-  held = bytes.slice(0);
+  let info;
+  try {
+    // Transferred, not copied. The File stays the handle for storing it.
+    info = await call('open', { bytes }, [bytes]);
+  } catch (err) {
+    status(megabytes(err.message || String(err)));
+    return;
+  }
+  held = file;
   heldName = file.name;
   let storageNote = '';
   if (persist) {
@@ -513,7 +580,6 @@ async function openFile(file, persist) {
       storageNote = err.message || String(err);
     }
   }
-  const info = await call('open', { bytes }, [bytes]);
   fileOpen = true;
   document.getElementById('setup').hidden = false;
   document.getElementById('ask').disabled = false;
@@ -648,6 +714,15 @@ async function ask() {
       logBody(url, body);
       if (document.getElementById('confirm').checked) await waitForSend();
       const sent = await post(url, body, key, mode);
+      if (sent.fatal) {
+        status(sent.error);
+        return;
+      }
+      if (sent.wait) {
+        status(sent.error + '. Waiting ' + Math.round(sent.wait / 1000) + ' s.');
+        await sleep(sent.wait);
+        continue;
+      }
       if (sent.error) {
         feedback = await call('error', { message: sent.error });
         status(sent.error);
@@ -701,6 +776,7 @@ async function ask() {
   } finally {
     document.getElementById('ask').disabled = false;
     document.getElementById('send').hidden = true;
+    document.getElementById('decline').hidden = true;
   }
 }
 
