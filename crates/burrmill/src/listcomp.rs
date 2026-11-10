@@ -84,6 +84,7 @@ fn materialized_after_as(b: &[u8], at: usize) -> Option<usize> {
 
 fn pass(sql: &str) -> String {
     let b = sql.as_bytes();
+    let found = comprehensions(sql);
     let mut out = String::with_capacity(sql.len());
     let mut i = 0;
     while i < b.len() {
@@ -100,7 +101,8 @@ fn pass(sql: &str) -> String {
             continue;
         }
         if b[i] == b'['
-            && let Some((end, repl)) = comprehension(sql, i)
+            && let Some(&(close, for_at)) = found.get(&i)
+            && let Some((end, repl)) = comprehension(sql, i, close, for_at)
         {
             out.push_str(&repl);
             i = end;
@@ -113,14 +115,19 @@ fn pass(sql: &str) -> String {
     out
 }
 
-/// `Some((index past the closing bracket, replacement))` when `[` at `open` is a comprehension.
-fn comprehension(sql: &str, open: usize) -> Option<(usize, String)> {
+/// Each `[` that closes and holds a `FOR` of its own, as `open -> (close, for_at)`, in one pass.
+/// Scanning from every `[` to its `]` instead was quadratic: 200,000 unmatched `[` took 30 s.
+fn comprehensions(sql: &str) -> std::collections::HashMap<usize, (usize, usize)> {
+    struct Frame {
+        open: usize,
+        parens: i32,
+        for_at: Option<usize>,
+    }
     let b = sql.as_bytes();
-    let mut j = open + 1;
-    let mut brackets = 1i32;
-    let mut parens = 0i32;
-    let mut for_at = None;
-    while j < b.len() && brackets > 0 {
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut found = std::collections::HashMap::new();
+    let mut j = 0;
+    while j < b.len() {
         if b[j] == b'\'' || b[j] == b'"' {
             j = skip_string(sql, j);
             continue;
@@ -134,32 +141,49 @@ fn comprehension(sql: &str, open: usize) -> Option<(usize, String)> {
             continue;
         }
         match b[j] {
-            b'(' => parens += 1,
-            b')' => parens -= 1,
-            b'[' => brackets += 1,
+            b'[' => stack.push(Frame {
+                open: j,
+                parens: 0,
+                for_at: None,
+            }),
             b']' => {
-                brackets -= 1;
-                if brackets == 0 {
-                    break;
+                if let Some(frame) = stack.pop()
+                    && let Some(for_at) = frame.for_at
+                {
+                    found.insert(frame.open, (j, for_at));
                 }
             }
-            _ if brackets == 1 && parens == 0 && for_at.is_none() && keyword(sql, j, "FOR") => {
-                for_at = Some(j);
-                j += 3;
-                continue;
+            b'(' => {
+                if let Some(top) = stack.last_mut() {
+                    top.parens += 1;
+                }
+            }
+            b')' => {
+                if let Some(top) = stack.last_mut() {
+                    top.parens -= 1;
+                }
             }
             _ => {
+                if let Some(top) = stack.last_mut()
+                    && top.parens == 0
+                    && top.for_at.is_none()
+                    && keyword(sql, j, "FOR")
+                {
+                    top.for_at = Some(j);
+                    j += 3;
+                    continue;
+                }
                 j += sql[j..].chars().next().unwrap().len_utf8();
                 continue;
             }
         }
         j += 1;
     }
-    let for_at = for_at?;
-    if brackets != 0 {
-        return None;
-    }
-    let close = j;
+    found
+}
+
+/// `Some((index past the closing bracket, replacement))` when `[` at `open` is a comprehension.
+fn comprehension(sql: &str, open: usize, close: usize, for_at: usize) -> Option<(usize, String)> {
     let mut k = skip_ws(sql, for_at + 3);
     let var_end = ident_end(sql, k)?;
     let var = &sql[k..var_end];
@@ -385,6 +409,18 @@ mod tests {
             "list_transform(['ɚ😀', 'e\u{301}'], lambda x: x)"
         );
         assert!(crate::inspect::reach("SELECT [ \tɚ").is_err());
+    }
+
+    #[test]
+    fn unmatched_and_nested_brackets_rewrite_in_linear_time() {
+        // Each of these took tens of seconds when every `[` scanned to its `]` or the end.
+        let unmatched = format!("SELECT 1 {}", "[".repeat(200_000));
+        let nested = format!("SELECT {}1{}", "[".repeat(100_000), "]".repeat(100_000));
+        for sql in [unmatched, nested] {
+            let started = std::time::Instant::now();
+            assert_eq!(before_parse(&sql), sql);
+            assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        }
     }
 
     proptest::proptest! {
