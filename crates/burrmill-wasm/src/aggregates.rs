@@ -2,9 +2,10 @@
 //! [`AGGREGATE_K`] source rows in it.
 
 use sqlparser::ast::{
-    DuplicateTreatment, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
-    FunctionArguments, GroupByExpr, Ident, ObjectName, ObjectNamePart, Query, Select, SelectItem,
-    SetExpr, Statement, TableFactor, Visit, Visitor,
+    BinaryOperator, DuplicateTreatment, Expr, Function, FunctionArg, FunctionArgExpr,
+    FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, ObjectName, ObjectNamePart, Query,
+    Select, SelectItem, SetExpr, Statement, TableFactor, UnaryOperator, Value as SqlValue, Visit,
+    Visitor,
 };
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
@@ -20,6 +21,8 @@ pub const AGGREGATE_K: u64 = 10;
 const SKIP: &str = "not a grouped read of t";
 const TAINTED: &str = "a subquery or window is not a group";
 const UNMEASURED: &str = "group size was not measured";
+const NOT_SUMMARY: &str = "only grouping keys and count, sum or avg of a column leave";
+const SHADOWED: &str = "a CTE named t is not the upload";
 
 /// Rewrite a grouped read of `t` so `count(*) AS group_n` is measured here.
 /// A count the model wrote is removed: `10 AS group_n` would let a small group through.
@@ -27,6 +30,9 @@ pub(crate) fn measure_sql(sql: &str) -> Result<String, &'static str> {
     let mut query = parse_one(sql)?;
     if !query_ok(&query) {
         return Err(SKIP);
+    }
+    if shadows_t(&query) {
+        return Err(SHADOWED);
     }
     {
         let select = outermost(&query.body)?;
@@ -165,7 +171,32 @@ fn accept(select: &Select) -> Result<(), &'static str> {
     if exprs.iter().any(tainted) {
         return Err(TAINTED);
     }
-    items_ok(&select.projection)
+    items_ok(&select.projection, exprs)
+}
+
+/// A CTE named `t` shadows the upload, so `FROM t` would read rows this crate never counted.
+fn shadows_t(query: &Query) -> bool {
+    struct Shadow(bool);
+    impl Visitor for Shadow {
+        type Break = ();
+
+        fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
+            let named_t = query.with.as_ref().is_some_and(|with| {
+                with.cte_tables
+                    .iter()
+                    .any(|cte| cte.alias.name.value.eq_ignore_ascii_case("t"))
+            });
+            if named_t {
+                self.0 = true;
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        }
+    }
+    let mut shadow = Shadow(false);
+    let _ = query.visit(&mut shadow);
+    shadow.0
 }
 
 fn plain(select: &Select) -> bool {
@@ -229,23 +260,131 @@ fn from_table_t(select: &Select) -> bool {
     }
 }
 
-fn items_ok(items: &[SelectItem]) -> Result<(), &'static str> {
+/// Each output is a grouping key or a summary. Anything else can carry one member's value out
+/// of a group of k: `string_agg`, `min`, or `sum(CASE WHEN name = .. THEN salary END)`.
+fn items_ok(items: &[SelectItem], keys: &[Expr]) -> Result<(), &'static str> {
     if items.is_empty() {
         return Err(SKIP);
     }
-    for item in items {
-        match item {
+    for (i, item) in items.iter().enumerate() {
+        let (expr, alias) = match item {
             SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => return Err(SKIP),
-            SelectItem::UnnamedExpr(expr)
-            | SelectItem::ExprWithAlias { expr, .. }
-            | SelectItem::ExprWithAliases { expr, .. } => {
-                if tainted(expr) {
-                    return Err(TAINTED);
-                }
-            }
+            SelectItem::UnnamedExpr(expr) => (expr, None),
+            SelectItem::ExprWithAlias { expr, alias } => (expr, Some(alias)),
+            SelectItem::ExprWithAliases { .. } => return Err(SKIP),
+        };
+        if tainted(expr) {
+            return Err(TAINTED);
+        }
+        if !is_key(expr, alias, i, keys) && !summary(expr) {
+            return Err(NOT_SUMMARY);
         }
     }
     Ok(())
+}
+
+fn is_key(expr: &Expr, alias: Option<&Ident>, index: usize, keys: &[Expr]) -> bool {
+    keys.iter().any(|key| match key {
+        Expr::Value(v) => matches!(&v.value, SqlValue::Number(n, _) if n.parse() == Ok(index + 1)),
+        Expr::Identifier(name)
+            if alias.is_some_and(|a| a.value.eq_ignore_ascii_case(&name.value)) =>
+        {
+            true
+        }
+        key => key == expr,
+    })
+}
+
+fn summary(expr: &Expr) -> bool {
+    match expr {
+        Expr::Value(_) => true,
+        Expr::Nested(inner) | Expr::Cast { expr: inner, .. } => summary(inner),
+        Expr::UnaryOp { op, expr } => {
+            matches!(op, UnaryOperator::Minus | UnaryOperator::Plus) && summary(expr)
+        }
+        Expr::BinaryOp { left, op, right } => {
+            matches!(
+                op,
+                BinaryOperator::Plus
+                    | BinaryOperator::Minus
+                    | BinaryOperator::Multiply
+                    | BinaryOperator::Divide
+            ) && summary(left)
+                && summary(right)
+        }
+        Expr::Function(function) => counted(function) || rounded(function),
+        _ => false,
+    }
+}
+
+/// `count`, `sum` or `avg` of a bare column over the whole group, nothing filtered out of it.
+fn counted(function: &Function) -> bool {
+    let Some(name) = bare_name(function) else {
+        return false;
+    };
+    let FunctionArguments::List(list) = &function.args else {
+        return false;
+    };
+    let distinct_ok = match list.duplicate_treatment {
+        None | Some(DuplicateTreatment::All) => true,
+        Some(DuplicateTreatment::Distinct) => name == "count",
+    };
+    let [arg] = list.args.as_slice() else {
+        return false;
+    };
+    let arg_ok = match arg {
+        FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => name == "count",
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_),
+        )) => true,
+        _ => false,
+    };
+    matches!(name.as_str(), "count" | "sum" | "avg")
+        && distinct_ok
+        && arg_ok
+        && list.clauses.is_empty()
+        && plain_call(function)
+}
+
+/// `round(summary)` or `round(summary, digits)`.
+fn rounded(function: &Function) -> bool {
+    let FunctionArguments::List(list) = &function.args else {
+        return false;
+    };
+    let args: Vec<_> = list
+        .args
+        .iter()
+        .map(|arg| match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => Some(e),
+            _ => None,
+        })
+        .collect();
+    let shape_ok = match args.as_slice() {
+        [Some(value)] => summary(value),
+        [Some(value), Some(Expr::Value(_))] => summary(value),
+        _ => false,
+    };
+    bare_name(function).as_deref() == Some("round")
+        && list.duplicate_treatment.is_none()
+        && list.clauses.is_empty()
+        && shape_ok
+        && plain_call(function)
+}
+
+fn bare_name(function: &Function) -> Option<String> {
+    match function.name.0.as_slice() {
+        [ObjectNamePart::Identifier(ident)] => Some(ident.value.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+fn plain_call(function: &Function) -> bool {
+    !function.uses_odbc_syntax
+        && matches!(function.parameters, FunctionArguments::None)
+        && function.filter.is_none()
+        && function.null_treatment.is_none()
+        && function.over.is_none()
+        && function.within_group.is_empty()
 }
 
 fn alias_is_group_n(item: &SelectItem) -> bool {
@@ -379,6 +518,59 @@ mod tests {
         assert_no("where subquery", &wrapped_payload, &forbidden);
         let wrapped_value: Value = serde_json::from_str(&wrapped_payload).unwrap();
         assert_eq!(wrapped_value["groups"][0]["merchant"], "KEPT_GROUP");
+    }
+
+    #[test]
+    fn a_member_value_does_not_leave_through_a_large_group() {
+        let (s, forbidden) = grouped_file();
+        let ten = ["SELECT * FROM x"; 10].join(" UNION ALL ");
+        let queries = [
+            "SELECT 1 AS g, string_agg(merchant, ',') AS e FROM t GROUP BY 1".to_string(),
+            "SELECT 1 AS g, min(merchant) AS m FROM t GROUP BY 1".into(),
+            "SELECT 1 AS g, max(amount) AS m FROM t GROUP BY 1".into(),
+            "SELECT 1 AS g, list(merchant) AS m FROM t GROUP BY g".into(),
+            "SELECT 1 AS g, any_value(merchant) AS m FROM t GROUP BY 1".into(),
+            "SELECT 1 AS g, first(merchant) AS m FROM t GROUP BY 1".into(),
+            "SELECT 1 AS g, sum(CASE WHEN merchant = 'CANARY_SMALL_05' THEN amount END) AS a FROM t GROUP BY 1".into(),
+            "SELECT 1 AS g, count(*) FILTER (WHERE merchant = 'CANARY_SMALL_05') AS a FROM t GROUP BY 1".into(),
+            "SELECT 1 AS g, sum(DISTINCT amount) AS a FROM t GROUP BY 1".into(),
+            "SELECT 1 AS g, merchant FROM t GROUP BY 1".into(),
+            "WITH t AS (SELECT a.* FROM t a, t b) SELECT merchant, sum(amount) AS total FROM t GROUP BY merchant".into(),
+            format!("WITH x AS (SELECT * FROM t), t AS ({ten}) SELECT merchant, sum(amount) AS total FROM t GROUP BY merchant"),
+            r#"WITH "T" AS (SELECT a.* FROM t a, t b) SELECT merchant, count(*) AS n FROM "T" GROUP BY merchant"#.into(),
+        ];
+        for sql in &queries {
+            let payload = s.aggregate_feedback(sql).unwrap();
+            assert_no(sql, &payload, &forbidden);
+            let value: Value = serde_json::from_str(&payload).unwrap();
+            assert!(
+                value["groups"].as_array().unwrap().is_empty(),
+                "{sql}: {payload}"
+            );
+            assert!(value["omitted"].is_string(), "{sql}: {payload}");
+        }
+    }
+
+    #[test]
+    fn summaries_over_keys_still_leave() {
+        let (s, forbidden) = grouped_file();
+        let queries = [
+            "SELECT merchant, round(avg(amount), 2) AS mean, count(*) AS n, sum(amount) / count(*) AS per FROM t GROUP BY merchant",
+            "SELECT merchant, CAST(sum(amount) AS DOUBLE) AS total FROM t GROUP BY 1",
+            "SELECT lower(merchant) AS m, count(DISTINCT amount) AS kinds FROM t GROUP BY m",
+            "SELECT merchant AS m, -sum(amount) AS owed FROM main.t GROUP BY merchant",
+        ];
+        for sql in queries {
+            let payload = s.aggregate_feedback(sql).unwrap();
+            assert_no(sql, &payload, &forbidden);
+            let value: Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(
+                value["groups"].as_array().unwrap().len(),
+                1,
+                "{sql}: {payload}"
+            );
+            assert_eq!(value["dropped"], AGGREGATE_K - 1, "{sql}: {payload}");
+        }
     }
 
     #[test]
