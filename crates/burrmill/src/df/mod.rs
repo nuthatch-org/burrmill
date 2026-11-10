@@ -505,7 +505,11 @@ impl Engine {
         if self.cancel.is_cancelled() {
             return Err(BurrmillError::Cancelled);
         }
-        let _pass = self.gate.enter();
+        // The engine's own token, so a cancel also frees a statement queued behind slow ones.
+        let _pass = self
+            .gate
+            .enter_cancellable(&self.cancel)
+            .ok_or(BurrmillError::Cancelled)?;
         let started = std::time::Instant::now();
         if tokio::runtime::Handle::try_current().is_err() {
             let r =
