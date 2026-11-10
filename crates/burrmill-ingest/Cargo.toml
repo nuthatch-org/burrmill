@@ -1,0 +1,36 @@
+[package]
+name = "burrmill-ingest"
+version = "0.0.1"
+description = "Turn untrusted CSV into Arrow under hard budgets. RFC-0047 slice 1."
+keywords = ["csv", "arrow", "ingest"]
+categories = ["parser-implementations"]
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Slice 1 is CSV only. Parquet arrives with its own slice, and with it the pure-Rust codecs.
+# No default features on Arrow: csv/json/ipc are not this path, and arrow's defaults have
+# dragged ahash onto wasm before (investigation 05).
+[dependencies]
+arrow = { workspace = true }
+bytes = "1"
+
+# Feature unification only. Not called. See `lib.rs`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[features]
+# Links the reader into a .wasm so the gzip size is of the code a tab would download.
+# Off by default: native `cargo test` does not build the bin.
+link-wasm = []
+
+[[bin]]
+name = "ingest-wasm"
+path = "src/bin/ingest-wasm.rs"
+required-features = ["link-wasm"]
+
+[dev-dependencies]
+arrow = { workspace = true }

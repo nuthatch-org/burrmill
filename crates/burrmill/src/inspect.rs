@@ -220,6 +220,28 @@ pub fn base_tables(sql: &str) -> Option<BTreeSet<String>> {
     Some(w.out)
 }
 
+/// One query over the uploaded tables in `allowed`. A `WITH` name is not an upload:
+/// `WITH other AS (SELECT * FROM t) SELECT * FROM other` reaches `t`, and
+/// `WITH t AS (SELECT * FROM other)` reaches `other`. A schema other than `main` is refused.
+pub fn reach_uploads(sql: &str, allowed: &BTreeSet<String>) -> Result<()> {
+    let got = reach(sql)?;
+    if got.surveys {
+        return Err(refused(
+            "a schema other than main surveys the catalogue".into(),
+        ));
+    }
+    let Some(bases) = base_tables(sql) else {
+        return Err(refused("only SELECT/WITH queries are allowed".into()));
+    };
+    let allow: BTreeSet<String> = allowed.iter().map(|n| n.to_ascii_lowercase()).collect();
+    for name in &bases {
+        if hidden_table(name) || !allow.contains(name) {
+            return Err(refused(format!("`{name}` is not an uploaded table")));
+        }
+    }
+    Ok(())
+}
+
 struct Scoped {
     scopes: Vec<BTreeSet<String>>,
     /// What each CTE's own query sees, keyed by its address, registered by the query holding it.
@@ -454,6 +476,26 @@ mod tests {
         let (name, hash) = crate::ENGINE.split_once('+').unwrap();
         assert!(name.starts_with("burrmill "));
         assert!(hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn uploads_allow_the_named_tables_and_not_cte_shadows() {
+        use std::collections::BTreeSet;
+        let allow = BTreeSet::from(["t".to_string()]);
+        assert!(reach_uploads("SELECT 1", &allow).is_ok());
+        assert!(reach_uploads("SELECT * FROM t", &allow).is_ok());
+        assert!(
+            reach_uploads(
+                "WITH other AS (SELECT * FROM t) SELECT * FROM other",
+                &allow
+            )
+            .is_ok()
+        );
+        assert!(reach_uploads("WITH t AS (SELECT * FROM other) SELECT * FROM t", &allow).is_err());
+        assert!(reach_uploads("SELECT * FROM other", &allow).is_err());
+        assert!(reach_uploads("SELECT * FROM information_schema.tables", &allow).is_err());
+        assert!(reach_uploads("SELECT * FROM t__raw", &allow).is_err());
+        assert!(reach_uploads("COPY (SELECT 1) TO '/tmp/x'", &allow).is_err());
     }
 
     #[test]
