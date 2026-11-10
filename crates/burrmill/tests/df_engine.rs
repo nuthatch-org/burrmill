@@ -767,3 +767,33 @@ fn a_missing_column_reads_as_duckdb_with_or_without_a_near_match() {
         r#"Binder Error: Table "t" does not have a column named "zzzz""#
     );
 }
+
+#[test]
+fn a_statement_over_too_many_relations_is_refused_before_planning() {
+    let from = |n: usize| {
+        (0..n)
+            .map(|i| format!("range(1) t{i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let engine = Engine::open_empty().unwrap();
+    assert_eq!(
+        value_of(engine, &format!("SELECT count(*) AS n FROM {}", from(50))),
+        r#"[{"n":1}]"#
+    );
+    let joins = (1..300)
+        .map(|i| format!(" JOIN range(1) t{i} ON t0.value = t{i}.value"))
+        .collect::<String>();
+    // 1,200 relations planned for 28 s and could not be cancelled.
+    for sql in [
+        format!("SELECT count(*) FROM {}", from(300)),
+        format!("SELECT count(*) FROM range(1) t0{joins}"),
+        format!("EXPLAIN SELECT count(*) FROM {}", from(300)),
+    ] {
+        let started = std::time::Instant::now();
+        let err = Engine::open_empty().unwrap().sql(&sql).unwrap_err();
+        assert!(matches!(err, BurrmillError::NotAllowed(_)), "{err}");
+        assert!(err.to_string().contains("more than 256"), "{err}");
+        assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+    }
+}

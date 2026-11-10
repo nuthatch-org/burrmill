@@ -16,6 +16,9 @@ const MAX_EXPR_DEPTH: usize = 64;
 const MAX_EXPR_TERMS: usize = 1024;
 /// Nested queries and set operations. A visitor descends the left spine before it can stop.
 const MAX_SET_DEPTH: usize = 64;
+/// Tables, subqueries and table functions in one statement. Planning is about cubic in them:
+/// 1,200 took 28 s and could not be cancelled. The largest authored view has under 80.
+const MAX_RELATIONS: usize = 256;
 
 /// Refuse a statement whose plan would recurse deep enough to abort the process.
 ///
@@ -36,6 +39,7 @@ pub(crate) fn check_statement(stmt: &sq::Statement) -> Result<()> {
     Walk {
         work: vec![Work::Stmt(stmt, 0, 0)],
         groups: Vec::new(),
+        relations: 0,
     }
     .run()
 }
@@ -90,6 +94,12 @@ fn too_wide() -> BurrmillError {
     ))
 }
 
+fn too_many_relations() -> BurrmillError {
+    BurrmillError::NotAllowed(format!(
+        "statement reads more than {MAX_RELATIONS} tables or subqueries and cannot be planned"
+    ))
+}
+
 fn too_nested() -> BurrmillError {
     BurrmillError::NotAllowed(format!(
         "query nests more than {MAX_SET_DEPTH} queries or set operations and cannot be planned"
@@ -106,11 +116,15 @@ enum Work<'a> {
 struct Walk<'a> {
     work: Vec<Work<'a>>,
     groups: Vec<usize>,
+    relations: usize,
 }
 
 impl<'a> Walk<'a> {
     fn run(&mut self) -> Result<()> {
         while let Some(work) = self.work.pop() {
+            if self.relations > MAX_RELATIONS {
+                return Err(too_many_relations());
+            }
             match work {
                 Work::Stmt(stmt, expr_depth, nest) => self.statement(stmt, expr_depth, nest)?,
                 Work::Query(query, expr_depth, nest) => {
@@ -133,6 +147,9 @@ impl<'a> Walk<'a> {
                     self.expand(expr, depth, group, nest);
                 }
             }
+        }
+        if self.relations > MAX_RELATIONS {
+            return Err(too_many_relations());
         }
         Ok(())
     }
@@ -432,6 +449,7 @@ impl<'a> Walk<'a> {
     }
 
     fn table_factor(&mut self, factor: &'a sq::TableFactor, root: usize, nest: usize) {
+        self.relations += 1;
         match factor {
             sq::TableFactor::Table {
                 args,
