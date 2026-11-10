@@ -932,3 +932,21 @@ fn a_leading_zero_keeps_the_column_as_text() {
     let small = text("x\n0\n0.5\n-0.25\n");
     assert!(matches!(col_type(&small, 0), InferredType::Decimal { .. }));
 }
+
+#[test]
+fn an_empty_field_costs_memory_too() {
+    // About 2 MB of commas is two million fields; it was counted as 2 MB and held near 75.
+    let row = ",".repeat(1023);
+    let text = format!("{row}\n").repeat(2048);
+    let err = ingest_bytes(
+        text.as_bytes(),
+        FormatHint::Csv,
+        &Budget::untrusted().max_memory_bytes(10 << 20),
+    )
+    .unwrap_err();
+    assert_eq!(breach(err).which, "max_memory_bytes");
+
+    let fits = ingest_bytes(text.as_bytes(), FormatHint::Csv, &Budget::untrusted()).unwrap();
+    let fields = 2048 * 1024;
+    assert!(fits.report().budget_used.memory_bytes >= text.len() as u64 + 4 * fields);
+}

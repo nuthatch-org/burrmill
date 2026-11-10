@@ -156,10 +156,21 @@ pub fn ingest(source: &mut dyn ByteSource, hint: FormatHint, budget: &Budget) ->
         return Err(budget.breach("max_rows", budget.max_rows, data_rows_with_possible_header));
     }
 
-    let (batches, report) = infer::build(parsed, dialect, bytes_read);
+    let (batches, mut report) = infer::build(parsed, dialect, bytes_read);
     if report.rows > budget.max_rows {
         return Err(budget.breach("max_rows", budget.max_rows, report.rows));
     }
+    // The columns are built while the parsed rows are still held, so both count.
+    let arrays: u64 = batches
+        .iter()
+        .map(|b| b.get_array_memory_size() as u64)
+        .sum();
+    report.budget_used.memory_bytes += arrays;
+    budget.charge(
+        "max_memory_bytes",
+        budget.max_memory_bytes,
+        report.budget_used.memory_bytes,
+    )?;
     Ok(Table { batches, report })
 }
 

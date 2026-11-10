@@ -9,7 +9,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
-use crate::csv::Parsed;
+use crate::csv::{Parsed, Row};
 use crate::report::{ColumnReport, InferredType, IngestReport, Issue, RowIssue, TYPE_CONFIDENCE};
 use crate::sniff::{Dialect, Locale};
 
@@ -31,17 +31,12 @@ pub fn build(
 ) -> (Vec<RecordBatch>, IngestReport) {
     let width = parsed.rows.iter().map(|r| r.len()).max().unwrap_or(0);
     let header = is_header(&parsed.rows, dialect.locale);
-    let data: &[Vec<String>] = if header {
+    let data: &[Row] = if header {
         &parsed.rows[1..]
     } else {
         &parsed.rows
     };
-    let names = column_names(
-        header
-            .then(|| parsed.rows.first().map(|r| r.as_slice()))
-            .flatten(),
-        width,
-    );
+    let names = column_names(header.then(|| parsed.rows.first()).flatten(), width);
 
     let mut report = IngestReport {
         dialect,
@@ -157,7 +152,7 @@ pub fn build(
     (batches, report)
 }
 
-fn is_header(rows: &[Vec<String>], locale: Locale) -> bool {
+fn is_header(rows: &[Row], locale: Locale) -> bool {
     // One row is data. A first row of names above anything else is a header, including when
     // the rows under it are names too (`city,person` / `Sofia,Ivan`).
     if rows.len() < 2 {
@@ -174,13 +169,10 @@ fn is_name(cell: &str, locale: Locale) -> bool {
     )
 }
 
-fn column_names(header: Option<&[String]>, width: usize) -> Vec<String> {
+fn column_names(header: Option<&Row>, width: usize) -> Vec<String> {
     let mut names = Vec::with_capacity(width);
     for i in 0..width {
-        let raw = header
-            .and_then(|h| h.get(i))
-            .map(|s| s.as_str())
-            .unwrap_or("");
+        let raw = header.and_then(|h| h.get(i)).unwrap_or("");
         let mut name = if raw.is_empty() {
             format!("column_{}", i + 1)
         } else {
@@ -285,7 +277,7 @@ fn rescale(unscaled: i128, from: u8, to: u8) -> Option<i128> {
 }
 
 fn materialise(
-    data: &[Vec<String>],
+    data: &[Row],
     col_idx: usize,
     kinds: &[Kind],
     inferred: &InferredType,
@@ -380,9 +372,14 @@ fn materialise(
             Arc::new(b.finish())
         }
         InferredType::Text => {
-            let mut b = StringBuilder::with_capacity(kinds.len(), kinds.len() * 8);
+            let bytes = data
+                .iter()
+                .filter_map(|row| row.get(col_idx))
+                .map(str::len)
+                .sum();
+            let mut b = StringBuilder::with_capacity(kinds.len(), bytes);
             for row in data {
-                match row.get(col_idx).map(|s| s.as_str()).unwrap_or("") {
+                match row.get(col_idx).unwrap_or("") {
                     "" => b.append_null(),
                     cell => b.append_value(cell),
                 }
@@ -570,7 +567,7 @@ impl Votes {
 
 /// A cell votes only for a mark it can be read under alone: `1,5` and `1.234,56` say comma,
 /// `1.234` and `1,234` say nothing, and `items 1,2,3` is not a number at all.
-fn column_votes(data: &[Vec<String>], col_idx: usize) -> Votes {
+fn column_votes(data: &[Row], col_idx: usize) -> Votes {
     let mut votes = Votes::default();
     for row in data {
         let Some(cell) = row.get(col_idx).map(|c| c.trim()) else {
