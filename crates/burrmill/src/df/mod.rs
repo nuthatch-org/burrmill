@@ -596,6 +596,7 @@ impl Engine {
             Err(BurrmillError::Substrate(ref m))
                 if sent == 0
                     && m.contains(addresses::NOT_AN_ADDRESS)
+                    && self.session.address_refused()
                     && self.session.addresses_off() =>
             {
                 log::warn!("{m}: addresses are read as text from now on");
