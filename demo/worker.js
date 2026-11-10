@@ -46,13 +46,9 @@ async function handle(msg) {
     return JSON.parse(parse_model(msg.text));
   }
   if (msg.op === 'query') {
-    try {
-      const answer = JSON.parse(await session.query(msg.sql));
-      return { answer, feedback: shape_feedback(JSON.stringify(answer)) };
-    } catch (err) {
-      const message = err && err.message ? err.message : String(err);
-      return { error: message, feedback: error_feedback(message) };
-    }
+    const out = JSON.parse(await session.query(msg.sql));
+    if (out.error !== undefined) return { error: out.error, feedback: out.feedback };
+    return { answer: out.answer, feedback: shape_feedback(JSON.stringify(out.answer)) };
   }
   if (msg.op === 'aggregates') {
     return session.aggregate_feedback(msg.sql);
