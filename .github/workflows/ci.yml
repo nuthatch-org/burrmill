@@ -87,3 +87,33 @@ jobs:
           cargo test --locked -p burrmill-ingest
       - name: wasm graph and gzip size
         run: docs/bench/ingest-wasm.sh
+
+  # The tab: the code that decides what leaves it, and the engine it downloads.
+  tab-wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: tab-wasm
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: test and clippy
+        run: |
+          cargo clippy --locked -p burrmill-wasm --all-targets -- -D warnings
+          cargo test --locked -p burrmill-wasm
+      - name: build for wasm32
+        run: cargo build --locked -p burrmill-wasm --target wasm32-unknown-unknown
+      # The demo downloads ingest and the engine as one module.
+      - name: engine gzip under 8 MiB
+        run: |
+          cargo build -p burrmill-size --locked --target wasm32-unknown-unknown \
+            --features engine --bin ingest-engine --profile wasm-size
+          gz=$(gzip -9 -c target/wasm32-unknown-unknown/wasm-size/ingest-engine.wasm | wc -c)
+          echo "ingest-engine.wasm gzip -9: $gz"
+          test "$gz" -le 8388608
