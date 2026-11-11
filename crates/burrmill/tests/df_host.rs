@@ -605,6 +605,40 @@ fn a_sort_over_budget_spills_into_the_given_directory_only() {
 }
 
 #[test]
+fn a_spill_past_its_disk_cap_is_a_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let who: Vec<String> = (0..1_000_000u64)
+        .map(|i| format!("0x{:040x}", (i * 7919) % 1_000_000))
+        .collect();
+    let data: Vec<(u64, &str, &str)> = who.iter().map(|w| (1, w.as_str(), "1")).collect();
+    let seg = segment(tmp.path(), 1, &data);
+    let spill = tempfile::tempdir().unwrap();
+    let mut engine = Engine::open_empty_budgeted(burrmill::Budget {
+        memory_bytes: 64 << 20,
+        threads: 2,
+        spill: Some((spill.path().to_path_buf(), 1 << 20)),
+    })
+    .unwrap();
+    engine
+        .register_facts("t", &declared(), vec![seg], &[], (None, None))
+        .unwrap();
+    match engine.sql("SELECT who FROM t ORDER BY who") {
+        Err(BurrmillError::LimitExceeded(m)) => {
+            assert!(m.contains("max_temp_directory_size"), "{m}")
+        }
+        other => panic!("{other:?}"),
+    }
+    // The refusal's words in a statement's own text are not the refusal.
+    let said = engine
+        .sql(
+            "SELECT CAST('The used disk space during the spilling process has exceeded the \
+             allowable limit of 1' AS INT)",
+        )
+        .unwrap_err();
+    assert!(!matches!(said, BurrmillError::LimitExceeded(_)), "{said:?}");
+}
+
+#[test]
 fn a_host_text_function_propagates_null_refuses_on_error_and_stays_behind_a_case_guard() {
     let tmp = tempfile::tempdir().unwrap();
     let seg = segment(tmp.path(), 1, &[(1, "0x", "7"), (2, "0x2a", "5")]);

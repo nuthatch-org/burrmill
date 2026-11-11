@@ -34,6 +34,10 @@ pub(super) fn arithmetic(e: arrow::error::ArrowError) -> DataFusionError {
     }
 }
 
+/// The disk manager refuses a spill past its cap as a bare `io::Error`, so its words are all
+/// there is to know it by.
+const DISK_CAP: &str = "The used disk space during the spilling process has exceeded";
+
 /// The variant a marker or a refusal under `e` names, wherever in its chain it sits.
 pub(super) fn typed(e: &DataFusionError, text: &str) -> Option<BurrmillError> {
     let mut at: Option<&(dyn std::error::Error + 'static)> = Some(e);
@@ -47,6 +51,14 @@ pub(super) fn typed(e: &DataFusionError, text: &str) -> Option<BurrmillError> {
         });
         if let Some(DataFusionError::ResourcesExhausted(_)) = df {
             return Some(BurrmillError::LimitExceeded(text.to_string()));
+        }
+        if let Some(io) = cur.downcast_ref::<std::io::Error>() {
+            if io.to_string().starts_with(DISK_CAP) {
+                return Some(BurrmillError::LimitExceeded(text.to_string()));
+            }
+            // `io::Error::source` is its payload's source, which steps over the payload.
+            at = io.get_ref().map(|e| e as _);
+            continue;
         }
         at = cur.source();
     }
@@ -312,6 +324,37 @@ mod tests {
                 .unwrap()
                 .ends_with("This limit was set by the 'max_temp_directory_size' setting.")
         );
+    }
+
+    #[test]
+    fn a_refusal_is_a_limit_under_any_wrapping() {
+        use crate::BurrmillError::LimitExceeded;
+        use arrow::error::ArrowError;
+        use datafusion_common::DataFusionError as E;
+        let limit = |e: E| matches!(super::typed(&e, ""), Some(LimitExceeded(_)));
+        let io = |e: E| std::io::Error::other(e);
+        let full = || E::ResourcesExhausted("full".into());
+        assert!(limit(E::IoError(io(full()))));
+        assert!(limit(E::ArrowError(
+            Box::new(ArrowError::from(io(full()))),
+            None
+        )));
+        assert!(limit(E::External(Box::new(ArrowError::ExternalError(
+            Box::new(E::Context("sort".into(), Box::new(E::IoError(io(full())))))
+        )))));
+        let cap = || {
+            std::io::Error::other(
+                "The used disk space during the spilling process has exceeded the allowable \
+                 limit of 1.0 MB.",
+            )
+        };
+        assert!(limit(E::ArrowError(
+            Box::new(ArrowError::from(cap())),
+            None
+        )));
+        assert!(limit(E::External(Box::new(E::IoError(cap())))));
+        assert!(!limit(E::IoError(std::io::Error::other("disk on fire"))));
+        assert!(!limit(E::Execution(cap().to_string())));
     }
 
     #[test]
