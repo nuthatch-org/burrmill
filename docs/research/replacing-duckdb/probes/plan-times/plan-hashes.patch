@@ -1,0 +1,92 @@
+diff --git a/crates/burrmill/src/df/plantimes.rs b/crates/burrmill/src/df/plantimes.rs
+index 64e5ed6..37c2e84 100644
+--- a/crates/burrmill/src/df/plantimes.rs
++++ b/crates/burrmill/src/df/plantimes.rs
+@@ -159,6 +159,61 @@ pub fn in_rules() -> u64 {
+     IN_RULES.load(Ordering::Relaxed)
+ }
+ 
++fn dump_prefix() -> Option<&'static str> {
++    static P: OnceLock<Option<String>> = OnceLock::new();
++    P.get_or_init(|| std::env::var("BURRMILL_PLAN_DUMP").ok())
++        .as_deref()
++}
++
++pub fn dumping() -> bool {
++    dump_prefix().is_some()
++}
++
++fn fx(s: &str) -> u64 {
++    use std::hash::{Hash, Hasher};
++    let mut h = rustc_hash::FxHasher::default();
++    s.hash(&mut h);
++    h.finish()
++}
++
++fn shape(p: &Arc<dyn ExecutionPlan>, depth: usize, out: &mut String) {
++    use std::fmt::Write;
++    let _ = writeln!(out, "{depth} {} {:?}", p.name(), p.schema());
++    for c in p.children() {
++        shape(c, depth + 1, out);
++    }
++}
++
++/// One line per planned statement: hashes of the plan as parsed, the optimized plan with its
++/// schemas, and the physical plan's operators and schemas. `<prefix>.<pid>`, appended.
++pub fn dump(input: &str, optimized: &str, physical: Option<&Arc<dyn ExecutionPlan>>) {
++    use std::io::Write;
++    let Some(prefix) = dump_prefix() else { return };
++    static F: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
++    let f = F.get_or_init(|| {
++        Mutex::new(
++            std::fs::OpenOptions::new()
++                .create(true)
++                .append(true)
++                .open(format!("{prefix}.{}", std::process::id()))
++                .ok(),
++        )
++    });
++    let mut text = String::new();
++    if let Some(p) = physical {
++        shape(p, 0, &mut text);
++    }
++    let line = format!(
++        "{:016x} {:016x} {:016x}\n",
++        fx(input),
++        fx(optimized),
++        fx(&text)
++    );
++    if let Some(f) = f.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
++        let _ = f.write_all(line.as_bytes());
++    }
++}
++
+ #[derive(Debug)]
+ pub struct Timed(pub Arc<dyn PhysicalOptimizerRule + Send + Sync>);
+ 
+diff --git a/crates/burrmill/src/df/session.rs b/crates/burrmill/src/df/session.rs
+index c10ba66..16117bb 100644
+--- a/crates/burrmill/src/df/session.rs
++++ b/crates/burrmill/src/df/session.rs
+@@ -956,12 +956,21 @@ impl Session for MiniSession {
+         &self,
+         logical_plan: &LogicalPlan,
+     ) -> DFResult<Arc<dyn ExecutionPlan>> {
++        let parsed = super::plantimes::dumping()
++            .then(|| logical_plan.display_indent_schema().to_string());
+         let logical_plan = self.optimize(logical_plan)?;
+         let (t, before) = (std::time::Instant::now(), super::plantimes::in_rules());
+         let r = self
+             .query_planner
+             .create_physical_plan(&logical_plan, self)
+             .await;
++        if let Some(parsed) = parsed {
++            super::plantimes::dump(
++                &parsed,
++                &logical_plan.display_indent_schema().to_string(),
++                r.as_ref().ok(),
++            );
++        }
+         if super::plantimes::on() {
+             let rules = std::time::Duration::from_nanos(super::plantimes::in_rules() - before);
+             super::plantimes::add(3, "(initial plan)", t.elapsed().saturating_sub(rules));

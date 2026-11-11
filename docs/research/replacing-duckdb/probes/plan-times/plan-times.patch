@@ -1,0 +1,670 @@
+diff --git a/crates/burrmill-bench/src/engine_views.rs b/crates/burrmill-bench/src/engine_views.rs
+index 2b18ed8..15f4789 100644
+--- a/crates/burrmill-bench/src/engine_views.rs
++++ b/crates/burrmill-bench/src/engine_views.rs
+@@ -443,6 +443,130 @@ pub fn explain(root: &str, view: &str) -> anyhow::Result<()> {
+     .expect("explain thread")
+ }
+ 
++/// `relations <views-dir | sql-file>...`: the relations the depth walk counts in each view body
++/// or statement, the largest first.
++pub fn relations(paths: &[String]) -> anyhow::Result<()> {
++    let mut all: Vec<(usize, String)> = Vec::new();
++    for p in paths {
++        let path = Path::new(p);
++        if path.is_dir() {
++            for v in crate::df_views::load_views(path)? {
++                let n = burrmill::df::relations_in(&v.body);
++                if n.is_empty() {
++                    println!("UNPARSED {p} {}", v.name);
++                }
++                all.extend(n.into_iter().map(|n| (n, format!("{p} {}", v.name))));
++            }
++            continue;
++        }
++        let text = std::fs::read_to_string(path)?;
++        for (i, stmt) in text.split(";\n").enumerate() {
++            if stmt.trim().is_empty() {
++                continue;
++            }
++            let n = burrmill::df::relations_in(stmt);
++            if n.is_empty() {
++                println!("UNPARSED {p} #{i}");
++            }
++            all.extend(n.into_iter().map(|n| (n, format!("{p} #{i}"))));
++        }
++    }
++    all.sort_by(|a, b| b.cmp(a));
++    for (n, what) in all.iter().take(15) {
++        println!("RELATIONS {n:>5} {what}");
++    }
++    println!("RELATIONS-MAX {} over {} statements", all.first().map_or(0, |a| a.0), all.len());
++    Ok(())
++}
++
++/// `join-chain <n>...`: seconds to answer a statement over `n` one-row relations, as a star of
++/// `JOIN ... ON`, as a chain of them and as a comma list; the least of three runs each.
++pub fn join_chain(sizes: &[String]) -> anyhow::Result<()> {
++    for n in sizes.iter().filter_map(|n| n.parse::<usize>().ok()) {
++        let star: String = (1..n)
++            .map(|i| format!(" JOIN range(1) t{i} ON t0.range = t{i}.range"))
++            .collect();
++        let chain: String = (1..n)
++            .map(|i| format!(" JOIN range(1) t{i} ON t{}.range = t{i}.range", i - 1))
++            .collect();
++        let comma: String = (1..n).map(|i| format!(", range(1) t{i}")).collect();
++        for (shape, tail) in [("star", star), ("chain", chain), ("comma", comma)] {
++            let sql = format!("SELECT count(*) AS n FROM range(1) t0{tail}");
++            let mut least = f64::MAX;
++            let mut answer = String::new();
++            for _ in 0..3 {
++                let q = sql.clone();
++                let t = Instant::now();
++                let r = std::thread::spawn(move || {
++                    let e = burrmill::Engine::open_empty()?;
++                    let r = e.sql(&q).map(|b| b.iter().map(|b| b.num_rows()).sum::<usize>());
++                    std::thread::spawn(move || drop(e)).join().expect("drop");
++                    r
++                })
++                .join()
++                .expect("engine thread");
++                least = least.min(t.elapsed().as_secs_f64());
++                answer = match r {
++                    Ok(rows) => format!("{rows} row"),
++                    Err(e) => first_line(&e.to_string()),
++                };
++            }
++            println!("JOIN-CHAIN {n:>4} {shape:<5} least {least:>8.3} s  {answer}");
++        }
++    }
++    Ok(())
++}
++
++/// `plan-times <nest> [runs]`: each view planned, not run, `runs` times (default 9); the median
++/// and the least in milliseconds. `BUDGET_MB` plans as a host's session does.
++pub fn plan_times(root: &str, runs: usize) -> anyhow::Result<()> {
++    let root = Path::new(root).to_path_buf();
++    let nest = load_nest(&root)?;
++    let runs = runs.max(1);
++    std::thread::spawn(move || -> anyhow::Result<()> {
++        let mut e = open_engine(&root)?;
++        for v in &nest.views {
++            if let Err(why) = e.register_view(&v.name, &v.body) {
++                println!(
++                    "REGISTER-FAIL {:<34} {}",
++                    v.name,
++                    first_line(&why.to_string())
++                );
++            }
++        }
++        let mut total = 0.0;
++        for v in &nest.views {
++            let sql = format!("SELECT * FROM \"{}\"", v.name);
++            // The count refuses some operators, after the plan it is asked about is built.
++            let mut refused = String::new();
++            let mut ms = Vec::new();
++            for _ in 0..runs {
++                let t = Instant::now();
++                if let Err(e) = e.parquet_scans(&sql) {
++                    refused = first_line(&e.to_string());
++                }
++                ms.push(t.elapsed().as_secs_f64() * 1e3);
++            }
++            ms.sort_by(f64::total_cmp);
++            total += ms[ms.len() / 2];
++            println!(
++                "PLAN {:<34} median {:>9.3} ms  least {:>9.3} ms  {refused}",
++                v.name,
++                ms[ms.len() / 2],
++                ms[0]
++            );
++        }
++        println!(
++            "PLAN-TOTAL median sum {total:.3} ms over {} views",
++            nest.views.len()
++        );
++        std::thread::spawn(move || drop(e)).join().expect("drop");
++        Ok(())
++    })
++    .join()
++    .expect("plan thread")
++}
++
+ /// `engine-sql <nest> <sql-file>...`: each file's statement on both engines over the nest with its
+ /// views, as a sorted row multiset in nuthatch's JSON, with warm medians of 5.
+ /// `BUDGET_MB` (with `THREADS`, default 2) opens the session a host opens, batch size and all.
+diff --git a/crates/burrmill-bench/src/main.rs b/crates/burrmill-bench/src/main.rs
+index 0f70138..eb6e905 100644
+--- a/crates/burrmill-bench/src/main.rs
++++ b/crates/burrmill-bench/src/main.rs
+@@ -185,6 +185,21 @@ async fn run() -> anyhow::Result<()> {
+                 .nth(3)
+                 .ok_or_else(|| anyhow::anyhow!("usage: rewrite-parity <nest> <views-dir>"))?,
+         ),
++        Some("relations") => {
++            engine_views::relations(&std::env::args().skip(2).collect::<Vec<_>>())
++        }
++        Some("join-chain") => {
++            engine_views::join_chain(&std::env::args().skip(2).collect::<Vec<_>>())
++        }
++        Some("plan-times") => engine_views::plan_times(
++            &std::env::args()
++                .nth(2)
++                .ok_or_else(|| anyhow::anyhow!("usage: plan-times <nest> [runs]"))?,
++            std::env::args()
++                .nth(3)
++                .and_then(|n| n.parse().ok())
++                .unwrap_or(9),
++        ),
+         Some("engine-views") => engine_views::run(
+             &std::env::args()
+                 .nth(2)
+diff --git a/crates/burrmill/src/df/addresses.rs b/crates/burrmill/src/df/addresses.rs
+index ec95df9..202309b 100644
+--- a/crates/burrmill/src/df/addresses.rs
++++ b/crates/burrmill/src/df/addresses.rs
+@@ -463,8 +463,11 @@ impl Addresses {
+                 p => Transformed::no(p),
+             };
+             let mut schema = DFSchema::empty();
+-            for i in p.data.inputs() {
+-                schema.merge(i.schema());
++            {
++                let _t = super::plantimes::span(9, "Addresses schema merge");
++                for i in p.data.inputs() {
++                    schema.merge(i.schema());
++                }
+             }
+             let names_matter = matches!(
+                 p.data,
+@@ -472,8 +475,12 @@ impl Addresses {
+             );
+             let was = p.transformed;
+             let mut t = p.data.map_expressions(|e| {
+-                let name = e.schema_name().to_string();
++                let name = {
++                    let _t = super::plantimes::span(9, "Addresses schema_name");
++                    e.schema_name().to_string()
++                };
+                 let e = self.with_subqueries(e, &schema)?;
++                let _t = super::plantimes::span(9, "Addresses rewrite");
+                 let t = e.transform_up(|e| rewrite(e, &schema))?;
+                 if t.transformed && names_matter && t.data.schema_name().to_string() != name {
+                     Ok(Transformed::yes(t.data.alias(name)))
+@@ -484,6 +491,7 @@ impl Addresses {
+             t.transformed |= was;
+             // A node keeps the schema it was built with when a child changes under it; with its
+             // expressions rewritten for the child it has, it can be told what it holds.
++            let _t = super::plantimes::span(9, "Addresses recompute_schema");
+             t.data = t.data.recompute_schema()?;
+             Ok(t)
+         })
+diff --git a/crates/burrmill/src/df/depth.rs b/crates/burrmill/src/df/depth.rs
+index 1805b68..524efb9 100644
+--- a/crates/burrmill/src/df/depth.rs
++++ b/crates/burrmill/src/df/depth.rs
+@@ -148,6 +148,7 @@ impl<'a> Walk<'a> {
+                 }
+             }
+         }
++        super::plantimes::count("relations in one statement", self.relations as u64);
+         if self.relations > MAX_RELATIONS {
+             return Err(too_many_relations());
+         }
+@@ -1152,3 +1153,37 @@ fn join_parts(op: &sq::JoinOperator) -> (Option<&SqlExpr>, Option<&sq::JoinConst
+         | sq::JoinOperator::InnerArrayJoin => (None, None),
+     }
+ }
++
++/// Probe: the relations the walk counts in each statement of `sql`.
++pub fn relations_in(sql: &str) -> Vec<usize> {
++    fn inner(stmt: &DfStatement) -> usize {
++        match stmt {
++            DfStatement::Statement(s) => {
++                let mut w = Walk {
++                    work: vec![Work::Stmt(s, 0, 0)],
++                    groups: Vec::new(),
++                    relations: 0,
++                };
++                while let Some(work) = w.work.pop() {
++                    match work {
++                        Work::Stmt(stmt, d, n) => {
++                            let _ = w.statement(stmt, d, n);
++                        }
++                        Work::Query(q, d, n) => w.query(q, d, n),
++                        Work::Set(set, sd, d, n) => {
++                            let _ = w.set(set, sd, d, n);
++                        }
++                        Work::Expr(e, d, g, n) => w.expand(e, d, g, n),
++                    }
++                }
++                w.relations
++            }
++            DfStatement::Explain(e) => inner(e.statement.as_ref()),
++            _ => 0,
++        }
++    }
++    match super::dialect::parse_statements(sql) {
++        Ok(stmts) => stmts.iter().map(inner).collect(),
++        Err(_) => Vec::new(),
++    }
++}
+diff --git a/crates/burrmill/src/df/mod.rs b/crates/burrmill/src/df/mod.rs
+index d658cba..5ed13c0 100644
+--- a/crates/burrmill/src/df/mod.rs
++++ b/crates/burrmill/src/df/mod.rs
+@@ -31,9 +31,11 @@ mod narrow;
+ mod nullsub;
+ mod onerow;
+ mod params;
++pub mod plantimes;
+ pub use params::Param;
+ mod outerorder;
+ pub use depth::check_expr_bounds;
++pub use depth::relations_in;
+ mod builder;
+ pub use builder::EngineBuilder;
+ mod buildside;
+@@ -891,6 +893,8 @@ fn plan_query(session: &MiniSession, sql: &str) -> Result<datafusion_expr::Logic
+ fn plan_query_on_stack(session: &MiniSession, sql: &str) -> Result<datafusion_expr::LogicalPlan> {
+     #[cfg(not(target_arch = "wasm32"))]
+     debug_assert_eq!(std::thread::current().name(), Some("burrmill-plan"));
++    plantimes::begin(sql);
++    let _t = plantimes::span(0, "parse and sql_to_rel");
+     let (stmt, names) = dialect::parse(sql, &session.known_names())?;
+     refuse_df_statement(&stmt)?;
+     refuse_wide_literals(&stmt)?;
+diff --git a/crates/burrmill/src/df/plantimes.rs b/crates/burrmill/src/df/plantimes.rs
+new file mode 100644
+index 0000000..64e5ed6
+--- /dev/null
++++ b/crates/burrmill/src/df/plantimes.rs
+@@ -0,0 +1,194 @@
++//! Probe: where planning time goes, per rule. Off unless `BURRMILL_PLAN_TIMES` names a file
++//! prefix; then `<prefix>.<pid>` is rewritten after each statement with the totals and the
++//! dearest statement's own split.
++
++use std::collections::BTreeMap;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::{Arc, Mutex, OnceLock};
++use std::time::{Duration, Instant};
++
++use datafusion_common::Result;
++use datafusion_common::config::ConfigOptions;
++use datafusion_physical_plan::ExecutionPlan;
++use datafusion_session::PhysicalOptimizerRule;
++
++type Split = BTreeMap<(u8, String), (Duration, u64)>;
++
++#[derive(Default)]
++struct State {
++    total: Split,
++    current: Split,
++    worst: Split,
++    worst_sql: String,
++    sql: String,
++    statements: u64,
++}
++
++fn prefix() -> Option<&'static str> {
++    static P: OnceLock<Option<String>> = OnceLock::new();
++    P.get_or_init(|| std::env::var("BURRMILL_PLAN_TIMES").ok())
++        .as_deref()
++}
++
++pub fn on() -> bool {
++    prefix().is_some()
++}
++
++fn state() -> std::sync::MutexGuard<'static, State> {
++    static S: OnceLock<Mutex<State>> = OnceLock::new();
++    S.get_or_init(Default::default)
++        .lock()
++        .unwrap_or_else(|e| e.into_inner())
++}
++
++pub fn add(stage: u8, name: &str, d: Duration) {
++    if !on() {
++        return;
++    }
++    let mut s = state();
++    let e = s.current.entry((stage, name.to_string())).or_default();
++    e.0 += d;
++    e.1 += 1;
++}
++
++/// The largest `n` seen under `name` in a statement, in the count column.
++pub fn count(name: &str, n: u64) {
++    if !on() {
++        return;
++    }
++    let mut s = state();
++    let e = s.current.entry((9, name.to_string())).or_default();
++    e.1 = e.1.max(n);
++}
++
++pub struct Span(u8, &'static str, Option<Instant>);
++
++pub fn span(stage: u8, name: &'static str) -> Span {
++    Span(stage, name, on().then(Instant::now))
++}
++
++impl Drop for Span {
++    fn drop(&mut self) {
++        if let Some(t) = self.2 {
++            add(self.0, self.1, t.elapsed());
++        }
++    }
++}
++
++pub fn begin(sql: &str) {
++    if !on() {
++        return;
++    }
++    state().sql = sql.to_string();
++}
++
++fn sum(s: &Split) -> Duration {
++    // Stage 9 holds spans inside rules, already counted by their rule.
++    s.iter().filter(|(k, _)| k.0 != 9).map(|(_, v)| v.0).sum()
++}
++
++fn write(out: &mut String, s: &Split) {
++    use std::fmt::Write;
++    let stage = |n: u8| match n {
++        0 => "parse",
++        1 => "analyzer",
++        2 => "optimizer",
++        3 => "physical",
++        _ => "inside",
++    };
++    let mut rows: Vec<_> = s.iter().collect();
++    rows.sort_by(|a, b| (a.0.0, b.1.0).cmp(&(b.0.0, a.1.0)));
++    for n in 0..4u8 {
++        let t: Duration = s.iter().filter(|(k, _)| k.0 == n).map(|(_, v)| v.0).sum();
++        let _ = writeln!(
++            out,
++            "STAGE {:<10} {:>12.3} ms",
++            stage(n),
++            t.as_secs_f64() * 1e3
++        );
++    }
++    for ((st, name), (d, n)) in rows {
++        let _ = writeln!(
++            out,
++            "{:<10} {:<44} {:>12.3} ms {:>9}",
++            stage(*st),
++            name,
++            d.as_secs_f64() * 1e3,
++            n
++        );
++    }
++}
++
++pub fn end() {
++    let Some(prefix) = prefix() else { return };
++    let mut s = state();
++    let current = std::mem::take(&mut s.current);
++    for (k, v) in &current {
++        let e = s.total.entry(k.clone()).or_default();
++        e.0 += v.0;
++        e.1 = if k.0 == 9 && v.0.is_zero() {
++            e.1.max(v.1)
++        } else {
++            e.1 + v.1
++        };
++    }
++    s.statements += 1;
++    if sum(&current) > sum(&s.worst) {
++        s.worst = current;
++        s.worst_sql = std::mem::take(&mut s.sql);
++    }
++    let mut out = format!(
++        "statements {}\ntotal {:.3} ms\n",
++        s.statements,
++        sum(&s.total).as_secs_f64() * 1e3
++    );
++    write(&mut out, &s.total);
++    out.push_str(&format!(
++        "\nDEAREST {:.3} ms: {}\n",
++        sum(&s.worst).as_secs_f64() * 1e3,
++        s.worst_sql.replace('\n', " ")
++    ));
++    write(&mut out, &s.worst);
++    let _ = std::fs::write(format!("{prefix}.{}", std::process::id()), out);
++}
++
++static IN_RULES: AtomicU64 = AtomicU64::new(0);
++
++/// Nanoseconds spent inside physical rules so far.
++pub fn in_rules() -> u64 {
++    IN_RULES.load(Ordering::Relaxed)
++}
++
++#[derive(Debug)]
++pub struct Timed(pub Arc<dyn PhysicalOptimizerRule + Send + Sync>);
++
++impl PhysicalOptimizerRule for Timed {
++    fn optimize(
++        &self,
++        plan: Arc<dyn ExecutionPlan>,
++        config: &ConfigOptions,
++    ) -> Result<Arc<dyn ExecutionPlan>> {
++        let t = Instant::now();
++        let r = self.0.optimize(plan, config);
++        IN_RULES.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
++        add(3, self.0.name(), t.elapsed());
++        r
++    }
++    fn optimize_with_context(
++        &self,
++        plan: Arc<dyn ExecutionPlan>,
++        context: &dyn datafusion_session::PhysicalOptimizerContext,
++    ) -> Result<Arc<dyn ExecutionPlan>> {
++        let t = Instant::now();
++        let r = self.0.optimize_with_context(plan, context);
++        IN_RULES.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
++        add(3, self.0.name(), t.elapsed());
++        r
++    }
++    fn name(&self) -> &str {
++        self.0.name()
++    }
++    fn schema_check(&self) -> bool {
++        self.0.schema_check()
++    }
++}
+diff --git a/crates/burrmill/src/df/rule.rs b/crates/burrmill/src/df/rule.rs
+index ad0ea40..fbca17c 100644
+--- a/crates/burrmill/src/df/rule.rs
++++ b/crates/burrmill/src/df/rule.rs
+@@ -269,6 +269,7 @@ impl AnalyzerRule for CheckedArithmetic {
+         plan.transform_up_with_subqueries(|p| {
+             let t = self.rewrite_expressions(p)?;
+             if let LogicalPlan::Aggregate(a) = &t.data {
++                let _t = super::plantimes::span(9, "CheckedArithmetic aggregate");
+                 let a = self.aggregate(a)?;
+                 return Ok(Transformed::yes(LogicalPlan::Aggregate(a)));
+             }
+@@ -312,14 +313,24 @@ fn expr_schema(p: &LogicalPlan) -> DFSchema {
+ 
+ impl CheckedArithmetic {
+     fn rewrite_expressions(&self, p: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
+-        let schema = expr_schema(&p);
++        let schema = {
++            let _t = super::plantimes::span(9, "CheckedArithmetic expr_schema");
++            expr_schema(&p)
++        };
+         let names_matter = matches!(
+             p,
+             LogicalPlan::Projection(_) | LogicalPlan::Aggregate(_) | LogicalPlan::Window(_)
+         );
+         let t = p.map_expressions(|e| {
+-            let name = e.schema_name().to_string();
+-            let t = e.transform_up(|e| self.rewrite(e, &schema))?;
++            let name = {
++                let _t = super::plantimes::span(9, "CheckedArithmetic schema_name");
++                e.schema_name().to_string()
++            };
++            let t = {
++                let _t = super::plantimes::span(9, "CheckedArithmetic rewrite");
++                e.transform_up(|e| self.rewrite(e, &schema))?
++            };
++            let _t = super::plantimes::span(9, "CheckedArithmetic whitelist");
+             check_whitelist(&t.data, &schema)?;
+             if t.transformed && names_matter && t.data.schema_name().to_string() != name {
+                 Ok(Transformed::yes(t.data.alias(name)))
+@@ -782,6 +793,7 @@ fn expr_lossy(e: &Expr, schema: &DFSchema, taint: &[bool]) -> bool {
+ 
+ /// Per output column of `plan`: does it carry a lossy `TRY_CAST` value?
+ fn lossy(plan: &LogicalPlan) -> Vec<bool> {
++    let _t = super::plantimes::span(9, "CheckedArithmetic lossy walk");
+     lossy_in(plan, &Default::default())
+ }
+ 
+diff --git a/crates/burrmill/src/df/session.rs b/crates/burrmill/src/df/session.rs
+index 94e01f7..c10ba66 100644
+--- a/crates/burrmill/src/df/session.rs
++++ b/crates/burrmill/src/df/session.rs
+@@ -428,6 +428,11 @@ impl MiniSession {
+                 Arc::new(super::sequential::Sequential)
+                     as Arc<dyn PhysicalOptimizerRule + Send + Sync>
+             }))
++            .map(|r| match super::plantimes::on() {
++                true => Arc::new(super::plantimes::Timed(r))
++                    as Arc<dyn PhysicalOptimizerRule + Send + Sync>,
++                false => r,
++            })
+             .collect(),
+             execution_props: ExecutionProps::new(),
+             table_options: TableOptions::new(),
+@@ -882,12 +887,32 @@ impl Session for MiniSession {
+     fn optimize(&self, plan: &LogicalPlan) -> DFResult<LogicalPlan> {
+         let _planning = super::bound::Planning::enter();
+         let LogicalPlan::Explain(e) = plan else {
++            let mut t = std::time::Instant::now();
+             let analyzed = self.analyzer.execute_and_check(
+                 plan.clone(),
+                 self.config.options().as_ref(),
+-                |_, _| {},
++                |_, r| {
++                    super::plantimes::add(1, r.name(), t.elapsed());
++                    t = std::time::Instant::now();
++                },
+             )?;
+-            let optimized = self.optimizer.optimize(analyzed, self, |_, _| {})?;
++            super::plantimes::add(1, "(checks)", t.elapsed());
++            let mut nodes = 0u64;
++            if super::plantimes::on() {
++                use datafusion_common::tree_node::TreeNode;
++                let _ = analyzed.apply_with_subqueries(|_| {
++                    nodes += 1;
++                    Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
++                });
++                super::plantimes::count("logical nodes after analysis", nodes);
++            }
++            t = std::time::Instant::now();
++            let optimized = self.optimizer.optimize(analyzed, self, |_, r| {
++                super::plantimes::add(2, r.name(), t.elapsed());
++                t = std::time::Instant::now();
++            })?;
++            super::plantimes::add(2, "(checks)", t.elapsed());
++            let _t = super::plantimes::span(2, "narrow_joins");
+             return super::narrow::narrow(optimized);
+         };
+         // As the umbrella crate's `SessionState::optimize`: without this, EXPLAIN shows only the
+@@ -932,9 +957,26 @@ impl Session for MiniSession {
+         logical_plan: &LogicalPlan,
+     ) -> DFResult<Arc<dyn ExecutionPlan>> {
+         let logical_plan = self.optimize(logical_plan)?;
+-        self.query_planner
++        let (t, before) = (std::time::Instant::now(), super::plantimes::in_rules());
++        let r = self
++            .query_planner
+             .create_physical_plan(&logical_plan, self)
+-            .await
++            .await;
++        if super::plantimes::on() {
++            let rules = std::time::Duration::from_nanos(super::plantimes::in_rules() - before);
++            super::plantimes::add(3, "(initial plan)", t.elapsed().saturating_sub(rules));
++            if let Ok(p) = &r {
++                use datafusion_common::tree_node::TreeNode;
++                let mut nodes = 0u64;
++                let _ = p.apply(|_| {
++                    nodes += 1;
++                    Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
++                });
++                super::plantimes::count("physical nodes", nodes);
++            }
++            super::plantimes::end();
++        }
++        r
+     }
+     fn create_physical_expr(
+         &self,
+diff --git a/crates/burrmill/src/df/sharing.rs b/crates/burrmill/src/df/sharing.rs
+index 47d6710..13d6ffe 100644
+--- a/crates/burrmill/src/df/sharing.rs
++++ b/crates/burrmill/src/df/sharing.rs
+@@ -539,6 +539,7 @@ fn over(
+ 
+ /// `plan` with each reference to `id` carrying `schema`, and every node above one rebuilt for it.
+ fn refresh(plan: LogicalPlan, id: u64, schema: &DFSchemaRef) -> Result<LogicalPlan> {
++    let _t = super::plantimes::span(9, "OverShared refresh");
+     let mut reads = false;
+     plan.apply_with_subqueries(|n| {
+         reads = matches!(n, LogicalPlan::Extension(e)
+@@ -769,8 +770,12 @@ fn prune(plan: LogicalPlan, config: &dyn OptimizerConfig) -> Result<Transformed<
+         return Ok(Transformed::no(plan));
+     };
+     d.states.iter().for_each(|s| lock(&s.wanted).clear());
++    super::plantimes::count("shared definitions", d.defs.len() as u64);
+     let rule = OptimizeProjections::new();
+-    let body = rule.rewrite(d.body.clone(), config)?.data;
++    let body = {
++        let _t = super::plantimes::span(9, "PruneShared optimize_projections");
++        rule.rewrite(d.body.clone(), config)?.data
++    };
+     // A definition's readers may sit in a definition after it or before it, so until nothing grows.
+     let mut cut: Vec<Option<(BTreeSet<usize>, LogicalPlan)>> = vec![None; d.defs.len()];
+     loop {
+@@ -794,6 +799,7 @@ fn prune(plan: LogicalPlan, config: &dyn OptimizerConfig) -> Result<Transformed<
+                     Arc::new(def.clone()),
+                 )?),
+             };
++            let _t = super::plantimes::span(9, "PruneShared optimize_projections");
+             cut[i] = Some((wanted, rule.rewrite(narrowed, config)?.data));
+             grew = true;
+         }
+diff --git a/crates/burrmill/src/df/smallinputs.rs b/crates/burrmill/src/df/smallinputs.rs
+index 2af9b52..960a5b5 100644
+--- a/crates/burrmill/src/df/smallinputs.rs
++++ b/crates/burrmill/src/df/smallinputs.rs
+@@ -31,6 +31,11 @@ pub struct SmallInputs;
+ 
+ /// Bytes the scans under `p` read, or `None` if one cannot be measured.
+ pub(super) fn bytes_read(p: &Arc<dyn ExecutionPlan>) -> Option<u64> {
++    let _t = super::plantimes::span(9, "bytes_read");
++    bytes_read_in(p)
++}
++
++fn bytes_read_in(p: &Arc<dyn ExecutionPlan>) -> Option<u64> {
+     if let Some(d) = p.downcast_ref::<DataSourceExec>() {
+         if let Some(f) = d.data_source().downcast_ref::<FileScanConfig>() {
+             return Some(
+@@ -47,13 +52,13 @@ pub(super) fn bytes_read(p: &Arc<dyn ExecutionPlan>) -> Option<u64> {
+         return Some(0);
+     }
+     if let Some(definition) = super::sharing::definition(p) {
+-        return bytes_read(&definition);
++        return bytes_read_in(&definition);
+     }
+     let children = p.children();
+     if children.is_empty() {
+         return None;
+     }
+-    children.into_iter().map(bytes_read).sum()
++    children.into_iter().map(bytes_read_in).sum()
+ }
+ 
+ impl PhysicalOptimizerRule for SmallInputs {
