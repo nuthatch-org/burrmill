@@ -14,8 +14,7 @@ use std::ops::ControlFlow;
 use crate::session::QueryOut;
 use serde_json::{Value, json};
 
-/// Default group size from RFC-0047. Q2, what k should be and whether it is per
-/// column, is still open.
+/// The smallest group that leaves (`docs/browser.md`).
 pub const AGGREGATE_K: u64 = 10;
 
 const SKIP: &str = "not a grouped read of t";

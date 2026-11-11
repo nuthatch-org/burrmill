@@ -1,6 +1,6 @@
 //! `burrmill-ingest`: untrusted CSV in, Arrow out, under counted budgets.
 //!
-//! RFC-0047 slice 1. The engine is not a dependency; `burrmill-wasm` joins the two for the browser
+//! The browser tab's reader (`docs/browser.md`). The engine is not a dependency; `burrmill-wasm` joins the two for the browser
 //! tab. CSV is the only input (#147). The report describes the file and does not contain cell
 //! values; [`Table::preview`] is how a local UI reads rows.
 
