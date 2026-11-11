@@ -26,10 +26,10 @@ it.
   `row_number() OVER (PARTITION BY indexer)` refused to plan. The parquet reader
   therefore prunes by statistics as before, and a top-k over an address, which could not push
   its threshold into a scan over text views, now can: 500 rows read where it read 32,000. A
-  value in an address column that is not `0x` and forty hex digits refuses the statement rather
-  than reading as nothing, and `Engine::stream`, if no batch has reached the host yet, turns the
-  lever off for that engine and runs the statement again over text, planned afresh: nuthatch's
-  own fixtures write `0xa`, and a nest written by hand may too. A shared definition's one run is
+  value in an address column that is not `0x` and forty lower-case hex digits refuses the
+  statement rather than reading as nothing, and `Engine::stream`, if no batch has reached the
+  host yet, turns the lever off for that engine and runs the statement again over text, planned
+  afresh: nuthatch's own fixtures write `0xa`, and a nest written by hand may too. A shared definition's one run is
   now a shared future that every reader awaits (`State::batches`): a run that failed fails every
   reader the same way, and a reader that stops early, a page's `LIMIT`, drops its handle while
   the run goes on for the others. Before, tokio's once-cell forgot a cancelled initialiser and

@@ -40,16 +40,18 @@ pub fn is_address(t: &DataType) -> bool {
     *t == fixed()
 }
 
-/// The 20 bytes `s` spells as `0x` and forty hex digits of either case, or none.
+/// The 20 bytes `s` spells as `0x` and forty lower-case hex digits, or none. Only that spelling,
+/// so that `encode(decode(s))` is `s` and a filter pushed to the scan as text says what it said.
 pub fn decode(s: &str) -> Option<[u8; 20]> {
-    let hex = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))?
-        .as_bytes();
+    let hex = s.strip_prefix("0x")?.as_bytes();
     if hex.len() != 40 {
         return None;
     }
-    let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let digit = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
     let mut out = [0u8; 20];
     for (i, pair) in hex.chunks(2).enumerate() {
         out[i] = (digit(pair[0])? << 4) | digit(pair[1])?;
@@ -132,8 +134,8 @@ impl ScalarUDFImpl for AddressBytes {
                 out.append_null();
                 continue;
             }
-            // A host writes every address as `0x` and forty hex digits; anything else in an
-            // address column is refused rather than read as nothing.
+            // A host writes every address as `0x` and forty lower-case hex digits; anything else
+            // in an address column is refused rather than read as nothing.
             match decode(a.value(i)) {
                 Some(b) => out.append_value(b)?,
                 None => {
@@ -362,10 +364,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decodes_either_case_and_refuses_the_rest() {
-        let a = "0xB2BB92D0de618878e438b55d5846cfecd9301105";
-        let b = decode(a).unwrap();
-        assert_eq!(encode(&b), a.to_ascii_lowercase());
+    fn decodes_lower_case_and_refuses_the_rest() {
+        let a = "0xb2bb92d0de618878e438b55d5846cfecd9301105";
+        assert_eq!(encode(&decode(a).unwrap()), a);
+        assert_eq!(decode("0xB2BB92D0de618878e438b55d5846cfecd9301105"), None);
+        assert_eq!(decode("0Xb2bb92d0de618878e438b55d5846cfecd9301105"), None);
         assert_eq!(decode("0x00"), None);
         assert_eq!(decode("b2bb92d0de618878e438b55d5846cfecd9301105"), None);
         assert_eq!(decode("0xg2bb92d0de618878e438b55d5846cfecd9301105"), None);
