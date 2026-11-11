@@ -71,8 +71,9 @@ then the change, run back to back; the rules nobody touched agree to within one 
 | the analyzer | 182.3 s | | 163.1 s |
 | all planning | 429.2 s | | 410.0 s |
 
-Planning is 4.5% shorter and the analyzer 10.5%. On the allocations nest the total does not move
-(6,055 ms and 6,070 ms): `checked_arithmetic` falls 13% there and `addresses` 1%, and nothing is
+Planning is 4.5% shorter and the analyzer 10.5%; a second pair run the same way gave 429.2 s and
+409.1 s. On the allocations nest two rounds gave 6,055 ms then 6,070 ms, and 6,069 ms then
+5,909 ms: `checked_arithmetic` falls 13 to 18% there and `addresses` 1 to 8%, and nothing is
 shared often enough for the rest to matter.
 
 `addresses` moves less than its size suggests. `recompute_schema` is 42% of the rule, and in a

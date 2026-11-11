@@ -261,6 +261,10 @@ inside     logical nodes after analysis                        0.000 ms      476
 inside     physical nodes                                      0.000 ms      3709
 inside     relations in one statement                          0.000 ms        63
 
+== a second pair, the same way
+main's rules   statements 240  total 429233.921 ms  analyzer 182191.760  optimizer 158095.407
+the change     statements 240  total 409140.795 ms  analyzer 162221.892  optimizer 157542.548  addresses 30771.102  checked_arithmetic 10053.527
+
 == the contract with spans inside the address and checked rules (a separate, heavier-loaded run;
 == the spans cost about what they measure, so this is for the split only)
 statements 240
@@ -518,8 +522,10 @@ inside     physical nodes                                      0.000 ms       19
 inside     shared definitions                                  0.000 ms         8
 
 == plan-times on the allocations nest, main's rules and the #157 change turn about
-main's rules   PLAN-TOTAL median sum 671.074 ms over 19 views | all planning 6054.658 ms, addresses 476.633, checked_arithmetic 210.061, prune_shared 133.524
-the change     PLAN-TOTAL median sum 679.233 ms over 19 views | all planning 6070.434 ms, addresses 470.714, checked_arithmetic 183.069, prune_shared 135.943
+round 1  main's rules  PLAN-TOTAL median sum 671.074 ms over 19 views | all planning 6054.658 ms, addresses 476.633, checked_arithmetic 210.061
+round 1  the change    PLAN-TOTAL median sum 679.233 ms over 19 views | all planning 6070.434 ms, addresses 470.714, checked_arithmetic 183.069
+round 2  main's rules  all planning 6069.214 ms, addresses 483.794, checked_arithmetic 212.721
+round 2  the change    all planning 5908.596 ms, addresses 445.697, checked_arithmetic 174.232
 
 == burrmill-bench join-chain: one-row relations, whole statement, least of three
 JOIN-CHAIN   64 star  least    0.205 s  1 row
