@@ -752,9 +752,9 @@ OTHER_MERCHANT,canary.two@example.com,DE89370400440532013000,+359 888 100002,-3.
     #[test]
     fn tokens_are_stable_and_numbered_in_column_order() {
         let csv = "\
-email,iban,phone
-canary.one@example.com,GB82WEST12345698765432,+359 888 100001
-canary.one@example.com,DE89370400440532013000,+359 888 100002
+email,iban,phone,n
+canary.one@example.com,GB82WEST12345698765432,+359 888 100001,1
+canary.one@example.com,DE89370400440532013000,+359 888 100002,2
 ";
         let table =
             burrmill_ingest::ingest_bytes(csv.as_bytes(), FormatHint::Sniff, &Budget::untrusted())
@@ -830,8 +830,8 @@ canary.one@example.com,DE89370400440532013000,+359 888 100002
     #[test]
     fn a_copied_value_sends_nothing() {
         let csv = "\
-merchant,email
-prefix-canary.one@example.com-suffix,canary.one@example.com
+merchant,email,n
+prefix-canary.one@example.com-suffix,canary.one@example.com,1
 ";
         let table =
             burrmill_ingest::ingest_bytes(csv.as_bytes(), FormatHint::Sniff, &Budget::untrusted())
