@@ -13,7 +13,9 @@ burrmill-ingest = { path = "../crates/burrmill-ingest" }
 burrmill = { path = "../crates/burrmill", features = ["datafusion"] }
 
 # Own workspace, so `cargo test` at the repo root does not build it and a resolve here
-# cannot move the engine lock off arrow 59.2.0.
+# cannot move the engine's lock. Its own lock follows the engine's by hand: when a pin in
+# crates/burrmill moves, `cp Cargo.lock fuzz/ && cargo metadata --manifest-path fuzz/Cargo.toml`.
+# The fmt job in ci.yml refuses a pull request that leaves it behind.
 [workspace]
 
 [[bin]]
