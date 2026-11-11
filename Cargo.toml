@@ -39,7 +39,7 @@ parquet = { version = "59", default-features = false, features = ["arrow", "snap
 rustc-hash = "2"
 # The SwissTable the RFC names. Raw-entry access is what lets keys live in an arena instead of one
 # heap allocation each, which is the difference between owning an aggregation and renting std's.
-hashbrown = "0.16"
+hashbrown = "0.17"
 rayon = "1"
 sqlparser = "0.62"
 
