@@ -86,6 +86,8 @@ function promptText(question, card, grammar, feedback, mode, identifiers, rows) 
     lines.push(
       'Aggregates mode, k = ' + AGGREGATE_K + '.',
       'Write one SELECT that reads table t and has a GROUP BY.',
+      'Each output is a grouping key, or count, sum or avg of a column, with arithmetic, CAST or round over those.',
+      'min, max, string_agg, CASE inside an aggregate, FILTER and a CTE named t are not sent.',
       'The next message lists groups of size at least ' +
         AGGREGATE_K +
         ', and how many groups were dropped.',
