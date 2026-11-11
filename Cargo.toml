@@ -34,8 +34,8 @@ repository = "https://github.com/nuthatch-org/burrmill"
 # version, so reading what nuthatch writes with 58 is unaffected.
 # No default features: csv, json and ipc are not the fold path, and arrow-json drags ahash onto wasm
 # (investigation 05). A member that needs one names it.
-arrow = { version = "59", default-features = false }
-parquet = { version = "59", default-features = false, features = ["arrow", "snap"] }
+arrow = { version = "60", default-features = false }
+parquet = { version = "60", default-features = false, features = ["arrow", "snap"] }
 rustc-hash = "2"
 # The SwissTable the RFC names. Raw-entry access is what lets keys live in an arena instead of one
 # heap allocation each, which is the difference between owning an aggregation and renting std's.
