@@ -361,6 +361,8 @@ fn finish(out: ArrayRef, scalar: bool) -> DFResult<ColumnarValue> {
 
 #[cfg(test)]
 mod tests {
+    use datafusion_expr::col;
+
     use super::*;
 
     #[test]
@@ -374,6 +376,99 @@ mod tests {
         assert_eq!(decode("0xg2bb92d0de618878e438b55d5846cfecd9301105"), None);
         assert_eq!(decode(""), None);
         assert_eq!(decode(&encode(&[0; 20])), Some([0; 20]));
+    }
+
+    /// `name`, one text column `who`, noted as an address or not.
+    fn scan(name: &str, noted: &Noted, address: bool) -> datafusion_expr::LogicalPlanBuilder {
+        use arrow::datatypes::{Field, Schema};
+        use datafusion_catalog::default_table_source::provider_as_source;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "who",
+            DataType::Utf8View,
+            true,
+        )]));
+        let table = datafusion_catalog::MemTable::try_new(schema, vec![vec![]]).unwrap();
+        if address {
+            noted.note(name, ["who".to_string()]);
+        }
+        LogicalPlanBuilder::scan(name, provider_as_source(Arc::new(table)), None).unwrap()
+    }
+
+    fn analyzed(noted: Noted, plan: LogicalPlan) -> LogicalPlan {
+        Addresses(noted)
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_node_over_nothing_that_changed_keeps_its_schema() {
+        let noted = Noted::default();
+        let plain = scan("plain", &noted, false)
+            .project(vec![col("who").alias("w")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let decoded = scan("t", &noted, true)
+            .project(vec![col("who").alias("a")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let (kept, was) = (Arc::clone(plain.schema()), Arc::clone(decoded.schema()));
+        let plan = LogicalPlanBuilder::from(plain)
+            .cross_join(decoded)
+            .unwrap()
+            .build()
+            .unwrap();
+        let out = analyzed(noted, plan);
+        assert!(is_address(out.schema().field(1).data_type()), "{out}");
+        let mut schemas = Vec::new();
+        out.apply(|n| {
+            if let LogicalPlan::Projection(p) = n {
+                schemas.push(Arc::clone(&p.schema));
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        // Derived again it would be an equal schema, and another one.
+        assert!(schemas.iter().any(|s| Arc::ptr_eq(s, &kept)), "{out}");
+        assert!(!schemas.iter().any(|s| Arc::ptr_eq(s, &was)), "{out}");
+    }
+
+    #[test]
+    fn a_subquery_that_hands_back_the_outer_address_says_so() {
+        use arrow::datatypes::Field;
+        let noted = Noted::default();
+        let outer = Expr::OuterReferenceColumn(
+            Arc::new(Field::new("who", DataType::Utf8View, true)),
+            Column::new(Some("t"), "who"),
+        );
+        let inner = LogicalPlanBuilder::empty(true)
+            .project(vec![outer.clone().alias("w")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let subquery = Expr::ScalarSubquery(datafusion_expr::Subquery {
+            subquery: Arc::new(inner),
+            outer_ref_columns: vec![outer],
+            spans: Default::default(),
+        });
+        let plan = scan("t", &noted, true)
+            .project(vec![subquery.alias("s")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let out = analyzed(noted, plan);
+        let mut handed = None;
+        out.apply_with_subqueries(|n| {
+            if let LogicalPlan::Projection(p) = n
+                && matches!(p.input.as_ref(), LogicalPlan::EmptyRelation(_))
+            {
+                handed = Some(p.schema.field(0).data_type().clone());
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        assert!(handed.as_ref().is_some_and(is_address), "{handed:?}\n{out}");
     }
 }
 

@@ -1464,4 +1464,105 @@ mod tests {
             "{out}"
         );
     }
+
+    /// `1 AS x` read once through a reference, as `y`, and beside it `stale`, if given.
+    fn shared_once(stale: Option<LogicalPlan>) -> LogicalPlan {
+        let def = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("x")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let state = Shared::default();
+        let reference = LogicalPlan::Extension(Extension {
+            node: Arc::new(SharedRef {
+                id: 7,
+                state: Arc::clone(&state),
+                schema: Arc::clone(def.schema()),
+            }),
+        });
+        let mut body = LogicalPlanBuilder::from(reference)
+            .project(vec![col("x").alias("y")])
+            .unwrap();
+        if let Some(stale) = stale {
+            body = body.cross_join(stale).unwrap();
+        }
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(SharedDefs {
+                ids: vec![7],
+                states: vec![state],
+                schemas: vec![Arc::clone(def.schema())],
+                defs: vec![def],
+                body: body.build().unwrap(),
+            }),
+        })
+    }
+
+    /// Refuses a plan with a projection whose input something else holds too: walking it would
+    /// copy that input rather than move it.
+    #[derive(Debug)]
+    struct Sole;
+
+    fn sole(plan: LogicalPlan) -> Result<LogicalPlan> {
+        plan.apply(|n| match n {
+            LogicalPlan::Projection(p) if Arc::strong_count(&p.input) > 1 => {
+                internal_err!("an input of {n} is held twice")
+            }
+            _ => Ok(TreeNodeRecursion::Continue),
+        })?;
+        Ok(plan)
+    }
+
+    impl AnalyzerRule for Sole {
+        fn name(&self) -> &str {
+            "sole"
+        }
+        fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
+            sole(plan)
+        }
+    }
+
+    #[test]
+    fn a_rule_over_shared_definitions_is_given_plans_nothing_else_holds() {
+        OverShared(Arc::new(Sole))
+            .analyze(shared_once(None), &ConfigOptions::default())
+            .unwrap();
+        with_definitions(shared_once(None), &mut |p, _| sole(p)).unwrap();
+    }
+
+    #[test]
+    fn a_retyped_definition_rebuilds_only_the_nodes_over_its_references() {
+        // A projection that says BIGINT of an INT: rebuilt, it would say INT.
+        let wrong = Arc::clone(
+            LogicalPlanBuilder::empty(true)
+                .project(vec![lit(2i64).alias("z")])
+                .unwrap()
+                .build()
+                .unwrap()
+                .schema(),
+        );
+        let stale = LogicalPlan::Projection(
+            Projection::try_new_with_schema(
+                vec![lit(2i32).alias("z")],
+                Arc::new(LogicalPlanBuilder::empty(true).build().unwrap()),
+                Arc::clone(&wrong),
+            )
+            .unwrap(),
+        );
+        let out = OverShared(Arc::new(Narrow))
+            .analyze(shared_once(Some(stale)), &ConfigOptions::default())
+            .unwrap();
+        let fields = out.schema().fields();
+        assert_eq!(
+            fields[0].data_type(),
+            &arrow::datatypes::DataType::Int32,
+            "{out}"
+        );
+        let mut kept = false;
+        out.apply(|n| {
+            kept |= matches!(n, LogicalPlan::Projection(p) if Arc::ptr_eq(&p.schema, &wrong));
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        assert!(kept, "a node that reads no reference was rebuilt:\n{out}");
+    }
 }
