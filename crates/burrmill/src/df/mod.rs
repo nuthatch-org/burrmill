@@ -570,15 +570,20 @@ impl Engine {
         let held = metrics.as_deref_mut();
         let r = std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let (done, waited) = std::sync::mpsc::sync_channel(1);
             let run = std::thread::Builder::new()
                 .name("burrmill-statement".into())
                 .stack_size(PLAN_STACK_BYTES)
                 .spawn_scoped(s, move || {
                     // Not `Cancelled`: the caller's `f` refused, and what was read still counts.
-                    let mut send = |b| {
-                        tx.send(b).map_err(|_| {
-                            BurrmillError::Substrate("the caller stopped reading".into())
-                        })
+                    let gone = || BurrmillError::Substrate("the caller stopped reading".into());
+                    let mut send = |b: RecordBatch| {
+                        let wide = b.get_array_memory_size() > READ_AHEAD_BYTES;
+                        tx.send((b, wide)).map_err(|_| gone())?;
+                        if wide {
+                            waited.recv().map_err(|_| gone())?;
+                        }
+                        Ok(())
                     };
                     cancel::planning(token, || {
                         self.runtime()
@@ -587,7 +592,15 @@ impl Engine {
                 })
                 .map_err(|e| BurrmillError::Substrate(format!("statement thread: {e}")))?;
             // Refused by `f`: `rx` goes with the loop, the next send fails and the statement ends.
-            let taken = rx.into_iter().try_for_each(&mut f);
+            // `done` goes with it too, or a statement waiting on a wide batch would wait for ever.
+            let f = &mut f;
+            let taken = rx.into_iter().try_for_each(move |(b, wide)| {
+                f(b)?;
+                if wide {
+                    let _ = done.send(());
+                }
+                Ok(())
+            });
             let run = run.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
             taken.and(run)
         });
@@ -945,6 +958,12 @@ fn clipped(s: String) -> String {
     }
     format!("{}... ({} bytes cut)", &s[..end], s.len() - end)
 }
+
+/// A batch over this is the caller's alone: the statement builds nothing more until `f` has
+/// returned from it. A batch is in no pool, and read ahead two of them waited behind the caller's
+/// whatever their size (nuthatch #1650).
+#[cfg(not(target_arch = "wasm32"))]
+const READ_AHEAD_BYTES: usize = 4 << 20;
 
 /// The planner recurses, and so does executing what it planned. The caller's stack is whatever the
 /// host gave its worker, and a stack overflow aborts the process, so each thread this module starts
