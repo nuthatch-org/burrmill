@@ -1,6 +1,6 @@
 #!/bin/sh
-# RFC-0047 slice 2. The wasm32 graph of burrmill-ingest has no C, and the
-# linked reader has a gzip size. The 8 MB demo gate is a later slice.
+# docs/browser.md. The wasm32 graph of burrmill-ingest has no C, and the
+# linked reader has a gzip size. The 8 MB demo gate is engine-wasm.sh.
 set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 cd "$root"

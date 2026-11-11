@@ -6,7 +6,7 @@
 # measuring against can never reach the release graph. RFC-0042 §3a's binary rule, expressed as a
 # workspace layout rather than as a promise.
 #
-# `burrmill-ingest` is RFC-0047 slice 1. It never depends on the engine, so nuthatch can take the
+# `burrmill-ingest` is the browser tab's reader (docs/browser.md). It never depends on the engine, so nuthatch can take the
 # reader without taking the query layer. `burrmill-wasm` is the JS package for the
 # page: ingest, the engine, and the checks on an answer. It does no network. `burrmill-size` only
 # links the two so the wasm gzip can be measured; it is not the JS package. `fuzz/` is its own
