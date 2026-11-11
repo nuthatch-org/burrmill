@@ -1,0 +1,37 @@
+The 6.6 memory gate on the path nuthatch takes, 2026-11-11. ThinkPad, 32 cores, release,
+examples/hosted_fold over the 989,690-group fixture (ROWS=2000000 SEGMENTS=64 ADDRS=1000000), one
+fold per process, the two builds and the two paths turn about. "opened" is Engine::open_segments;
+"registered" is Engine::open_empty and register_facts with from and to declared as addresses.
+The second build is the first with the registration left out of the fold's table map, which is
+main. The box ran other jobs (1-minute load 60 to 120): peak RSS stands, the times are loose.
+
+== four rounds: ms is the statement, VmHWM the process
+registration in the fold map      opened HOSTED  registered=false  folded=true  groups=989690  ms=1200  VmHWM:=263472=kB  sampled_rss_mb=260  file_mb=55  anon_mb=204
+registration in the fold map      opened HOSTED  registered=false  folded=true  groups=989690  ms=1661  VmHWM:=267852=kB  sampled_rss_mb=262  file_mb=54  anon_mb=207
+registration in the fold map      opened HOSTED  registered=false  folded=true  groups=989690  ms=1787  VmHWM:=265088=kB  sampled_rss_mb=259  file_mb=54  anon_mb=204
+registration in the fold map      opened HOSTED  registered=false  folded=true  groups=989690  ms=2032  VmHWM:=259640=kB  sampled_rss_mb=255  file_mb=54  anon_mb=201
+registration in the fold map      registered HOSTED  registered=true  folded=true  groups=989690  ms=1769  VmHWM:=257792=kB  sampled_rss_mb=252  file_mb=55  anon_mb=197
+registration in the fold map      registered HOSTED  registered=true  folded=true  groups=989690  ms=1950  VmHWM:=257004=kB  sampled_rss_mb=253  file_mb=55  anon_mb=198
+registration in the fold map      registered HOSTED  registered=true  folded=true  groups=989690  ms=1986  VmHWM:=258776=kB  sampled_rss_mb=254  file_mb=56  anon_mb=198
+registration in the fold map      registered HOSTED  registered=true  folded=true  groups=989690  ms=2252  VmHWM:=251436=kB  sampled_rss_mb=247  file_mb=55  anon_mb=192
+registration not in the fold map  opened HOSTED  registered=false  folded=true  groups=989690  ms=1658  VmHWM:=261068=kB  sampled_rss_mb=255  file_mb=55  anon_mb=199
+registration not in the fold map  opened HOSTED  registered=false  folded=true  groups=989690  ms=1848  VmHWM:=245876=kB  sampled_rss_mb=241  file_mb=55  anon_mb=186
+registration not in the fold map  opened HOSTED  registered=false  folded=true  groups=989690  ms=1973  VmHWM:=255692=kB  sampled_rss_mb=252  file_mb=54  anon_mb=198
+registration not in the fold map  opened HOSTED  registered=false  folded=true  groups=989690  ms=2271  VmHWM:=262084=kB  sampled_rss_mb=257  file_mb=54  anon_mb=202
+registration not in the fold map  registered HOSTED  registered=true  folded=false  groups=989690  ms=1359  VmHWM:=372504=kB  sampled_rss_mb=365  file_mb=59  anon_mb=306
+registration not in the fold map  registered HOSTED  registered=true  folded=false  groups=989690  ms=1468  VmHWM:=380800=kB  sampled_rss_mb=375  file_mb=59  anon_mb=315
+registration not in the fold map  registered HOSTED  registered=true  folded=false  groups=989690  ms=1589  VmHWM:=365520=kB  sampled_rss_mb=360  file_mb=59  anon_mb=300
+registration not in the fold map  registered HOSTED  registered=true  folded=false  groups=989690  ms=1799  VmHWM:=379404=kB  sampled_rss_mb=373  file_mb=59  anon_mb=313
+
+== again with the process's wall, user and system seconds
+registration in the fold map      opened folded=true groups=989690 ms=1053 VmHWM:=255220=kB wall=1.150 user=2.632 sys=0.315
+registration in the fold map      opened folded=true groups=989690 ms=948 VmHWM:=272272=kB wall=1.028 user=2.555 sys=0.464
+registration in the fold map      registered folded=true groups=989690 ms=1205 VmHWM:=249280=kB wall=1.303 user=2.746 sys=0.456
+registration not in the fold map  opened folded=true groups=989690 ms=1835 VmHWM:=265556=kB wall=1.937 user=3.051 sys=0.479
+registration not in the fold map  opened folded=true groups=989690 ms=994 VmHWM:=257376=kB wall=1.080 user=2.632 sys=0.459
+registration not in the fold map  registered folded=false groups=989690 ms=1619 VmHWM:=355016=kB wall=1.773 user=3.541 sys=0.592
+registration not in the fold map  registered folded=false groups=989690 ms=951 VmHWM:=342060=kB wall=1.085 user=3.247 sys=0.518
+
+== the six production nest copies under the release gate's statements, the engine at main and
+== with this change (and #157 and the relation bound): 117 statements answered on both, no answer
+== differing, peak RSS 922 and 922 MiB on the allocations nest, 1021 and 1026 on the QoS nest
