@@ -6,14 +6,15 @@ const QUESTIONS = [
   'Year-over-year change',
 ];
 
-// RFC-0047's stated default. Whether k should differ, or be per column, is open.
+// For the prompt and the blurb. The filter is AGGREGATE_K in crates/burrmill-wasm/src/aggregates.rs.
 const AGGREGATE_K = 10;
 
-// A label check only. The RFC says this is not a compliance claim.
+// A label check only, and a warning: it does not stop a send (docs/browser.md).
 const IDENTIFIER_LABELS = new Set(['email', 'phone', 'iban', 'ssn', 'patient', 'hiv', 'id']);
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const FILLS = ['#c45c26', '#3d5a6c', '#8a6232', '#5c6b45'];
+// Each at least 3:1 on the chart's #12100e.
+const FILLS = ['#d46a30', '#6a8ca3', '#a77a42', '#7d8f5e'];
 
 if (window.trustedTypes && window.trustedTypes.createPolicy) {
   window.trustedTypes.createPolicy('default', {
@@ -308,11 +309,66 @@ function mag(raw) {
   return Number.isFinite(n) ? Math.abs(n) : 0;
 }
 
+function cellText(display, r, idx) {
+  const raw = idx >= 0 && display[r] ? display[r][idx] : '';
+  return raw == null ? '' : String(raw);
+}
+
+// The name a screen reader gives the chart, and the values it reads under it.
+function describe(svg, chart, columns, display, limit) {
+  const title = svgEl('title');
+  title.id = 'chart-title';
+  const series = chart.y.join(', ');
+  title.textContent =
+    chart.kind === 'number'
+      ? series
+      : chart.kind.replace('_', ' ') + ' chart of ' + series + (chart.x ? ' by ' + chart.x : '');
+  const desc = svgEl('desc');
+  desc.id = 'chart-desc';
+  const xIdx = colIndex(columns, chart.x);
+  const yIdx = chart.y.map((name) => colIndex(columns, name));
+  const lines = [];
+  for (let r = 0; r < limit; r++) {
+    const values = chart.y.map((name, i) => name + ' ' + cellText(display, r, yIdx[i]));
+    lines.push((xIdx >= 0 ? cellText(display, r, xIdx) + ': ' : '') + values.join(', '));
+  }
+  desc.textContent = lines.join('; ');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-labelledby', 'chart-title chart-desc');
+  svg.appendChild(title);
+  svg.appendChild(desc);
+}
+
+function legend(svg, names) {
+  const group = svgEl('g');
+  group.setAttribute('class', 'legend');
+  let x = 20;
+  names.forEach((name, series) => {
+    const swatch = svgEl('rect');
+    swatch.setAttribute('x', String(x));
+    swatch.setAttribute('y', '8');
+    swatch.setAttribute('width', '10');
+    swatch.setAttribute('height', '10');
+    swatch.setAttribute('fill', FILLS[series % FILLS.length]);
+    group.appendChild(swatch);
+    const text = svgEl('text');
+    text.setAttribute('x', String(x + 14));
+    text.setAttribute('y', '17');
+    text.setAttribute('fill', '#b7ab9a');
+    text.setAttribute('font-size', '11');
+    text.textContent = name;
+    group.appendChild(text);
+    x += 30 + name.length * 7;
+  });
+  svg.appendChild(group);
+}
+
 function draw(host, chart, columns, rows, display) {
   host.replaceChildren();
   if (!chart || chart.kind === 'table') return;
   const svg = svgEl('svg');
   svg.setAttribute('viewBox', '0 0 640 280');
+  describe(svg, chart, columns, display, chart.kind === 'number' ? 1 : Math.min(rows.length, 24));
   if (chart.kind === 'number') {
     const idx = colIndex(columns, chart.y[0]);
     const text = svgEl('text');
@@ -351,6 +407,7 @@ function draw(host, chart, columns, rows, display) {
     line.setAttribute('fill', 'none');
     line.setAttribute('stroke', FILLS[0]);
     line.setAttribute('stroke-width', '2');
+    line.dataset.series = chart.y[0];
     svg.appendChild(line);
   } else {
     for (let r = 0; r < limit; r++) {
@@ -363,6 +420,7 @@ function draw(host, chart, columns, rows, display) {
         rect.setAttribute('width', String(Math.max(slot - 4, 1)));
         rect.setAttribute('height', String(h));
         rect.setAttribute('fill', FILLS[series % FILLS.length]);
+        rect.dataset.series = chart.y[series];
         svg.appendChild(rect);
         stacked += h;
       });
@@ -375,10 +433,10 @@ function draw(host, chart, columns, rows, display) {
     label.setAttribute('text-anchor', 'middle');
     label.setAttribute('fill', '#b7ab9a');
     label.setAttribute('font-size', '10');
-    const raw = xIdx >= 0 && display[r] ? display[r][xIdx] : '';
-    label.textContent = raw == null ? '' : String(raw).slice(0, 12);
+    label.textContent = cellText(display, r, xIdx).slice(0, 12);
     svg.appendChild(label);
   }
+  legend(svg, chart.kind === 'line' ? chart.y.slice(0, 1) : chart.y);
   host.appendChild(svg);
 }
 
@@ -465,6 +523,7 @@ function showColumns(columns, proposals) {
     input.type = 'text';
     input.value = column.name;
     input.dataset.name = column.name;
+    input.setAttribute('aria-label', 'Name for column ' + column.name);
     input.addEventListener('input', warnNames);
     row.appendChild(input);
     const field = { input, sign: null, date: null, identifier: null };

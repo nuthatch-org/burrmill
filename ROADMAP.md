@@ -188,8 +188,7 @@ in the plan.
 
 ## Stage 7 · the engine in a browser tab · **BUILT, PAGE NOT YET SAFE TO HAND A STRANGER**
 
-The browser crates cite an RFC-0047 that is not in this repository (#182); its numbering collides
-with nuthatch's RFC-0047, the memory envelope stage 6 cites.
+What the browser crates and the page do today is in `docs/browser.md`.
 
 | # | Work | Done when |
 |---|---|---|

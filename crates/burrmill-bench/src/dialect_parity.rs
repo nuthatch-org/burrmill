@@ -392,6 +392,16 @@ const CORPUS: &[&str] = &[
     "SELECT COLUMNS('a') FROM (SELECT 1 AS a, 2 AS b) t",
     "SELECT 'abc' GLOB 'a*' AS a",
     "PIVOT (SELECT 1 AS a, 'x' AS k) ON k USING sum(a)",
+    // What each refusal above names instead (#173).
+    "SELECT COUNT(DISTINCT block_number) AS n FROM transfer",
+    "SELECT (SELECT sum(v) FROM (SELECT unnest([1, 2, 3]) AS v)) AS a",
+    "SELECT * EXCLUDE (b) FROM (SELECT 1 AS a, 2 AS b) t",
+    "SELECT 'abc' LIKE 'a_c%' AS a",
+    r"SELECT s LIKE p ESCAPE '\' AS m FROM (VALUES ('a%', 'a\%'), ('ab', 'a\%')) t(s, p)",
+    "SELECT sum(a) FILTER (WHERE k = 'x') AS x FROM (SELECT 1 AS a, 'x' AS k) t",
+    "SELECT 'a' AS k, a AS v FROM (SELECT 1 AS a, 2 AS b) t UNION ALL SELECT 'b', b FROM (SELECT 1 AS a, 2 AS b) t ORDER BY 1",
+    // Why strptime names nothing instead.
+    "SELECT CAST('2024-01-02 03:04:05' AS TIMESTAMP) AS a",
     "SELECT * FROM unnest([1, 2]) t(x)",
     "SELECT * FROM range(DATE '2024-01-01', DATE '2024-01-03', INTERVAL 1 DAY) t(d)",
     "SELECT * FROM (SELECT 3 AS n) s, range(s.n) t(x)",
@@ -448,6 +458,11 @@ const KNOWN: &[(&str, &str)] = &[
     (
         "SELECT COLUMNS('a') FROM (SELECT 1 AS a, 2 AS b) t",
         "refused by name: no COLUMNS() expansion here",
+    ),
+    (
+        "SELECT CAST('2024-01-02 03:04:05' AS TIMESTAMP) AS a",
+        "the same instant, in nanoseconds where DuckDB's TIMESTAMP is microseconds, so nuthatch's \
+         JSON prints it differently",
     ),
     (
         "SELECT 'abc' GLOB 'a*' AS a",
