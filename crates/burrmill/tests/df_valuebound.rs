@@ -137,6 +137,15 @@ fn no_statement_builds_values_past_its_pool() {
             grew < pool + SLACK,
             "{sql}\ngrew {grew} bytes against a pool of {pool}"
         );
+        // A refused statement returns before its aborted partition tasks drop what they hold.
+        let returned = std::time::Instant::now();
+        while e.tasks_alive() > 0 {
+            assert!(
+                returned.elapsed() < std::time::Duration::from_secs(30),
+                "{sql}: its tasks never stopped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         assert_eq!(e.memory_reserved(), 0, "{sql} left a charge behind");
     }
 }

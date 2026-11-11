@@ -384,8 +384,9 @@ impl Engine {
         self.session.footer_bytes()
     }
 
-    /// Tasks alive on the engine's runtime. A cancelled statement returns before its partition tasks
-    /// stop, each at its next yield, and its memory goes back as they do: zero here is when it has.
+    /// Tasks alive on the engine's runtime. A cancelled or refused statement returns before its
+    /// partition tasks stop, each at its next yield, and its memory goes back as they do: zero here
+    /// is when it has.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn tasks_alive(&self) -> usize {
         self.runtime().metrics().num_alive_tasks()
