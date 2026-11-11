@@ -165,6 +165,9 @@ impl<'a> SignedFoldExec<'a> {
     /// Run the fold and return the canonically ordered rows plus what it cost.
     pub fn run(&self) -> Result<(Rows, FoldMetrics)> {
         let started = Instant::now();
+        if self.seam.is_some() {
+            check_hot_shape(self.plan)?;
+        }
         let scans = self.scans();
         // Morsels carry the scan they belong to, so one flat work list covers every table in the
         // fold and the morsel scheduler needs no notion of branches at all.
@@ -479,6 +482,12 @@ impl<'a> SignedFoldExec<'a> {
             let mut casebuf = String::new();
             for i in 0..batch.num_rows() {
                 if let (Some(blocks), Some(seam)) = (&blocks, self.seam) {
+                    // A negative signed block casts to NULL too; either way the row has no side.
+                    if blocks.is_null(i) {
+                        return Err(BurrmillError::Seam(
+                            "the seam requires block-stamped facts: unstamped archived row".into(),
+                        ));
+                    }
                     // `None` means nothing has been sealed, so nothing in a segment can be cold.
                     if seam
                         .snapshot
@@ -646,6 +655,31 @@ impl<'a> SignedFoldExec<'a> {
         }
         Ok(())
     }
+}
+
+/// The hot half folds a `HotRow` as `+value` to credit and `-value` to debit and nothing else, so a
+/// seam is refused for any plan that half would answer differently from the cold one (#148).
+fn check_hot_shape(plan: &SignedFold) -> Result<()> {
+    let bare = |b: &crate::plan::FoldBranch| {
+        matches!(
+            (b.key.as_slice(), b.values.as_slice()),
+            ([k], [v]) if !v.strict_cast
+                && matches!(k.parts.as_slice(), [crate::plan::KeyPart::Column { key_fn: None, .. }])
+        )
+    };
+    if let [c, d] = plan.branches.as_slice()
+        && c.table == d.table
+        && bare(c)
+        && bare(d)
+        && c.values[0].negated != d.values[0].negated
+    {
+        return Ok(());
+    }
+    Err(BurrmillError::NotAllowed(
+        "with a hot tip attached, only the credit and debit fold is admitted: two arms over one \
+         table, each a bare key column and one TRY_CAST sum, one of them negated"
+            .into(),
+    ))
 }
 
 /// Read a column as Utf8 whichever string layout the writer chose.

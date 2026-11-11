@@ -192,12 +192,10 @@ impl MiniSession {
             }
             scalar.insert(f.name().to_string(), f);
         }
-        for f in [
-            super::addresses::AddressBytes::udf(),
-            super::addresses::AddressText::udf(),
-        ] {
-            scalar.insert(f.name().to_string(), f);
-        }
+        // `address_bytes` is placed by the rewrite only. Callable, it let a caller raise the
+        // refusal that turns addresses off for everyone.
+        let text = super::addresses::AddressText::udf();
+        scalar.insert(text.name().to_string(), text);
         let from_hex = super::dialect::FromHex::udf();
         scalar.insert("unhex".to_string(), Arc::clone(&from_hex));
         scalar.insert(from_hex.name().to_string(), from_hex);
@@ -551,6 +549,10 @@ impl MiniSession {
     /// Addresses are text from now on; whether they were fixed binary until now.
     pub fn addresses_off(&self) -> bool {
         self.addresses.turn_off()
+    }
+
+    pub fn address_refused(&self) -> bool {
+        self.addresses.refused()
     }
 
     pub fn register_table(&mut self, name: &str, table: Arc<dyn TableProvider>) {

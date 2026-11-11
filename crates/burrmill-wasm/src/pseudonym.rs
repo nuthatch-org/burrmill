@@ -8,7 +8,8 @@ use burrmill_ingest::InferredType;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sqlparser::ast::{
-    Expr, Query, Select, SelectItem, SetExpr, Statement, TableFactor, Visit, Visitor,
+    Expr, GroupByExpr, JoinConstraint, JoinOperator, ObjectNamePart, Query, Select, SelectItem,
+    SetExpr, Statement, TableAlias, TableFactor, Visit, Visitor,
 };
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
@@ -17,6 +18,8 @@ use crate::format::cell_string;
 use crate::session::QueryOut;
 
 const EXPR: &str = "an identifier column is used in an expression";
+pub(crate) const NONE_MARKED: &str = "no column is marked as an identifier, so no rows are sent";
+const FILTER: &str = "an identifier column is used to choose rows";
 const UNTOKENISED: &str = "an identifier value was not tokenised";
 const NOT_ONE: &str = "the statement was not one query";
 
@@ -128,7 +131,11 @@ pub fn projection_allows(sql: &str, marked: &BTreeSet<String>) -> Result<(), &'s
     let Some(Statement::Query(query)) = statements.pop() else {
         return Err(NOT_ONE);
     };
-    check_query(&query, marked)
+    let mut marked = marked
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    check_query(&query, &mut marked).map(|_| ())
 }
 
 pub fn mask(out: &QueryOut, tokens: &TokenMap, bound: bool) -> Result<Vec<Value>, &'static str> {
@@ -329,65 +336,191 @@ fn date_shaped(text: &str) -> bool {
             && digit(9))
 }
 
-fn check_query(query: &Query, marked: &BTreeSet<String>) -> Result<(), &'static str> {
+/// `marked` grows as the walk goes: a bare rename of a marked column (`email AS e`, a CTE's
+/// column list, a derived table's) marks the new name, so `replace(e, ..)` further out is the
+/// expression it is. Matching is by name, so a collision refuses more, never less.
+/// Returns whether the query's output passes a marked column through.
+fn check_query(query: &Query, marked: &mut BTreeSet<String>) -> Result<bool, &'static str> {
     if let Some(with) = &query.with {
         for cte in &with.cte_tables {
-            check_query(&cte.query, marked)?;
+            let passes = check_query(&cte.query, marked)?;
+            mark_alias(&cte.alias, passes, marked);
         }
     }
     check_set(&query.body, marked)
 }
 
-fn check_set(body: &SetExpr, marked: &BTreeSet<String>) -> Result<(), &'static str> {
+/// The names a set operation's output takes, or `None` when one is generated from an expression.
+fn output_names(body: &SetExpr) -> Option<Vec<String>> {
+    match body {
+        SetExpr::Select(select) => select
+            .projection
+            .iter()
+            .map(|item| match item {
+                SelectItem::ExprWithAlias { alias, .. } => Some(alias.value.to_ascii_lowercase()),
+                SelectItem::UnnamedExpr(Expr::Identifier(id)) => {
+                    Some(id.value.to_ascii_lowercase())
+                }
+                SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts)) => {
+                    parts.last().map(|id| id.value.to_ascii_lowercase())
+                }
+                _ => None,
+            })
+            .collect(),
+        SetExpr::Query(query) => output_names(&query.body),
+        SetExpr::SetOperation { left, .. } => output_names(left),
+        _ => None,
+    }
+}
+
+fn mark_alias(alias: &TableAlias, passes: bool, marked: &mut BTreeSet<String>) {
+    if passes {
+        for column in &alias.columns {
+            marked.insert(column.name.value.to_ascii_lowercase());
+        }
+    }
+}
+
+fn check_set(body: &SetExpr, marked: &mut BTreeSet<String>) -> Result<bool, &'static str> {
     match body {
         SetExpr::Select(select) => check_select(select, marked),
         SetExpr::Query(query) => check_query(query, marked),
         SetExpr::SetOperation { left, right, .. } => {
-            check_set(left, marked)?;
-            check_set(right, marked)
+            let passes = check_set(left, marked)? | check_set(right, marked)?;
+            // The output is named by the left arm, so a marked column in any arm marks those.
+            if passes {
+                for name in output_names(left).ok_or(EXPR)? {
+                    marked.insert(name);
+                }
+            }
+            Ok(passes)
         }
         _ => Err(EXPR),
     }
 }
 
-fn check_select(select: &Select, marked: &BTreeSet<String>) -> Result<(), &'static str> {
-    for item in &select.projection {
-        check_item(item, marked)?;
-    }
+fn check_select(select: &Select, marked: &mut BTreeSet<String>) -> Result<bool, &'static str> {
     for table in &select.from {
         check_factor(&table.relation, marked)?;
         for join in &table.joins {
             check_factor(&join.relation, marked)?;
         }
     }
-    if let Some(expr) = &select.selection {
+    let mut passes = false;
+    for item in &select.projection {
+        passes |= check_item(item, marked)?;
+    }
+    // A predicate on an identifier is an oracle: `WHERE email LIKE 'alice%'` returns her row.
+    for expr in [&select.selection, &select.having, &select.qualify]
+        .into_iter()
+        .flatten()
+    {
+        if mentions(expr, marked) {
+            return Err(FILTER);
+        }
         check_expr_queries(expr, marked)?;
     }
-    if let Some(expr) = &select.having {
-        check_expr_queries(expr, marked)?;
+    for table in &select.from {
+        for join in &table.joins {
+            check_join(&join.join_operator, marked)?;
+        }
     }
-    Ok(())
+    if let GroupByExpr::Expressions(keys, _) = &select.group_by {
+        for key in keys {
+            if !is_bare(key) && mentions(key, marked) {
+                return Err(EXPR);
+            }
+        }
+    }
+    Ok(passes)
 }
 
-fn check_item(item: &SelectItem, marked: &BTreeSet<String>) -> Result<(), &'static str> {
-    let expr = match item {
-        SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(_, _) => return Ok(()),
-        SelectItem::UnnamedExpr(expr)
-        | SelectItem::ExprWithAlias { expr, .. }
-        | SelectItem::ExprWithAliases { expr, .. } => expr,
+fn check_join(op: &JoinOperator, marked: &BTreeSet<String>) -> Result<(), &'static str> {
+    let (condition, constraint) = match op {
+        JoinOperator::AsOf {
+            match_condition,
+            constraint,
+        } => (Some(match_condition), Some(constraint)),
+        JoinOperator::Join(c)
+        | JoinOperator::Inner(c)
+        | JoinOperator::Left(c)
+        | JoinOperator::LeftOuter(c)
+        | JoinOperator::Right(c)
+        | JoinOperator::RightOuter(c)
+        | JoinOperator::FullOuter(c)
+        | JoinOperator::CrossJoin(c)
+        | JoinOperator::Semi(c)
+        | JoinOperator::LeftSemi(c)
+        | JoinOperator::RightSemi(c)
+        | JoinOperator::Anti(c)
+        | JoinOperator::LeftAnti(c)
+        | JoinOperator::RightAnti(c)
+        | JoinOperator::StraightJoin(c) => (None, Some(c)),
+        _ => (None, None),
+    };
+    if condition.is_some_and(|e| mentions(e, marked)) {
+        return Err(FILTER);
+    }
+    match constraint {
+        Some(JoinConstraint::On(e)) if mentions(e, marked) => Err(FILTER),
+        Some(JoinConstraint::Using(names))
+            if names.iter().any(|n| {
+                n.0.last().is_some_and(|part| match part {
+                    ObjectNamePart::Identifier(id) => {
+                        marked.contains(&id.value.to_ascii_lowercase())
+                    }
+                    _ => true,
+                })
+            }) =>
+        {
+            Err(FILTER)
+        }
+        // A natural join can match on an identifier without naming it.
+        Some(JoinConstraint::Natural) => Err(FILTER),
+        _ => Ok(()),
+    }
+}
+
+fn check_item(item: &SelectItem, marked: &mut BTreeSet<String>) -> Result<bool, &'static str> {
+    let (expr, alias) = match item {
+        SelectItem::Wildcard(opts) | SelectItem::QualifiedWildcard(_, opts) => {
+            // REPLACE and RENAME rewrite or rename a column inside the star.
+            if opts.opt_replace.is_some() || opts.opt_rename.is_some() || opts.opt_alias.is_some() {
+                return Err(EXPR);
+            }
+            return Ok(true);
+        }
+        SelectItem::UnnamedExpr(expr) => (expr, None),
+        SelectItem::ExprWithAlias { expr, alias } => (expr, Some(alias)),
+        SelectItem::ExprWithAliases { .. } => return Err(EXPR),
     };
     if is_bare(expr) {
-        return Ok(());
+        if !mentions(expr, marked) {
+            return Ok(false);
+        }
+        if let Some(alias) = alias {
+            marked.insert(alias.value.to_ascii_lowercase());
+        }
+        return Ok(true);
     }
     if mentions(expr, marked) {
         return Err(EXPR);
     }
-    check_expr_queries(expr, marked)
+    check_expr_queries(expr, marked)?;
+    Ok(false)
 }
 
-fn check_factor(factor: &TableFactor, marked: &BTreeSet<String>) -> Result<(), &'static str> {
+fn check_factor(factor: &TableFactor, marked: &mut BTreeSet<String>) -> Result<(), &'static str> {
     match factor {
-        TableFactor::Derived { subquery, .. } => check_query(subquery, marked),
+        TableFactor::Derived {
+            subquery, alias, ..
+        } => {
+            let passes = check_query(subquery, marked)?;
+            if let Some(alias) = alias {
+                mark_alias(alias, passes, marked);
+            }
+            Ok(())
+        }
         TableFactor::NestedJoin {
             table_with_joins, ..
         } => {
@@ -401,9 +534,9 @@ fn check_factor(factor: &TableFactor, marked: &BTreeSet<String>) -> Result<(), &
     }
 }
 
-fn check_expr_queries(expr: &Expr, marked: &BTreeSet<String>) -> Result<(), &'static str> {
+fn check_expr_queries(expr: &Expr, marked: &mut BTreeSet<String>) -> Result<(), &'static str> {
     struct Walk<'a> {
-        marked: &'a BTreeSet<String>,
+        marked: &'a mut BTreeSet<String>,
         err: Option<&'static str>,
     }
     impl Visitor for Walk<'_> {
@@ -411,7 +544,7 @@ fn check_expr_queries(expr: &Expr, marked: &BTreeSet<String>) -> Result<(), &'st
 
         fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
             match check_query(query, self.marked) {
-                Ok(()) => ControlFlow::Continue(()),
+                Ok(_) => ControlFlow::Continue(()),
                 Err(reason) => {
                     self.err = Some(reason);
                     ControlFlow::Break(())
@@ -519,6 +652,81 @@ OTHER_MERCHANT,canary.two@example.com,DE89370400440532013000,+359 888 100002,-3.
         assert!(!is_phone("2024-01-02"));
         assert!(!is_phone("01.02.2024"));
         assert!(!is_phone("2024-01-02T00:00:00"));
+    }
+
+    #[test]
+    fn a_renamed_identifier_is_still_one() {
+        let s = bound();
+        // Each transform breaks the email shape, so only the taint can stop it.
+        let leaks = [
+            "WITH x AS (SELECT email AS e FROM t) SELECT replace(e, '@', ' at ') AS e FROM x",
+            "SELECT replace(n, '@', ' at ') FROM (SELECT email AS n FROM t) s",
+            "SELECT replace(n, '@', ' at ') FROM (SELECT email FROM t) AS s(n)",
+            "WITH x(e) AS (SELECT email FROM t) SELECT replace(e, '@', ' at ') FROM x",
+            "WITH x(a, b, c, d, e, f, g) AS (SELECT * FROM t) SELECT replace(b, '@', ' at ') FROM x",
+            "WITH x AS (SELECT email AS e FROM t), y AS (SELECT e AS f FROM x) SELECT substr(f, 1, 10) AS f FROM y",
+            "WITH x AS (SELECT merchant AS m FROM t UNION ALL SELECT email FROM t) SELECT replace(m, '@', ' at ') FROM x",
+            "SELECT * REPLACE (replace(email, '@', ' at ') AS email) FROM t",
+            "WITH x AS (SELECT * RENAME (email AS e) FROM t) SELECT replace(e, '@', ' at ') FROM x",
+        ];
+        for sql in leaks {
+            let payload = s.pseudonym_feedback(sql).unwrap();
+            assert_no(sql, &payload);
+            for part in ["canary", "example.com"] {
+                assert!(!payload.contains(part), "{sql} contains {part}: {payload}");
+            }
+            let value: Value = serde_json::from_str(&payload).unwrap();
+            assert!(value["omitted"].is_string(), "{sql}: {payload}");
+        }
+        let renamed = s
+            .pseudonym_feedback(
+                "WITH x AS (SELECT email AS e, merchant FROM t) SELECT e, merchant FROM x",
+            )
+            .unwrap();
+        assert_no("renamed passthrough", &renamed);
+        assert!(renamed.contains("CUSTOMER_"), "{renamed}");
+        assert!(renamed.contains("KEPT_MERCHANT"), "{renamed}");
+    }
+
+    #[test]
+    fn an_identifier_cannot_choose_rows() {
+        let s = bound();
+        let oracles = [
+            "SELECT amount FROM t WHERE email LIKE 'canary.one%'",
+            "SELECT amount FROM t WHERE email = 'canary.one@example.com'",
+            "SELECT merchant, sum(amount) AS a FROM t GROUP BY merchant HAVING max(email) > 'canary.o'",
+            "SELECT t.amount FROM t JOIN t AS u ON t.email = u.email AND u.email LIKE 'c%'",
+            "SELECT t.amount FROM t JOIN t AS u USING (email)",
+            "SELECT t.amount FROM t NATURAL JOIN t AS u",
+            "SELECT amount FROM t QUALIFY row_number() OVER (ORDER BY amount) = 1 AND email < 'canary.p'",
+            "SELECT count(*) AS n FROM t GROUP BY substr(email, 1, 8)",
+            "WITH x AS (SELECT email AS e, amount FROM t) SELECT amount FROM x WHERE e LIKE 'canary.one%'",
+        ];
+        for sql in oracles {
+            let payload = s.pseudonym_feedback(sql).unwrap();
+            assert!(!payload.contains("-10.00"), "{sql}: {payload}");
+            let value: Value = serde_json::from_str(&payload).unwrap();
+            assert!(value["omitted"].is_string(), "{sql}: {payload}");
+        }
+        for sql in [
+            "SELECT email, amount FROM t WHERE amount < -5",
+            "SELECT email, count(*) AS n FROM t GROUP BY email",
+        ] {
+            let payload = s.pseudonym_feedback(sql).unwrap();
+            assert_no(sql, &payload);
+            assert!(payload.contains("CUSTOMER_"), "{sql}: {payload}");
+        }
+    }
+
+    #[test]
+    fn nothing_marked_sends_no_rows() {
+        let s = session();
+        let payload = s.pseudonym_feedback("SELECT * FROM t").unwrap();
+        assert!(!payload.contains("KEPT_MERCHANT"), "{payload}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&payload).unwrap()["omitted"],
+            NONE_MARKED
+        );
     }
 
     #[test]

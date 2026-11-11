@@ -44,6 +44,8 @@ pub struct ColumnReport {
     pub non_empty: u64,
     /// Non-empty cells that parsed as `inferred`.
     pub matched: u64,
+    /// Why a column whose cells read as numbers is text. Fixed wording, never a cell.
+    pub note: Option<&'static str>,
 }
 
 impl ColumnReport {
@@ -110,11 +112,12 @@ impl std::fmt::Display for IngestReport {
         for c in &self.columns {
             writeln!(
                 f,
-                "  {} {} nulls={} confidence={:.2}",
+                "  {} {} nulls={} confidence={:.2}{}",
                 c.name,
                 c.inferred.name(),
                 c.nulls,
                 c.confidence(),
+                c.note.map(|n| format!(" ({n})")).unwrap_or_default(),
             )?;
         }
         writeln!(

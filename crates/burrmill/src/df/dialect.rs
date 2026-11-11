@@ -3542,7 +3542,9 @@ impl ScalarUDFImpl for RoundInt {
                             match q.checked_mul(unit) {
                                 Some(x) => Some(x),
                                 None => {
-                                    return exec_err!("Overflow rounding {v} to a whole number");
+                                    return Err(super::errors::overflow(format!(
+                                        "Overflow rounding {v} to a whole number"
+                                    )));
                                 }
                             }
                         }

@@ -3,6 +3,7 @@
 //! compare 20 bytes rather than 42 (addresses-as-fixed-binary.md).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use arrow::array::{Array, ArrayRef, AsArray, FixedSizeBinaryBuilder, StringViewBuilder};
 use arrow::datatypes::{DataType, Schema};
@@ -39,16 +40,18 @@ pub fn is_address(t: &DataType) -> bool {
     *t == fixed()
 }
 
-/// The 20 bytes `s` spells as `0x` and forty hex digits of either case, or none.
+/// The 20 bytes `s` spells as `0x` and forty lower-case hex digits, or none. Only that spelling,
+/// so that `encode(decode(s))` is `s` and a filter pushed to the scan as text says what it said.
 pub fn decode(s: &str) -> Option<[u8; 20]> {
-    let hex = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))?
-        .as_bytes();
+    let hex = s.strip_prefix("0x")?.as_bytes();
     if hex.len() != 40 {
         return None;
     }
-    let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let digit = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
     let mut out = [0u8; 20];
     for (i, pair) in hex.chunks(2).enumerate() {
         out[i] = (digit(pair[0])? << 4) | digit(pair[1])?;
@@ -68,16 +71,33 @@ pub fn encode(bytes: &[u8]) -> String {
     s
 }
 
-/// `address_bytes(text)`: the 20 bytes, or NULL where the text is not an address.
-#[derive(Debug, PartialEq, Eq, Hash)]
+/// `address_bytes(text)`: the 20 bytes, refusing text that is not an address. Only the rewrite
+/// places it; SQL cannot name it, so only a value in an address column can raise `refused`.
+#[derive(Debug)]
 pub struct AddressBytes {
     sig: Signature,
+    refused: Arc<AtomicBool>,
+}
+
+impl PartialEq for AddressBytes {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.refused, &other.refused)
+    }
+}
+
+impl Eq for AddressBytes {}
+
+impl std::hash::Hash for AddressBytes {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.refused).hash(state);
+    }
 }
 
 impl AddressBytes {
-    pub fn udf() -> Arc<ScalarUDF> {
+    pub fn udf(refused: Arc<AtomicBool>) -> Arc<ScalarUDF> {
         Arc::new(ScalarUDF::from(Self {
             sig: Signature::user_defined(Volatility::Immutable),
+            refused,
         }))
     }
 }
@@ -114,11 +134,12 @@ impl ScalarUDFImpl for AddressBytes {
                 out.append_null();
                 continue;
             }
-            // A host writes every address as `0x` and forty hex digits; anything else in an
-            // address column is refused rather than read as nothing.
+            // A host writes every address as `0x` and forty lower-case hex digits; anything else
+            // in an address column is refused rather than read as nothing.
             match decode(a.value(i)) {
                 Some(b) => out.append_value(b)?,
                 None => {
+                    self.refused.store(true, Ordering::Relaxed);
                     return Err(datafusion_common::DataFusionError::Execution(format!(
                         "{NOT_AN_ADDRESS}{:?}",
                         a.value(i)
@@ -248,6 +269,9 @@ pub(super) const NOT_AN_ADDRESS: &str = "not an address: ";
 pub struct Noted {
     columns: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>>,
     off: Arc<std::sync::atomic::AtomicBool>,
+    /// Set by a decode the rewrite placed, never by a message: `error('not an address: ')` was
+    /// enough to turn addresses off for every later caller (#188).
+    refused: Arc<AtomicBool>,
 }
 
 impl Noted {
@@ -269,6 +293,10 @@ impl Noted {
             .get(table)
             .cloned()
             .unwrap_or_default()
+    }
+    /// Whether a placed decode refused since this was last asked.
+    pub fn refused(&self) -> bool {
+        self.refused.swap(false, Ordering::Relaxed)
     }
     /// Reads addresses as text from now on; whether they were fixed binary until now.
     pub fn turn_off(&self) -> bool {
@@ -304,8 +332,11 @@ fn decoded_scan(
         .map(|((q, f), w)| {
             let c = Expr::Column(Column::from((q, f)));
             match w {
-                true => Expr::ScalarFunction(ScalarFunction::new_udf(AddressBytes::udf(), vec![c]))
-                    .alias(f.name()),
+                true => Expr::ScalarFunction(ScalarFunction::new_udf(
+                    AddressBytes::udf(Arc::clone(&noted.refused)),
+                    vec![c],
+                ))
+                .alias(f.name()),
                 false => c.alias(f.name()),
             }
         })
@@ -333,10 +364,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decodes_either_case_and_refuses_the_rest() {
-        let a = "0xB2BB92D0de618878e438b55d5846cfecd9301105";
-        let b = decode(a).unwrap();
-        assert_eq!(encode(&b), a.to_ascii_lowercase());
+    fn decodes_lower_case_and_refuses_the_rest() {
+        let a = "0xb2bb92d0de618878e438b55d5846cfecd9301105";
+        assert_eq!(encode(&decode(a).unwrap()), a);
+        assert_eq!(decode("0xB2BB92D0de618878e438b55d5846cfecd9301105"), None);
+        assert_eq!(decode("0Xb2bb92d0de618878e438b55d5846cfecd9301105"), None);
         assert_eq!(decode("0x00"), None);
         assert_eq!(decode("b2bb92d0de618878e438b55d5846cfecd9301105"), None);
         assert_eq!(decode("0xg2bb92d0de618878e438b55d5846cfecd9301105"), None);

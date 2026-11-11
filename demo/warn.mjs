@@ -1,8 +1,6 @@
-import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
 
-const require = createRequire('/Users/pepe/Projects/IRMarket/web/package.json');
-const { chromium } = require('playwright');
+import { chromium } from 'playwright';
 
 const csv = ['posted,merchant,amount', '2024-01-02,ada@example.com,-100.00', ''].join('\n');
 const columnWarn = 'hiv_status looks like an identifier. Rename it before asking.';

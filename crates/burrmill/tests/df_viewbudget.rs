@@ -364,13 +364,11 @@ fn shared_subquery() {
 /// A shared subquery the pool cannot hold is read by running its plan for each reader, and a
 /// `RepartitionExec` runs once per partition: the gate's `poi.overview` panicked under the second
 /// reader with "partition not used yet" (nuthatch 5.9.0 bump, 2026-10-22). 61 MB of rows under a
-/// 64 MB budget, 56 MB of it the pool: too big to hold, which is the path under test. Since the
-/// built `w` values are charged to the pool (#122), a reader draining one partition while the other
-/// waits holds about half of them in the channel, some 30 MB; under 48 MB that failed more often
-/// than not.
+/// 64 MB budget, 56 MB of it the pool: too big to hold, which is the path under test. The built `w`
+/// values are charged to the pool (#122), so a round-robin repartition over the reference, which
+/// buffers for a waiting reader what the other drains, refused or not by how the tasks ran (#201).
 #[test]
 fn a_shared_subquery_too_big_to_hold_is_read_by_each_reader() {
-    // Two partitions, so a channel holds at most about half the rows.
     let e = engine_threads(64 << 20, 2, None);
     let sql = "WITH g AS (SELECT k, n, repeat('x', 1200) AS w FROM \
                           (SELECT block_number % 50000 AS k, count(*) AS n FROM t GROUP BY 1)) \
@@ -380,6 +378,10 @@ fn a_shared_subquery_too_big_to_hold_is_read_by_each_reader() {
     assert!(
         p.contains("SharedExec") && p.contains("RepartitionExec"),
         "the plan does not share a repartitioned definition: {p}"
+    );
+    assert!(
+        !p.contains("RoundRobinBatch"),
+        "a reader of the shared rows buffers them for another: {p}"
     );
     let (rows, _) = run(&e, sql).unwrap_or_else(|m| panic!("the shared read refused: {m}"));
     assert_eq!(rows.len(), 1);

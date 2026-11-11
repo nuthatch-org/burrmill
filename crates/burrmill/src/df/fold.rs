@@ -645,12 +645,12 @@ const CHUNK: usize = 8192;
 fn fold_rows(fold: &SignedFold, tables: &FoldTables) -> Result<(Rows, u64)> {
     // Every value here is read strictly, `TRY_CAST` included, so the owned fold's "the query used
     // CAST" would be wrong about half of them.
-    let ext = |e: crate::BurrmillError| {
-        let m = e.to_string().replace(
+    let ext = |e: crate::BurrmillError| match e {
+        crate::BurrmillError::Overflow(m) => super::errors::overflow(m),
+        e => DataFusionError::Execution(e.to_string().replace(
             ". The query used CAST, which errors; TRY_CAST would skip it",
             "; a substituted fold refuses it rather than dropping the row",
-        );
-        DataFusionError::Execution(m)
+        )),
     };
     let segments: Vec<&SealedSegments> = fold
         .branches
@@ -664,7 +664,7 @@ fn fold_rows(fold: &SignedFold, tables: &FoldTables) -> Result<(Rows, u64)> {
     for i in 0..rows.len() {
         let v = rows.sum(i);
         if !Decimal128Type::is_valid_decimal_precision(v, 38) {
-            return Err(DataFusionError::Execution(format!(
+            return Err(super::errors::overflow(format!(
                 "checked_sum overflow: exact result {v} does not fit Decimal128(38, 0)"
             )));
         }
@@ -702,7 +702,13 @@ fn to_batch(
             for i in range.clone() {
                 match super::addresses::decode(key(i)) {
                     Some(a) => b.append_value(a)?,
-                    None => b.append_null(),
+                    None => {
+                        return Err(DataFusionError::Execution(format!(
+                            "{}{:?}",
+                            super::addresses::NOT_AN_ADDRESS,
+                            key(i)
+                        )));
+                    }
                 }
             }
             Arc::new(b.finish())

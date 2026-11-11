@@ -193,7 +193,7 @@ Burrmill session exists.
 
 - [ ] A release cycle of real nest traffic with zero unexplained differences.
 - [ ] p99 within the `/sql` budget (30 s, 2 permits) on every shadowed nest.
-- [ ] Memory within the RFC-0047 envelope with both engines resident, and Burrmill alone under the
+- [ ] Memory within nuthatch's RFC-0047 envelope with both engines resident, and Burrmill alone under the
       nest's `MemoryHigh`.
       **Not met at DuckDB's figure (2026-09-27):** bounded to the same 512 MB, Burrmill refuses 24
       of the replay's statements that DuckDB answers; 10 at 1 GB, 2 at 2 GB. DataFusion's hash join
@@ -297,8 +297,8 @@ an unconditional dependency (`bundled`, `parquet`, `json`), and `graph` adds `vs
       ordered scans, the chain-order window rule, spilling and the view
       rewrites (`ledger-windows.md`) landed; `lodestar_delegator_stakes` still at 1 GB.
       **Decided 2026-09-29 (Chief): raise the figure, no spilling work.** `analytics.memory_limit`
-      about 2 GB for the allocations nest and its MemoryHigh above RFC-0047's shipped 2 GiB split, so
-      an RFC-0047 amendment; the figure from the replay's per-view minimums, set with that nest's roll.
+      about 2 GB for the allocations nest and its MemoryHigh above nuthatch's RFC-0047 shipped 2 GiB split, so
+      an amendment to nuthatch's RFC-0047; the figure from the replay's per-view minimums, set with that nest's roll.
 - [x] **Aggregates over an overflowed `_dec`** (decided 2026-09-29, Chief): refused on Burrmill, as
       its checked rule does, not answered from the values that fit as DuckDB does. A release-note
       item. The four tests that pinned DuckDB's answer are the cutover's to update

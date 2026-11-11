@@ -19,7 +19,7 @@ datafusion = "55"
 duckdb = { version = "=1.10504.0", features = ["bundled"] }
 # duckdb-rs's own Arrow, with `ipc` switched on, so `encode-parity` can move DuckDB's batches into
 # Burrmill's Arrow version unchanged. Pinned to what duckdb-rs resolves; bench-only.
-arrow58 = { package = "arrow", version = "=58.4.0", default-features = false, features = ["ipc"] }
+arrow58 = { package = "arrow", version = "=58.4.1", default-features = false, features = ["ipc"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow = "1"
 tempfile = "3"
@@ -30,7 +30,7 @@ libc = "0.2"
 rayon.workspace = true
 # The same corpus, pointed at the other engine. This is the reason 2.3 uses a standard format
 # instead of a bespoke one.
-sqllogictest = "0.28"
+sqllogictest = "0.29"
 # Experiment A4: parsing a real workload to count the plan shapes it produces.
 sqlparser.workspace = true
 walkdir = "2"
@@ -44,7 +44,7 @@ serde_json = "1"
 
 # nuthatch's allocator, so a profile of the bench charges what production pays.
 [target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
-tikv-jemallocator = "0.6"
+tikv-jemallocator = "0.7"
 
 [features]
 # A counting global allocator: peak live heap beside peak RSS, to tell bytes held from bytes the

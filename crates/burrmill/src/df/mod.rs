@@ -3,7 +3,6 @@
 //! Off unless the `datafusion` feature is enabled. The default `burrmill` graph stays free of it.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
@@ -14,7 +13,6 @@ use datafusion_sql::planner::SqlToRel;
 use sqlparser::ast::Statement as SqlStatement;
 
 use crate::error::{BurrmillError, Result};
-use crate::limits::Limits;
 
 mod addresses;
 mod bound;
@@ -34,6 +32,8 @@ mod nullsub;
 mod onerow;
 mod outerorder;
 pub use depth::check_expr_bounds;
+mod builder;
+pub use builder::EngineBuilder;
 mod buildside;
 mod distinct;
 mod distinctrows;
@@ -74,7 +74,7 @@ mod running;
 #[path = "generated/schema_equivalence.rs"]
 mod schema_equivalence;
 
-use catalog::{NestTable, SegmentTable, apply_schema_json, discover_tables};
+use catalog::{NestTable, SegmentTable};
 use session::MiniSession;
 
 /// What one engine may use, as a host gives DuckDB `max_memory`, `threads` and `temp_directory`.
@@ -169,78 +169,7 @@ pub struct Engine {
     bound_segments: HashMap<(std::path::PathBuf, u64), arrow::datatypes::SchemaRef>,
 }
 
-fn nest_tables(root: &Path) -> Result<Vec<NestTable>> {
-    let mut tables = discover_tables(&root.join("segments"))?;
-    let schema = root.join("schema.json");
-    if schema.is_file() {
-        apply_schema_json(&mut tables, &schema)?;
-    }
-    if tables.is_empty() {
-        return Err(BurrmillError::NoSegments(format!(
-            "no tables under {}",
-            root.display()
-        )));
-    }
-    Ok(tables)
-}
-
 impl Engine {
-    /// Open every table under a `segments/` directory.
-    pub fn open_segments(segments: &Path) -> Result<Self> {
-        let tables = discover_tables(segments)?;
-        if tables.is_empty() {
-            return Err(BurrmillError::NoSegments(format!(
-                "no parquet tables under {}",
-                segments.display()
-            )));
-        }
-        Self::from_tables(tables, Limits::default().max_threads, None, None)
-    }
-
-    /// Open a nest root (`segments/` plus optional `schema.json` for unsealed and `_dec`).
-    pub fn open_nest(root: &Path) -> Result<Self> {
-        Self::from_tables(
-            nest_tables(root)?,
-            Limits::default().max_threads,
-            None,
-            None,
-        )
-    }
-
-    /// As `open_nest`, held to `budget`: the session a host opens, batch size included.
-    pub fn open_nest_budgeted(root: &Path, budget: Budget) -> Result<Self> {
-        Self::from_tables(nest_tables(root)?, budget.threads, Some(budget), None)
-    }
-
-    /// Open a nest held in an object store, `<root>/segments/` plus an optional `<root>/schema.json`:
-    /// a bucket, a mirror over HTTP, or bytes a tab already holds. Footers are read by range.
-    pub async fn open_store(
-        store: Arc<dyn object_store::ObjectStore>,
-        root: &str,
-        threads: usize,
-    ) -> Result<Self> {
-        let sub = |e: object_store::Error| BurrmillError::Substrate(e.to_string());
-        let root = object_store::path::Path::parse(root)
-            .map_err(|e| BurrmillError::Substrate(e.to_string()))?;
-        let mut tables = catalog::discover_store_tables(&store, &root).await?;
-        match object_store::ObjectStoreExt::get(&store, &root.clone().join("schema.json")).await {
-            Ok(got) => {
-                let raw = got.bytes().await.map_err(sub)?;
-                let raw = std::str::from_utf8(&raw)
-                    .map_err(|e| BurrmillError::Substrate(format!("schema.json: {e}")))?;
-                catalog::apply_schema_text(&mut tables, raw)?;
-            }
-            Err(object_store::Error::NotFound { .. }) => {}
-            Err(e) => return Err(sub(e)),
-        }
-        if tables.is_empty() {
-            return Err(BurrmillError::NoSegments(format!("no tables under {root}")));
-        }
-        let engine = Self::from_tables(tables, threads, None, None)?;
-        engine.attach_store(store)?;
-        Ok(engine)
-    }
-
     /// The store that [`Engine::register_store_facts`] reads segments from, and any table opened
     /// by [`Engine::open_store`]. Replaces an earlier one.
     pub fn attach_store(&self, store: Arc<dyn object_store::ObjectStore>) -> Result<()> {
@@ -413,6 +342,8 @@ impl Engine {
         self.session.function_names()
     }
 
+    /// Every registered name, the `__raw`, `__hot` and `__union` parts a statement may not name
+    /// included. [`Engine::visible_tables`] is the listing a host serves.
     pub fn tables(&self) -> Vec<String> {
         self.session.table_names()
     }
@@ -505,19 +436,15 @@ impl Engine {
         if self.cancel.is_cancelled() {
             return Err(BurrmillError::Cancelled);
         }
-        let _pass = self.gate.enter();
+        // The engine's own token, so a cancel also frees a statement queued behind slow ones.
+        let _pass = self
+            .gate
+            .enter_cancellable(&self.cancel)
+            .ok_or(BurrmillError::Cancelled)?;
         let started = std::time::Instant::now();
-        if tokio::runtime::Handle::try_current().is_err() {
-            let r =
-                self.runtime()
-                    .block_on(self.stream(logical, sql, &mut f, metrics.as_deref_mut()));
-            if let Some(m) = metrics {
-                m.exec_nanos += started.elapsed().as_nanos() as u64;
-            }
-            return r;
-        }
-        // A host's runtime drives this thread and tokio will not block it, so the statement runs on
-        // a thread of its own; its batches come back here, and `f` stays on the caller's thread.
+        // The statement runs on a thread of its own, its batches come back here, and `f` stays on
+        // the caller's. A host runtime will not be blocked; and without one, physical planning and
+        // execution ran on the caller's stack, which a 1 MiB thread could not hold in debug (#168).
         let held = metrics.as_deref_mut();
         let r = std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -525,7 +452,12 @@ impl Engine {
                 .name("burrmill-statement".into())
                 .stack_size(PLAN_STACK_BYTES)
                 .spawn_scoped(s, move || {
-                    let mut send = |b| tx.send(b).map_err(|_| BurrmillError::Cancelled);
+                    // Not `Cancelled`: the caller's `f` refused, and what was read still counts.
+                    let mut send = |b| {
+                        tx.send(b).map_err(|_| {
+                            BurrmillError::Substrate("the caller stopped reading".into())
+                        })
+                    };
                     self.runtime()
                         .block_on(self.stream(logical, sql, &mut send, held))
                 })
@@ -596,6 +528,7 @@ impl Engine {
             Err(BurrmillError::Substrate(ref m))
                 if sent == 0
                     && m.contains(addresses::NOT_AN_ADDRESS)
+                    && self.session.address_refused()
                     && self.session.addresses_off() =>
             {
                 log::warn!("{m}: addresses are read as text from now on");
@@ -958,6 +891,12 @@ fn leading_keyword(sql: &str) -> &str {
 /// `__raw`, `__hot` and `__union` are refused when the walk can see them. A statement it cannot
 /// parse is left to the engine parser, which accepts more of DuckDB than the walk does (#10).
 fn refuse_hidden_names(sql: &str) -> Result<()> {
+    if let Some(table) = crate::inspect::hidden_name(sql) {
+        return Err(BurrmillError::NotAllowed(format!(
+            "`{table}` is not a table this surface serves - the SQL surface serves this nest's \
+             tables and views only"
+        )));
+    }
     match crate::inspect::reach(sql) {
         Err(BurrmillError::NotAllowed(why))
             if why.contains("is not a table this surface serves") =>
@@ -1064,7 +1003,9 @@ fn plan_err(e: datafusion_common::DataFusionError) -> BurrmillError {
 
 fn df_err(e: datafusion_common::DataFusionError) -> BurrmillError {
     let s = errors::restate(e.to_string());
-    if s.contains("not yet implemented")
+    if let Some(typed) = errors::typed(&e, &s) {
+        typed
+    } else if s.contains("not yet implemented")
         || (s.contains("table function ") && s.contains("is not supported here"))
     {
         BurrmillError::NotAllowed(s)

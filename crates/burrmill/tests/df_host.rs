@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use burrmill::Engine;
+use burrmill::{BurrmillError, Engine};
 use serde_json::{Value, json};
 
 fn segment(dir: &std::path::Path, n: u64, rows: &[(u64, &str, &str)]) -> (std::path::PathBuf, u64) {
@@ -344,8 +344,9 @@ fn a_bounded_engine_refuses_what_an_unbounded_one_answers() {
     bounded
         .register_facts("t", &declared(), vec![seg], &[], (None, None))
         .unwrap();
-    let err = bounded.sql(sql).unwrap_err().to_string();
-    assert!(err.contains("Resources exhausted"), "{err}");
+    let err = bounded.sql(sql).unwrap_err();
+    assert!(matches!(err, BurrmillError::LimitExceeded(_)), "{err:?}");
+    assert!(err.to_string().contains("Resources exhausted"), "{err}");
     assert_eq!(
         rows(&bounded, "SELECT count(*) AS n FROM t"),
         vec![json!({"n": 200000})]
@@ -961,6 +962,28 @@ fn a_statement_cannot_name_the_hidden_parts_of_a_registration() {
         .register_rows("e__raw", &[json!({"a": "1"})])
         .unwrap();
     assert!(engine.sql("SELECT a FROM e__raw").is_err());
+}
+
+/// #189: another fault ahead of a hidden name used to stop the walk before it reached it.
+#[test]
+fn a_hidden_name_is_refused_whatever_comes_before_it() {
+    let mut engine = Engine::open_empty().unwrap();
+    engine
+        .register_rows("e__raw", &[json!({"a": "1"})])
+        .unwrap();
+    for sql in [
+        r#"WITH "a b" AS (SELECT 1 AS k) SELECT * FROM "a b", e__raw"#,
+        "SELECT * FROM generate_series(1, 2) g, (SELECT * FROM 'x.parquet') p, e__raw",
+        "EXPLAIN SELECT * FROM e__raw",
+        "EXPLAIN ANALYZE SELECT a FROM e__raw",
+    ] {
+        let err = engine.sql(sql).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("`e__raw` is not a table this surface serves"),
+            "{sql}: {err}"
+        );
+    }
 }
 
 /// #13, #24, #33: a statement refused bare is refused the same way under any EXPLAIN, before it plans,

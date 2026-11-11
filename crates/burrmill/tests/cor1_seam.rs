@@ -296,3 +296,138 @@ fn without_a_hot_tip_the_fold_is_unchanged() {
     let db = Burrmill::with_threads(catalog, 2).unwrap();
     assert_eq!(answer(&db), expected(&rows));
 }
+
+/// The hot half folds `+value` to credit and `-value` to debit and nothing else, so under a tip any
+/// other plan is refused rather than answered with hot rows folded to the wrong shape (#148).
+fn refused_under_a_tip_but_answered_without(sql: &str) {
+    let rows = events(30, 6);
+    let (t, u) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    seal_segment(t.path(), "000000", &rows);
+    seal_segment(u.path(), "000000", &rows);
+    let catalog = || {
+        let mut c = Catalog::new();
+        c.register(SealedSegments::discover("t", t.path()).unwrap());
+        c.register(SealedSegments::discover("u", u.path()).unwrap());
+        c
+    };
+    let cold = Burrmill::with_threads(catalog(), 2).unwrap();
+    cold.query(sql, Limits::default())
+        .unwrap_or_else(|e| panic!("the plan should run without a tip: {e}"));
+
+    let tip = Arc::new(MemoryTip::new());
+    tip.seal_through(rows.iter().map(|r| r.block).max().unwrap());
+    tip.append(HotRow {
+        block: 1_000,
+        credit: "0xAB".into(),
+        debit: "0xCD".into(),
+        value: Some("5".into()),
+    });
+    let db = Burrmill::with_threads(catalog(), 2)
+        .unwrap()
+        .with_hot_tip(tip, "block_number");
+    match db.query(sql, Limits::default()) {
+        Err(burrmill::BurrmillError::NotAllowed(m)) => {
+            assert!(m.contains("hot tip"), "{m}")
+        }
+        other => panic!("expected the seam to refuse the plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_lowered_key_is_refused_under_a_hot_tip() {
+    refused_under_a_tip_but_answered_without(
+        "SELECT addr, SUM(d) AS net FROM (\
+           SELECT lower(\"to\") AS addr, TRY_CAST(\"value\" AS HUGEINT) AS d FROM t \
+           UNION ALL \
+           SELECT lower(\"from\") AS addr, -TRY_CAST(\"value\" AS HUGEINT) AS d FROM t\
+         ) GROUP BY addr HAVING SUM(d) <> 0",
+    );
+}
+
+#[test]
+fn a_two_sum_plan_is_refused_under_a_hot_tip() {
+    refused_under_a_tip_but_answered_without(
+        "SELECT addr, SUM(a) AS na, SUM(b) AS nb FROM (\
+           SELECT \"to\" AS addr, TRY_CAST(\"value\" AS HUGEINT) AS a, \
+                  TRY_CAST(\"value\" AS HUGEINT) AS b FROM t \
+           UNION ALL \
+           SELECT \"from\" AS addr, -TRY_CAST(\"value\" AS HUGEINT), \
+                  -TRY_CAST(\"value\" AS HUGEINT) FROM t\
+         ) GROUP BY addr",
+    );
+}
+
+#[test]
+fn a_credit_only_plan_is_refused_under_a_hot_tip() {
+    refused_under_a_tip_but_answered_without(
+        "SELECT addr, SUM(d) AS net FROM (\
+           SELECT \"to\" AS addr, TRY_CAST(\"value\" AS HUGEINT) AS d FROM t \
+           UNION ALL \
+           SELECT \"from\" AS addr, TRY_CAST(\"value\" AS HUGEINT) AS d FROM t\
+         ) GROUP BY addr HAVING SUM(d) <> 0",
+    );
+}
+
+#[test]
+fn branches_on_two_tables_are_refused_under_a_hot_tip() {
+    refused_under_a_tip_but_answered_without(
+        "SELECT addr, SUM(d) AS net FROM (\
+           SELECT \"to\" AS addr, TRY_CAST(\"value\" AS HUGEINT) AS d FROM t \
+           UNION ALL \
+           SELECT \"from\" AS addr, -TRY_CAST(\"value\" AS HUGEINT) AS d FROM u\
+         ) GROUP BY addr HAVING SUM(d) <> 0",
+    );
+}
+
+/// A NULL block read as 0 and a negative one cast to NULL and then 0, so both rows were sealed
+/// whatever their real block (#149).
+#[test]
+fn a_cold_row_without_a_block_is_refused_under_a_hot_tip() {
+    let blocks: [(DataType, Arc<dyn arrow::array::Array>); 2] = [
+        (
+            DataType::UInt64,
+            Arc::new(UInt64Array::from(vec![Some(1), None])),
+        ),
+        (
+            DataType::Int64,
+            Arc::new(arrow::array::Int64Array::from(vec![1, -1])),
+        ),
+    ];
+    for (ty, block) in blocks {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("block_number", ty.clone(), true),
+            Field::new("from", DataType::Utf8, false),
+            Field::new("to", DataType::Utf8, false),
+            Field::new("value", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                block,
+                Arc::new(StringArray::from(vec!["0xaa", "0xaa"])),
+                Arc::new(StringArray::from(vec!["0xbb", "0xbb"])),
+                Arc::new(StringArray::from(vec!["5", "7"])),
+            ],
+        )
+        .unwrap();
+        let f = std::fs::File::create(dir.path().join("t-000000.parquet")).unwrap();
+        let mut w = parquet::arrow::ArrowWriter::try_new(f, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+
+        let tip = Arc::new(MemoryTip::new());
+        tip.seal_through(10);
+        let mut catalog = Catalog::new();
+        catalog.register(SealedSegments::discover("t", dir.path()).unwrap());
+        let db = Burrmill::with_threads(catalog, 2)
+            .unwrap()
+            .with_hot_tip(tip, "block_number");
+        match db.query(SQL, Limits::default()) {
+            Err(burrmill::BurrmillError::Seam(m)) => {
+                assert!(m.contains("block-stamped"), "{ty}: {m}")
+            }
+            other => panic!("{ty}: expected the seam to refuse, got {other:?}"),
+        }
+    }
+}

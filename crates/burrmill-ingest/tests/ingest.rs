@@ -618,6 +618,33 @@ fn a_short_sniff_window_does_not_panic_on_a_bad_tail() {
 }
 
 #[test]
+fn a_sniff_window_that_splits_a_character_is_still_utf8() {
+    let mut s = String::from("who,city\n");
+    while s.len() < 70_000 {
+        s.push_str("Иван,София\n");
+    }
+    assert!(!s.is_char_boundary(64 << 10));
+    let table = go(s.as_bytes());
+    assert_eq!(table.report().dialect.encoding, EncodingKind::Utf8);
+    let rows = table.preview(usize::MAX);
+    assert_eq!(rows.len() as u64, table.report().rows);
+    for row in rows {
+        assert_eq!(row, vec![Some("Иван".into()), Some("София".into())]);
+    }
+}
+
+#[test]
+fn many_short_lines_sniff_in_linear_time() {
+    let mut s = String::from("n\n");
+    while s.len() < 64 << 10 {
+        s.push_str("1\n");
+    }
+    let budget = Budget::untrusted().max_millis(2_000);
+    let table = ingest_bytes(s.as_bytes(), FormatHint::Sniff, &budget).unwrap();
+    assert_eq!(table.report().rows as usize, (s.len() - 2) / 2);
+}
+
+#[test]
 fn issue_storage_stops_at_sixty_four() {
     let mut s = String::from("a,b,c\n");
     for _ in 0..70 {
@@ -856,4 +883,97 @@ fn xorshift(state: &mut u64) -> u64 {
     x ^= x << 17;
     *state = x;
     x
+}
+
+#[test]
+fn each_column_reads_its_own_decimal_mark() {
+    // The notes' digits once outvoted the prices, and 1.234 was stored as 1234.
+    let mixed = text("notes,price\n\"items 1,2,3\",1.234\n\"items 4,5\",2.5\n\"x 1,5\",3.25\n");
+    assert_eq!(mixed.preview(1)[0][1].as_deref(), Some("1.234"));
+
+    let decided = text("a,b\n\"1,5\",1.234\n\"2,5\",2.345\n");
+    assert_eq!(decided.report().dialect.locale, Locale::Comma);
+    assert_eq!(
+        decided.preview(1)[0],
+        vec![Some("1.5".into()), Some("1234".into())]
+    );
+}
+
+#[test]
+fn numbers_that_read_both_ways_stay_text_when_nothing_decides() {
+    let thousands = text("amount\n\"1,234\"\n\"12,500\"\n");
+    assert!(matches!(col_type(&thousands, 0), InferredType::Text));
+    assert!(thousands.report().columns[0].note.is_some());
+    assert_eq!(thousands.preview(1)[0][0].as_deref(), Some("1,234"));
+}
+
+#[test]
+fn an_impossible_date_is_not_a_date() {
+    for cell in ["2023-02-29", "31.04.2024", "29.02.1900", "2024-06-31"] {
+        let t = text(&format!("d\n{cell}\n"));
+        assert!(matches!(col_type(&t, 0), InferredType::Text), "{cell}");
+    }
+    for cell in ["2024-02-29", "29.02.2000", "30.04.2024"] {
+        let t = text(&format!("d\n{cell}\n"));
+        assert!(matches!(col_type(&t, 0), InferredType::Date), "{cell}");
+    }
+}
+
+#[test]
+fn an_offset_is_applied_and_other_suffixes_are_not_times() {
+    // 2024-01-01 is day 19,723; 08:00 UTC.
+    let utc8 = (19_723i64 * 86_400 + 8 * 3_600) * 1_000_000;
+    for (cell, want) in [
+        ("2024-01-01T10:00:00+02:00", utc8),
+        ("2024-01-01T10:00:00+0200", utc8),
+        ("2024-01-01T06:00:00-02", utc8),
+        ("2024-01-01T08:00:00Z", utc8),
+        ("2024-01-01T08:00:00.000Z", utc8),
+    ] {
+        let t = text(&format!("t\n{cell}\n"));
+        assert!(matches!(col_type(&t, 0), InferredType::Timestamp), "{cell}");
+        let col = t.batches()[0]
+            .column(0)
+            .as_primitive::<TimestampMicrosecondType>();
+        assert_eq!(col.value(0), want, "{cell}");
+    }
+    for cell in [
+        "2024-01-01T10:00:00 PST",
+        "2024-01-01T10:00:00+2",
+        "2024-01-01 1é:00:00",
+        "2024-01-01T10:00:00.",
+    ] {
+        let t = text(&format!("t\n{cell}\n"));
+        assert!(matches!(col_type(&t, 0), InferredType::Text), "{cell}");
+    }
+}
+
+#[test]
+fn a_leading_zero_keeps_the_column_as_text() {
+    let t = text("zip,n\n01234,1\n10115,2\n");
+    assert!(matches!(col_type(&t, 0), InferredType::Text));
+    assert!(t.report().columns[0].note.is_some());
+    assert_eq!(t.preview(1)[0][0].as_deref(), Some("01234"));
+    assert!(matches!(col_type(&t, 1), InferredType::Integer));
+
+    let small = text("x\n0\n0.5\n-0.25\n");
+    assert!(matches!(col_type(&small, 0), InferredType::Decimal { .. }));
+}
+
+#[test]
+fn an_empty_field_costs_memory_too() {
+    // About 2 MB of commas is two million fields; it was counted as 2 MB and held near 75.
+    let row = ",".repeat(1023);
+    let text = format!("{row}\n").repeat(2048);
+    let err = ingest_bytes(
+        text.as_bytes(),
+        FormatHint::Csv,
+        &Budget::untrusted().max_memory_bytes(10 << 20),
+    )
+    .unwrap_err();
+    assert_eq!(breach(err).which, "max_memory_bytes");
+
+    let fits = ingest_bytes(text.as_bytes(), FormatHint::Csv, &Budget::untrusted()).unwrap();
+    let fields = 2048 * 1024;
+    assert!(fits.report().budget_used.memory_bytes >= text.len() as u64 + 4 * fields);
 }

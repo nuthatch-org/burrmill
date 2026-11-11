@@ -1,8 +1,6 @@
-import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
 
-const require = createRequire('/Users/pepe/Projects/IRMarket/web/package.json');
-const { chromium } = require('playwright');
+import { chromium } from 'playwright';
 
 const csv = [
   'merchant,email,iban,phone,amount',
@@ -73,6 +71,7 @@ await page.getByText('KEPT_MERCHANT').first().waitFor({ timeout: 120000 });
 await page.locator('#mode').selectOption('pseudonymised');
 await page.locator('#key').fill('sk-ant-test-key');
 await page.locator('#question').fill('Who is each merchant?');
+await page.locator('#confirm').uncheck();
 await page.locator('#ask').click();
 await page.waitForFunction(
   () =>

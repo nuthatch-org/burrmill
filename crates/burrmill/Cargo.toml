@@ -10,6 +10,8 @@ edition = "2024"
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+# Nuthatch pins a git revision; crates.io is off by decision (#169).
+publish = false
 
 # **The default graph stays short.** Arrow and Parquet are rented permanently (RFC-0044 §4.2).
 # DataFusion is the optional host planner (roadmap 6.0, route C): component crates plus an owned
@@ -70,24 +72,24 @@ regex = { version = "1", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
 futures = { version = "0.3", optional = true }
 indexmap = { version = "2", optional = true }
-itertools = { version = "0.14", optional = true }
+itertools = { version = "0.15", optional = true }
 log = { version = "0.4", optional = true }
 object_store = { version = "0.13", default-features = false, optional = true }
 serde_json = { version = "1", optional = true }
 tokio = { version = "1", features = ["sync"], optional = true }
 arrow-schema = { version = "59", default-features = false, optional = true }
 datafusion-catalog = { version = "=55.0.0", default-features = false, optional = true }
-datafusion-common = { version = "=55.0.0", default-features = false, features = ["recursive_protection"], optional = true }
+datafusion-common = { version = "=55.2.0", default-features = false, features = ["recursive_protection"], optional = true }
 datafusion-datasource = { version = "=55.0.0", default-features = false, optional = true }
 datafusion-datasource-parquet = { version = "=55.0.0", default-features = false, optional = true }
 datafusion-execution = { version = "=55.0.0", default-features = false, optional = true }
-datafusion-expr = { version = "=55.0.0", default-features = false, features = ["recursive_protection"], optional = true }
+datafusion-expr = { version = "=55.2.0", default-features = false, features = ["recursive_protection"], optional = true }
 datafusion-functions = { version = "=55.0.0", default-features = false, features = ["datetime_expressions", "encoding_expressions", "math_expressions", "regex_expressions", "string_expressions", "unicode_expressions"], optional = true }
 datafusion-functions-aggregate = { version = "=55.0.0", default-features = false, optional = true }
 datafusion-functions-nested = { version = "=55.0.0", default-features = false, optional = true }
 datafusion-functions-window = { version = "=55.0.0", default-features = false, optional = true }
 datafusion-optimizer = { version = "=55.0.0", default-features = false, features = ["recursive_protection"], optional = true }
-datafusion-physical-expr = { version = "=55.0.0", default-features = false, features = ["recursive_protection"], optional = true }
+datafusion-physical-expr = { version = "=55.2.0", default-features = false, features = ["recursive_protection"], optional = true }
 datafusion-physical-optimizer = { version = "=55.0.0", default-features = false, features = ["recursive_protection"], optional = true }
 datafusion-physical-plan = { version = "=55.0.0", default-features = false, optional = true }
 datafusion-session = { version = "=55.0.0", default-features = false, optional = true }
@@ -124,7 +126,7 @@ rayon.workspace = true
 # The parity corpus in a standard format (roadmap 2.3). A dev-dependency, so it never reaches the
 # shipped graph, and the .slt files stay runnable by any other engine's runner - which is the whole
 # point of not inventing a format.
-sqllogictest = "0.28"
+sqllogictest = "0.29"
 # Arbitrary text through the pre-parse rewrites, which must refuse rather than panic.
 proptest = "1"
 

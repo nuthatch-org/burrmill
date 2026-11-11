@@ -27,4 +27,4 @@ wasm-bindgen = "=0.2.127"
 wasm-bindgen-futures = "=0.4.77"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
-zstd-sys = { version = "=2.0.16", default-features = false, features = ["no_asm"] }
+zstd-sys = { version = "2.1.2", default-features = false, features = ["no_asm"] }

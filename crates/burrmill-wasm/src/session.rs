@@ -163,11 +163,15 @@ impl Session {
         let mut date_obj = serde_json::Map::new();
         for (i, name) in self.names.iter().enumerate() {
             let col = &self.report.columns[i];
-            columns.push(json!({
+            let mut column = json!({
                 "name": name,
                 "type": col.inferred.name(),
                 "nulls": col.nulls,
-            }));
+            });
+            if let Some(note) = col.note {
+                column["note"] = json!(note);
+            }
+            columns.push(column);
             if sign_on.contains(name.as_str())
                 && let Some(label) = sign_label(&self.batches, i)
             {
@@ -204,20 +208,20 @@ impl Session {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn query(&self, sql: &str) -> Result<QueryOut, String> {
+    pub fn query(&self, sql: &str) -> Result<QueryOut, Failure> {
         self.guard(sql)?;
         match self.engine.sql(sql) {
             Ok(batches) => Ok(self.pack(batches)),
-            Err(e) => Err(self.fail(&e.to_string())),
+            Err(e) => Err(self.failure(&e)),
         }
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub async fn query(&self, sql: &str) -> Result<QueryOut, String> {
+    pub async fn query(&self, sql: &str) -> Result<QueryOut, Failure> {
         self.guard(sql)?;
         match self.engine.sql_async(sql).await {
             Ok(batches) => Ok(self.pack(batches)),
-            Err(e) => Err(self.fail(&e.to_string())),
+            Err(e) => Err(self.failure(&e)),
         }
     }
 
@@ -227,8 +231,9 @@ impl Session {
             Ok(measured) => measured,
             Err(reason) => return Ok(skipped(reason)),
         };
-        let dropped = self.query(&measured.dropped)?;
-        Ok(filter_payload(&self.query(&measured.answer)?, &dropped))
+        let dropped = self.query(&measured.dropped).map_err(|f| f.local)?;
+        let answer = self.query(&measured.answer).map_err(|f| f.local)?;
+        Ok(filter_payload(&answer, &dropped))
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -237,11 +242,9 @@ impl Session {
             Ok(measured) => measured,
             Err(reason) => return Ok(skipped(reason)),
         };
-        let dropped = self.query(&measured.dropped).await?;
-        Ok(filter_payload(
-            &self.query(&measured.answer).await?,
-            &dropped,
-        ))
+        let dropped = self.query(&measured.dropped).await.map_err(|f| f.local)?;
+        let answer = self.query(&measured.answer).await.map_err(|f| f.local)?;
+        Ok(filter_payload(&answer, &dropped))
     }
 
     /// Replace the token map. An empty list clears it, so a later schema or
@@ -269,20 +272,28 @@ impl Session {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn pseudonym_feedback(&self, sql: &str) -> Result<String, String> {
         let identifiers = self.identifier_names();
+        // Nothing marked would send every row as it is, under a mode named for tokens.
+        if self.marked.is_empty() {
+            return Ok(pseudonym::omitted(&identifiers, pseudonym::NONE_MARKED));
+        }
         if let Err(reason) = pseudonym::projection_allows(sql, &self.marked) {
             return Ok(pseudonym::omitted(&identifiers, reason));
         }
-        let out = self.query(sql)?;
+        let out = self.query(sql).map_err(|f| f.local)?;
         self.masked(&identifiers, out)
     }
 
     #[cfg(target_arch = "wasm32")]
     pub async fn pseudonym_feedback(&self, sql: &str) -> Result<String, String> {
         let identifiers = self.identifier_names();
+        // Nothing marked would send every row as it is, under a mode named for tokens.
+        if self.marked.is_empty() {
+            return Ok(pseudonym::omitted(&identifiers, pseudonym::NONE_MARKED));
+        }
         if let Err(reason) = pseudonym::projection_allows(sql, &self.marked) {
             return Ok(pseudonym::omitted(&identifiers, reason));
         }
-        let out = self.query(sql).await?;
+        let out = self.query(sql).await.map_err(|f| f.local)?;
         self.masked(&identifiers, out)
     }
 
@@ -319,13 +330,38 @@ impl Session {
         }
     }
 
-    fn guard(&self, sql: &str) -> Result<(), String> {
+    fn guard(&self, sql: &str) -> Result<(), Failure> {
         let allowed = BTreeSet::from([TABLE.to_string()]);
-        burrmill::inspect::reach_uploads(sql, &allowed).map_err(|e| self.fail(&e.to_string()))
+        burrmill::inspect::reach_uploads(sql, &allowed).map_err(|e| {
+            let local = self.fail(&e.to_string());
+            Failure {
+                feedback: feedback_error(&local),
+                local,
+            }
+        })
     }
 
     fn fail(&self, err: &str) -> String {
         redact(err, &self.secrets, &self.names)
+    }
+
+    /// A statement that did not plan read no row, so its message can go. One that failed while
+    /// running can quote a cell however it is redacted, so only its kind goes.
+    fn failure(&self, e: &burrmill::BurrmillError) -> Failure {
+        use burrmill::BurrmillError as E;
+        let local = self.fail(&e.to_string());
+        let feedback = match e {
+            E::Parse(_) | E::Plan(_) | E::NotAllowed(_) | E::NoSegments(_) => {
+                feedback_error(&local)
+            }
+            _ => json!({
+                "error": "the statement planned and then failed while reading rows",
+                "kind": runtime_kind(&e.to_string()),
+                "note": "the message is not sent, since it can quote a cell",
+            })
+            .to_string(),
+        };
+        Failure { local, feedback }
     }
 
     fn pack(&self, batches: Vec<RecordBatch>) -> QueryOut {
@@ -369,6 +405,31 @@ impl Session {
         self.engine
             .register_batch(TABLE, out)
             .map_err(|e| e.to_string())
+    }
+}
+
+/// What a failed query shows here, and what of it may go to the model.
+#[derive(Clone, Debug, Serialize)]
+pub struct Failure {
+    pub local: String,
+    pub feedback: String,
+}
+
+/// A fixed word chosen from the message, so the message itself stays here.
+fn runtime_kind(message: &str) -> &'static str {
+    let m = message.to_ascii_lowercase();
+    if m.contains("overflow") {
+        "overflow"
+    } else if m.contains("divide by zero") || m.contains("division by zero") {
+        "divide_by_zero"
+    } else if m.contains("cast") || m.contains("convert") {
+        "cast_failed"
+    } else if m.contains("cancel") || m.contains("timeout") {
+        "stopped"
+    } else if m.contains("resources exhausted") || m.contains("limit") {
+        "too_big"
+    } else {
+        "failed"
     }
 }
 
@@ -671,6 +732,37 @@ posted,merchant,amount
     }
 
     #[test]
+    fn an_error_while_reading_rows_sends_its_kind_not_its_message() {
+        let s = session();
+        for sql in [
+            "SELECT CAST('''' || lower(merchant) AS INT) FROM t",
+            "SELECT CAST(substr(merchant, 1, 3) AS INT) FROM t",
+            "SELECT CAST(merchant AS INTEGER) FROM t",
+        ] {
+            let failed = s.query(sql).unwrap_err();
+            assert_clean(sql, &failed.feedback);
+            assert!(
+                !failed.feedback.contains("CAN"),
+                "{sql}: {}",
+                failed.feedback
+            );
+            assert!(
+                !failed.feedback.to_lowercase().contains("canary"),
+                "{sql}: {}",
+                failed.feedback
+            );
+            let value: Value = serde_json::from_str(&failed.feedback).unwrap();
+            assert_eq!(value["kind"], "cast_failed", "{sql}: {}", failed.local);
+        }
+        let unplanned = s.query("SELECT nosuch FROM t").unwrap_err();
+        assert!(
+            unplanned.feedback.contains("nosuch"),
+            "{}",
+            unplanned.feedback
+        );
+    }
+
+    #[test]
     fn the_card_has_no_cell_and_a_sign_has_no_magnitude() {
         let s = session();
         let card = s.card(&[], &[]).unwrap();
@@ -714,16 +806,16 @@ posted,merchant,amount
         assert_eq!(via.rows[0][0].as_deref(), Some("-194.50"));
 
         let other = s.query("SELECT * FROM other").unwrap_err();
-        assert_clean("other", &other);
+        assert_clean("other", &other.feedback);
         let shadow = s
             .query("WITH t AS (SELECT * FROM other) SELECT * FROM t")
             .unwrap_err();
-        assert_clean("shadow", &shadow);
+        assert_clean("shadow", &shadow.feedback);
 
         let cast = s
             .query("SELECT CAST(merchant AS INTEGER) FROM t")
             .unwrap_err();
-        assert_clean("cast", &cast);
+        assert_clean("cast", &cast.feedback);
         assert!(s.grammar().starts_with("burrmill subset v1\n"));
         assert_clean("grammar", &s.grammar());
     }
