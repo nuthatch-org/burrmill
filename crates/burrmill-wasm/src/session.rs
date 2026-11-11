@@ -61,7 +61,6 @@ pub struct Session {
     engine: Engine,
     batches: Vec<RecordBatch>,
     names: Vec<String>,
-    secrets: Vec<String>,
     report: IngestReport,
     marked: BTreeSet<String>,
     tokens: TokenMap,
@@ -80,13 +79,11 @@ impl Session {
             .iter()
             .map(|f| f.name().clone())
             .collect();
-        let secrets = secrets_of(&batches);
         let engine = Engine::open_empty_within(MEMORY_BYTES).map_err(|e| e.to_string())?;
         let mut session = Self {
             engine,
             batches,
             names,
-            secrets,
             report,
             marked: BTreeSet::new(),
             tokens: TokenMap::default(),
@@ -333,26 +330,26 @@ impl Session {
     fn guard(&self, sql: &str) -> Result<(), Failure> {
         let allowed = BTreeSet::from([TABLE.to_string()]);
         burrmill::inspect::reach_uploads(sql, &allowed).map_err(|e| {
-            let local = self.fail(&e.to_string());
+            let local = e.to_string();
             Failure {
-                feedback: feedback_error(&local),
+                feedback: feedback_error(&self.redact(&local)),
                 local,
             }
         })
     }
 
-    fn fail(&self, err: &str) -> String {
-        redact(err, &self.secrets, &self.names)
+    fn redact(&self, err: &str) -> String {
+        redact(err, &self.tokens, &self.names)
     }
 
     /// A statement that did not plan read no row, so its message can go. One that failed while
     /// running can quote a cell however it is redacted, so only its kind goes.
     fn failure(&self, e: &burrmill::BurrmillError) -> Failure {
         use burrmill::BurrmillError as E;
-        let local = self.fail(&e.to_string());
+        let local = e.to_string();
         let feedback = match e {
             E::Parse(_) | E::Plan(_) | E::NotAllowed(_) | E::NoSegments(_) => {
-                feedback_error(&local)
+                feedback_error(&self.redact(&local))
             }
             _ => json!({
                 "error": "the statement planned and then failed while reading rows",
@@ -533,22 +530,6 @@ fn rename_batch(batch: &RecordBatch, names: &[String]) -> Result<RecordBatch, St
         .collect();
     RecordBatch::try_new(Arc::new(Schema::new(fields)), batch.columns().to_vec())
         .map_err(|e| e.to_string())
-}
-
-fn secrets_of(batches: &[RecordBatch]) -> Vec<String> {
-    let mut set = BTreeSet::new();
-    for batch in batches {
-        for col in batch.columns() {
-            for r in 0..batch.num_rows() {
-                if let Some(s) = cell_string(col, r)
-                    && s.len() >= 4
-                {
-                    set.insert(s);
-                }
-            }
-        }
-    }
-    set.into_iter().collect()
 }
 
 fn sign_label(batches: &[RecordBatch], idx: usize) -> Option<&'static str> {

@@ -1,7 +1,7 @@
 //! Pseudonymised mode. Marked values leave as `CUSTOMER_N`. The map stays here.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::ControlFlow;
+use std::ops::{ControlFlow, Range};
 
 use arrow::record_batch::RecordBatch;
 use burrmill_ingest::InferredType;
@@ -51,6 +51,16 @@ pub struct Proposal {
 pub struct TokenMap {
     forward: BTreeMap<String, String>,
     back: BTreeMap<String, String>,
+    /// Sorted hashes of the values of four bytes or more, one list per byte length.
+    lengths: Vec<(usize, Vec<u64>)>,
+}
+
+const BASE: u64 = 0x0100_0000_01b3;
+
+fn window_hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0u64, |h, &b| {
+        h.wrapping_mul(BASE).wrapping_add(u64::from(b))
+    })
 }
 
 impl TokenMap {
@@ -65,9 +75,53 @@ impl TokenMap {
     /// A cell that merely contains a tokenised value still carries it.
     /// An exact hit is replaced by the caller and is not withheld here.
     fn hides(&self, text: &str) -> bool {
-        self.forward
-            .keys()
-            .any(|value| value.len() >= 8 && value != text && text.contains(value.as_str()))
+        self.scan(text, 8, |at| at != (0..text.len()))
+    }
+
+    /// Every byte range of `text` that is a value of four bytes or more, overlaps included.
+    pub fn occurrences(&self, text: &str) -> Vec<Range<usize>> {
+        let mut found = Vec::new();
+        self.scan(text, 4, |at| {
+            found.push(at);
+            false
+        });
+        found
+    }
+
+    /// A rolling hash per value length. A hash hit is only a hit once the window is in `forward`.
+    fn scan(&self, text: &str, min: usize, mut stop: impl FnMut(Range<usize>) -> bool) -> bool {
+        let bytes = text.as_bytes();
+        for (len, hashes) in &self.lengths {
+            let len = *len;
+            if len > bytes.len() {
+                break;
+            }
+            if len < min {
+                continue;
+            }
+            let high = BASE.wrapping_pow(len as u32 - 1);
+            let mut h = window_hash(&bytes[..len]);
+            let mut start = 0;
+            loop {
+                if hashes.binary_search(&h).is_ok()
+                    && text
+                        .get(start..start + len)
+                        .is_some_and(|window| self.forward.contains_key(window))
+                    && stop(start..start + len)
+                {
+                    return true;
+                }
+                if start + len == bytes.len() {
+                    break;
+                }
+                h = h
+                    .wrapping_sub(u64::from(bytes[start]).wrapping_mul(high))
+                    .wrapping_mul(BASE)
+                    .wrapping_add(u64::from(bytes[start + len]));
+                start += 1;
+            }
+        }
+        false
     }
 
     fn insert(&mut self, value: String, token: String) {
@@ -120,6 +174,19 @@ pub fn assign(names: &[String], marked: &BTreeSet<String>, batches: &[RecordBatc
             }
         }
     }
+    let mut lengths: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
+    for value in map.forward.keys().filter(|value| value.len() >= 4) {
+        lengths
+            .entry(value.len())
+            .or_default()
+            .push(window_hash(value.as_bytes()));
+    }
+    for hashes in lengths.values_mut() {
+        hashes.sort_unstable();
+        hashes.dedup();
+        hashes.shrink_to_fit();
+    }
+    map.lengths = lengths.into_iter().collect();
     map
 }
 
@@ -594,6 +661,8 @@ fn mentions(expr: &Expr, marked: &BTreeSet<String>) -> bool {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use crate::chart::{Chart, ChartKind};
     use crate::session::Session;
     use burrmill_ingest::{Budget, FormatHint};
@@ -849,6 +918,60 @@ prefix-canary.one@example.com-suffix,canary.one@example.com,1
         assert!(!payload.contains("+359 888 100001"), "{payload}");
         let value: Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["omitted"], UNTOKENISED);
+    }
+
+    fn map_of(column: Vec<String>) -> TokenMap {
+        let array: arrow::array::ArrayRef = Arc::new(arrow::array::StringArray::from(column));
+        let batch = RecordBatch::try_from_iter([("email", array)]).unwrap();
+        let names = vec!["email".to_string()];
+        assign(&names, &BTreeSet::from(["email".to_string()]), &[batch])
+    }
+
+    #[test]
+    fn a_value_inside_a_cell_is_found_as_before() {
+        let map = map_of(vec![
+            "ABCDEFG".into(),
+            "FG@mail.example".into(),
+            "alice@mail.example".into(),
+            "zoë@mail.example".into(),
+        ]);
+        assert!(!map.hides("alice@mail.example"));
+        assert!(map.hides("SHOP_alice@mail.example_x"));
+        assert!(map.hides("alice@mail.example_x"));
+        assert!(map.hides("x_alice@mail.example"));
+        assert!(map.hides("ABCDEFG@mail.example"));
+        assert!(map.hides("née zoë@mail.example"));
+        assert!(!map.hides("xxABCDEFGxx"));
+        assert!(!map.hides("SHOP_ALICE@MAIL.EXAMPLE"));
+        assert!(!map.hides("alice@mail.exampl"));
+        assert!(!map.hides(""));
+    }
+
+    #[test]
+    fn a_large_map_masks_a_full_answer_quickly() {
+        let map = map_of(
+            (0..200_000)
+                .map(|i| format!("person.{i}@mail.example"))
+                .collect(),
+        );
+        let out = QueryOut {
+            columns: vec![crate::session::Column {
+                name: "merchant".into(),
+                type_name: "VARCHAR".into(),
+                numeric: false,
+            }],
+            rows: (0..crate::session::RESULT_ROWS)
+                .map(|i| vec![Some(format!("merchant number {i} of the answer"))])
+                .collect(),
+            truncated: false,
+        };
+        let started = std::time::Instant::now();
+        assert!(mask(&out, &map, false).is_ok());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
