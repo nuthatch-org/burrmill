@@ -156,17 +156,14 @@ fn parquet_zip_and_gzip_are_refused_before_parse() {
 #[test]
 fn broken_quoting_is_one_field_and_a_row_number() {
     let table = go(&corpus("broken-quoting.csv"));
-    assert!(table.report().header);
-    assert_eq!(
-        table.preview(2),
-        vec![vec![Some("Ivan,Sofia".into()), None]]
-    );
+    assert!(!table.report().header);
+    assert_eq!(table.preview(2)[1], vec![Some("Ivan,Sofia".into()), None]);
     assert!(
         table
             .report()
             .rejected
             .iter()
-            .any(|i| i.reason == Issue::UnclosedQuote && i.row == 1)
+            .any(|i| i.reason == Issue::UnclosedQuote && i.row == 2)
     );
     assert!(table.report().rejected.iter().any(|i| {
         i.reason
@@ -174,7 +171,7 @@ fn broken_quoting_is_one_field_and_a_row_number() {
                 expected: 2,
                 got: 1,
             }
-            && i.column.as_deref() == Some("city")
+            && i.column.as_deref() == Some("column_2")
     }));
     assert!(!shown(&table).contains("Ivan"));
 }
@@ -222,7 +219,7 @@ fn a_short_row_is_padded_and_reported_once() {
 #[test]
 fn a_mid_file_bom_is_data_and_a_leading_bom_is_not() {
     let table = go(&corpus("mid-file-bom.csv"));
-    assert_eq!(table.preview(1)[0][1].as_deref(), Some("\u{feff}Sofia"));
+    assert_eq!(table.preview(2)[1][1].as_deref(), Some("\u{feff}Sofia"));
     assert!(!shown(&table).contains("Sofia"));
 
     let table = go(b"\xef\xbb\xbfa,b\n1,2\n");
@@ -246,9 +243,9 @@ fn html_and_a_formula_are_text() {
     assert!(!shown(&html).contains("CANARY_VALUE_991"));
 
     let formula = go(&corpus("formula.csv"));
-    assert_eq!(formula.preview(1)[0][0].as_deref(), Some("rent"));
+    assert_eq!(formula.preview(2)[1][0].as_deref(), Some("rent"));
     assert_eq!(
-        formula.preview(1)[0][1].as_deref(),
+        formula.preview(2)[1][1].as_deref(),
         Some("=cmd|'/C calc'!A0")
     );
     assert!(matches!(col_type(&formula, 1), InferredType::Text));
@@ -337,7 +334,7 @@ fn windows_1251_semicolon_and_windows_1252_cafe() {
 
     let cafe = go(b"name\ncaf\xe9\n");
     assert_eq!(cafe.report().dialect.encoding, EncodingKind::Windows1252);
-    assert_eq!(cafe.preview(1)[0][0].as_deref(), Some("café"));
+    assert_eq!(cafe.preview(2)[1][0].as_deref(), Some("café"));
     assert!(!shown(&cafe).contains("caf"));
 }
 
@@ -379,7 +376,7 @@ fn an_empty_file_and_a_header_only_file() {
 }
 
 #[test]
-fn one_text_row_is_data_and_two_text_rows_are_a_header() {
+fn a_header_is_names_over_a_column_that_is_not_text() {
     let one = text("Ivan,Sofia\n");
     assert!(!one.report().header);
     assert_eq!(
@@ -387,13 +384,39 @@ fn one_text_row_is_data_and_two_text_rows_are_a_header() {
         vec![vec![Some("Ivan".into()), Some("Sofia".into())]]
     );
 
-    let two = text("name,city\nIvan,Sofia\n");
+    // Text over text cannot be told from data, so the first row stays a row.
+    let contacts = text("Ivan,Petrov,Sofia\nMaria,Ivanova,Varna\n");
+    assert!(!contacts.report().header);
+    assert_eq!(contacts.report().rows, 2);
+    let names: Vec<_> = contacts
+        .report()
+        .columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(names, ["column_1", "column_2", "column_3"]);
+    assert_eq!(contacts.preview(1)[0][0].as_deref(), Some("Ivan"));
+    let shown = contacts.report().to_string();
+    assert!(
+        !shown.contains("Ivan") && !shown.contains("Petrov"),
+        "{shown}"
+    );
+
+    let two = text("name,city,age\nIvan,Sofia,31\nMaria,Varna,28\n");
     assert!(two.report().header);
     assert_eq!(two.report().columns[0].name, "name");
     assert_eq!(
         two.preview(1),
-        vec![vec![Some("Ivan".into()), Some("Sofia".into())]]
+        vec![vec![
+            Some("Ivan".into()),
+            Some("Sofia".into()),
+            Some("31".into())
+        ]]
     );
+
+    let dated = text("who,when\nIvan,2024-01-02\n");
+    assert!(dated.report().header);
+    assert_eq!(dated.report().columns[1].name, "when");
 
     let nums = text("1,2\n3,4\n");
     assert!(!nums.report().header);
@@ -474,7 +497,7 @@ fn a_column_keeps_a_type_at_ninety_percent() {
     let table = text(&s);
     assert!(matches!(col_type(&table, 0), InferredType::Text));
     assert!(table.report().rejected.is_empty());
-    assert_eq!(table.preview(10).last().unwrap()[0].as_deref(), Some("y"));
+    assert_eq!(table.preview(11).last().unwrap()[0].as_deref(), Some("y"));
 }
 
 #[test]
@@ -544,8 +567,8 @@ fn blank_lines_go_and_a_row_of_commas_stays() {
         vec![vec![Some("1".into()), Some("2".into())]]
     );
 
-    let kept = text("a,b\n,,\n");
-    assert_eq!(kept.report().rows, 1);
+    let kept = text("a,b,c\n,,\n1,2,3\n");
+    assert_eq!(kept.report().rows, 2);
     assert_eq!(kept.report().columns.len(), 3);
     assert_eq!(kept.preview(1), vec![vec![None, None, None]]);
 }
@@ -596,15 +619,15 @@ fn utf16_bom_roundtrips() {
     let table = go(&le);
     assert_eq!(table.report().dialect.encoding, EncodingKind::Utf16Le);
     assert_eq!(
-        table.preview(1),
-        vec![vec![Some("Ivan".into()), Some("Sofia".into())]]
+        table.preview(2)[1],
+        vec![Some("Ivan".into()), Some("Sofia".into())]
     );
 
     let mut be = vec![0xFE, 0xFF];
     be.extend(text.encode_utf16().flat_map(|u| u.to_be_bytes()));
     let table = go(&be);
     assert_eq!(table.report().dialect.encoding, EncodingKind::Utf16Be);
-    assert_eq!(table.preview(1)[0][1].as_deref(), Some("Sofia"));
+    assert_eq!(table.preview(2)[1][1].as_deref(), Some("Sofia"));
 }
 
 #[test]
@@ -628,7 +651,8 @@ fn a_sniff_window_that_splits_a_character_is_still_utf8() {
     assert_eq!(table.report().dialect.encoding, EncodingKind::Utf8);
     let rows = table.preview(usize::MAX);
     assert_eq!(rows.len() as u64, table.report().rows);
-    for row in rows {
+    assert_eq!(rows[0], vec![Some("who".into()), Some("city".into())]);
+    for row in rows.into_iter().skip(1) {
         assert_eq!(row, vec![Some("Иван".into()), Some("София".into())]);
     }
 }
