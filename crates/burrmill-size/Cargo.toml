@@ -25,6 +25,7 @@ link-wasm = []
 engine = [
     "link-wasm",
     "burrmill/datafusion",
+    "burrmill-ingest/json",
     "burrmill-ingest/parquet",
     "dep:serde_json",
     "dep:zstd-sys",

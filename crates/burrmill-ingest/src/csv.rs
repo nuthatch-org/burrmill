@@ -31,7 +31,7 @@ impl Row {
         (0..self.len()).map(|i| &self[i])
     }
 
-    fn push(&mut self, field: &str) {
+    pub(crate) fn push(&mut self, field: &str) {
         self.text.push_str(field);
         self.ends.push(self.text.len() as u32);
     }

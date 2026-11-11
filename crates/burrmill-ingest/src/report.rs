@@ -78,12 +78,13 @@ pub struct RowIssue {
 pub enum Format {
     Csv,
     Parquet,
+    Json,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestReport {
     pub format: Format,
-    /// How CSV was read. For Parquet, the defaults: nothing here was read from the file.
+    /// How CSV was read. For Parquet and JSON only the encoding, if that, is the file's.
     pub dialect: Dialect,
     pub header: bool,
     pub rows: u64,
@@ -107,6 +108,13 @@ impl std::fmt::Display for IngestReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.format == Format::Parquet {
             writeln!(f, "parquet rows={}", self.rows)?;
+        } else if self.format == Format::Json {
+            writeln!(
+                f,
+                "json encoding={} rows={}",
+                self.dialect.encoding.name(),
+                self.rows
+            )?;
         } else {
             writeln!(
                 f,

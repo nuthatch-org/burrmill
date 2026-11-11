@@ -5,7 +5,7 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 cd "$root"
 
-tree=$(cargo tree -p burrmill-ingest --locked --features parquet --target wasm32-unknown-unknown \
+tree=$(cargo tree -p burrmill-ingest --locked --features json,parquet --target wasm32-unknown-unknown \
     --edges normal,build --prefix none)
 bad=$(printf '%s\n' "$tree" | awk '{print $1}' | sort -u | awk '
     $0 == "js-sys" { next }
