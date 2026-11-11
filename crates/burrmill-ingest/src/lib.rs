@@ -183,10 +183,9 @@ fn cell_string(col: &Arc<dyn Array>, row: usize) -> Option<String> {
         DataType::Boolean => col.as_boolean().value(row).to_string(),
         DataType::Utf8 => col.as_string::<i32>().value(row).to_string(),
         DataType::Date32 => format_date(col.as_primitive::<Date32Type>().value(row)),
-        DataType::Decimal128(_, scale) => format_decimal(
-            col.as_primitive::<Decimal128Type>().value(row),
-            *scale as u8,
-        ),
+        DataType::Decimal128(_, scale) => {
+            format_decimal(col.as_primitive::<Decimal128Type>().value(row), *scale)
+        }
         DataType::Timestamp(TimeUnit::Microsecond, _) => col
             .as_primitive::<TimestampMicrosecondType>()
             .value(row)
@@ -195,10 +194,12 @@ fn cell_string(col: &Arc<dyn Array>, row: usize) -> Option<String> {
     })
 }
 
-fn format_decimal(unscaled: i128, scale: u8) -> String {
+fn format_decimal(unscaled: i128, scale: i8) -> String {
     let neg = unscaled < 0;
     let digits = unscaled.unsigned_abs().to_string();
-    let body = if scale == 0 {
+    let body = if scale < 0 && unscaled != 0 {
+        format!("{digits}{}", "0".repeat(usize::from(scale.unsigned_abs())))
+    } else if scale <= 0 {
         digits
     } else {
         let scale = scale as usize;
@@ -229,4 +230,18 @@ fn civil_from_days(z: i32) -> (i32, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_negative_scale_appends_zeros() {
+        assert_eq!(format_decimal(12, -2), "1200");
+        assert_eq!(format_decimal(-12, -2), "-1200");
+        assert_eq!(format_decimal(0, -2), "0");
+        assert_eq!(format_decimal(12, 0), "12");
+        assert_eq!(format_decimal(-5, 2), "-0.05");
+    }
 }
