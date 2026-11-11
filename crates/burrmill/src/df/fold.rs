@@ -77,10 +77,17 @@ impl FoldTables {
     /// `name` reads `segments` through `provider` from now on, or with `None` is no longer folded.
     pub fn set(&self, name: &str, table: Option<Folded>) {
         let mut tables = self.tables.write().unwrap_or_else(|e| e.into_inner());
-        match table {
-            Some(t) => tables.insert(name.to_string(), t),
-            None => tables.remove(name),
+        let Some((provider, segments)) = table else {
+            tables.remove(name);
+            return;
         };
+        // A host binds a table again for every statement. Sealed files do not change, so the
+        // same list keeps the footers the fold has read from it.
+        let segments = match tables.get(name) {
+            Some((_, held)) if held.files() == segments.files() => held.clone(),
+            _ => segments,
+        };
+        tables.insert(name.to_string(), (provider, segments));
     }
 
     fn segments(&self, name: &str, source: &Arc<dyn TableSource>) -> Option<SealedSegments> {
@@ -781,4 +788,50 @@ fn to_batch(
         )?
     });
     Ok(RecordBatch::try_new(Arc::clone(schema), columns)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow::array::StringArray;
+    use arrow::datatypes::{Field, Schema};
+    use datafusion_catalog::MemTable;
+    use datafusion_catalog::default_table_source::provider_as_source;
+
+    use super::*;
+
+    #[test]
+    fn a_table_bound_again_over_the_same_files_keeps_the_footers_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Utf8, false)]));
+        let file = |name: &str| {
+            let path = dir.path().join(name);
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(StringArray::from(vec!["1"]))],
+            )
+            .unwrap();
+            let f = std::fs::File::create(&path).unwrap();
+            let mut w = parquet::arrow::ArrowWriter::try_new(f, Arc::clone(&schema), None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+            path
+        };
+        let (a, b) = (file("a.parquet"), file("b.parquet"));
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build();
+        let tables = FoldTables::new(Arc::new(pool.unwrap()));
+        // What a scan of the table as bound over `files` folds, with its footers read.
+        let bound = |files: Vec<std::path::PathBuf>| {
+            let table = MemTable::try_new(Arc::clone(&schema), vec![vec![]]).unwrap();
+            let provider: Arc<dyn TableProvider> = Arc::new(table);
+            let segments = SealedSegments::from_files("t", files);
+            tables.set("t", Some((Arc::clone(&provider), segments)));
+            let scanned = tables.segments("t", &provider_as_source(provider));
+            scanned.unwrap().morsels().unwrap()
+        };
+        let first = bound(vec![a.clone()]);
+        assert!(Arc::ptr_eq(&first, &bound(vec![a.clone()])));
+        let grown = bound(vec![a, b]);
+        assert!(!Arc::ptr_eq(&first, &grown));
+        assert_eq!((first.len(), grown.len()), (1, 2));
+    }
 }
