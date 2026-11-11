@@ -10,12 +10,13 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# Slice 1 is CSV only. Parquet arrives with its own slice, and with it the pure-Rust codecs.
 # No default features on Arrow: csv/json/ipc are not this path, and arrow's defaults have
 # dragged ahash onto wasm before (investigation 05).
 [dependencies]
 arrow = { workspace = true }
 bytes = "1"
+# The engine's own Parquet, Snappy only. Optional, so the CSV-only reader stays small.
+parquet = { workspace = true, optional = true }
 
 # Feature unification only. Not called. See `lib.rs`.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -26,6 +27,8 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 # Links the reader into a .wasm so the gzip size is of the code a tab would download.
 # Off by default: native `cargo test` does not build the bin.
 link-wasm = []
+# Opens Parquet (#147). The tab and the size probe turn it on.
+parquet = ["dep:parquet"]
 
 [[bin]]
 name = "ingest-wasm"
@@ -34,3 +37,9 @@ required-features = ["link-wasm"]
 
 [dev-dependencies]
 arrow = { workspace = true }
+# The fixtures' writer; lz4 only to write a codec the reader refuses.
+parquet = { workspace = true, features = ["lz4"] }
+
+[[test]]
+name = "parquet"
+required-features = ["parquet"]

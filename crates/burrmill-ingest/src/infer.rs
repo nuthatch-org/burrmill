@@ -39,6 +39,7 @@ pub fn build(
     let names = column_names(header.then(|| parsed.rows.first()).flatten(), width);
 
     let mut report = IngestReport {
+        format: crate::report::Format::Csv,
         dialect,
         header,
         rows: data.len() as u64,
@@ -182,9 +183,13 @@ fn is_name(cell: &str, locale: Locale) -> bool {
 }
 
 fn column_names(header: Option<&Row>, width: usize) -> Vec<String> {
-    let mut names = Vec::with_capacity(width);
-    for i in 0..width {
-        let raw = header.and_then(|h| h.get(i)).unwrap_or("");
+    unique_names((0..width).map(|i| header.and_then(|h| h.get(i)).unwrap_or("")))
+}
+
+/// `column_N` for a blank name, and `name_2`, `name_3` for a repeat.
+pub(crate) fn unique_names<'a>(raw: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for (i, raw) in raw.enumerate() {
         let mut name = if raw.is_empty() {
             format!("column_{}", i + 1)
         } else {

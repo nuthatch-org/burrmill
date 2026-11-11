@@ -98,7 +98,9 @@ jobs:
       - name: test and clippy
         run: |
           cargo clippy --locked -p burrmill-ingest --all-targets -- -D warnings
+          cargo clippy --locked -p burrmill-ingest --all-targets --features parquet -- -D warnings
           cargo test --locked -p burrmill-ingest
+          cargo test --locked -p burrmill-ingest --features parquet
       - name: wasm graph and gzip size
         run: docs/bench/ingest-wasm.sh
 
