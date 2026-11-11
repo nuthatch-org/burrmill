@@ -4,6 +4,57 @@ Newest first. One entry per RFC-0044 slice.
 
 ---
 
+## Catch-up, 2026-10-02 to 2026-11-11
+
+Written on 2026-11-11 from the merged PRs; each figure is the PR's own, and the PR has its method.
+Nothing here was re-measured for this entry.
+
+**The browser tab and ingest, 2026-10-16 to 11-11.** The engine runs on `wasm32-unknown-unknown`:
+tokio native-only, an async query path driven by the caller's event loop, an engine opened from an
+object store, partitions coalesced in turn rather than spawned (#106, #109, #111). The Lodestar
+nest's 23 views answer in a tab identically to native; over the 22 DuckDB-Wasm also answered, 43.6 s
+cold against its 158.8. `burrmill-ingest` turns an untrusted CSV into Arrow under counted budgets,
+and `burrmill-wasm` with `demo/` asks a model about a dropped file in schema, aggregates,
+pseudonymised or local-only mode (#128): reader 128 KB gzipped, reader plus engine 7.4 MB against
+the 8 MiB gate, which CI now enforces at 7,473,082 bytes (#192). Ingest then stopped changing
+values silently (#195), counted empty fields, rows and built columns against its budget (#196), and
+sniffed a split character and delimiters linearly (#208). The cold audit of 2026-11-10 filed #129 to
+#190; four p0s are privacy-mode leaks on the page (#129, #130, #131, #133), open.
+
+**Memory, 2026-10-03 to 10-31.** Every holding operator is budgeted over string views (#45); a
+window over its whole input charges the pool (#49); a cross join's collected side is charged for its
+rows (#54); scans charge their per-segment bookkeeping (#87); `SharedPool` lets engines share one
+bound (#65); a shared subquery too big to hold runs fresh per reader (#113). Computed values are
+bounded at 16 MiB each and large ones charged to the pool (#122, `Engine::set_value_limit`).
+
+**Speed, 2026-10-04 to 11-05.** `RangeBounds` bounds a join's probe scan by the build side's
+extremes: the QoS kittiwake one-day statements 7 to 11 s to 1.1 to 1.6 s, 47 of 5.32K row groups
+read (#68, nuthatch#1800). The budgeted batch went from 128 rows to 2,048: `lodestar_indexer_ledger`
+2.7 to 1.43 s, `lodestar_indexers` 3.4 to 1.95 s at 512 MB and two threads (#112). Top-k and join
+dynamic filters reach the scan (#61, #73, #80). Sharing planned once and `NarrowJoins` for BetSwirl's
+`bets` pages, about 3.0 to 2.0 s (#93, #94). The footer cache is read at last (#101), repeated
+windows computed once (#103), running max and min in one pass (#107), addresses kept as fixed binary
+to the answer (#116 to #118, #205). Wide nests read footer schemas once per process: ENS
+`information_schema.tables` 5.6 to 7.0 s each to 1.32 to 1.42 s after the first, 856 to 456 MB
+(#127).
+
+**Answers, 2026-10-02 to 11-11.** Exact `SUM` and `AVG` over `DOUBLE`, correctly rounded whatever
+the partitioning (#77, nuthatch#1849), then made cheaper (#84, #85). DuckDB's `//` over `DECIMAL`,
+`ORDER BY` alias expressions, `%` by zero, `string_agg` order, `LIKE` escapes and decimal spellings
+(#37, #39, #71); `TRY_CAST` to `HUGEINT` past 38 digits refuses the value (#59, #72); a view's
+`ORDER BY` orders the answer when nothing above reorders (#95).
+
+**Safety and the host surface.** A statement deep enough to abort the planner refuses (#25); the
+hidden parts of a registration are refused whatever comes before (#29, #204); `EXPLAIN` is checked
+as the statement it wraps (#32); `levenshtein` refuses past a bounded amount of work (#198); every
+statement runs on its own 8 MiB thread (#123, #207). Metered statements report what they selected,
+read, held and spent in scan CPU (#120, #121). CI from #35, with cargo deny, read-only jobs and a
+pinned toolchain (#206).
+
+**Designs.** RFC-0046, partial state over sealed segments, nothing built (#104).
+
+---
+
 ## Where the 195 MB is, and what three profile changes do to it — 2026-10-02
 
 The measurements behind [RFC-0045](rfc/RFC-0045-one-engine-smaller.md). Published artifacts by
@@ -444,7 +495,7 @@ Suite 17/17, `dialect-parity` 241/241.
 ## Two decisions, and the checked rule refusing only what did not fit — 2026-09-29
 
 Chief decided both open questions. **Allocations memory:** raise the figure (about 2 GB of
-`analytics.memory_limit`, the nest's MemoryHigh above RFC-0047's 2 GiB split), no spilling work.
+`analytics.memory_limit`, the nest's MemoryHigh above nuthatch's RFC-0047 2 GiB split), no spilling work.
 **Aggregates over an overflowed `_dec`:** refuse, as Burrmill does, rather than answer from the
 values that fit, as DuckDB does.
 
@@ -713,7 +764,7 @@ nests, which is what a live shadow is for.
 
 - A decision on the ledger family: the DataFusion path holds every sort and join build of the plan
   at once and recomputes the whole history per request; DuckDB streams it under 512 MB.
-- A decision on the budget: a larger Burrmill figure per permit means amending RFC-0047's 2 GiB
+- A decision on the budget: a larger Burrmill figure per permit means amending nuthatch's RFC-0047 2 GiB
   split; or engine work on the non-spilling operators.
 - The hang, with symbols.
 

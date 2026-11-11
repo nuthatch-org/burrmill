@@ -20,9 +20,20 @@ The measurements behind every number here are in [docs/progress-log.md](docs/pro
 newest first, with transcripts under [docs/bench/](docs/bench/). nuthatch pins a revision of this
 repo in its `Cargo.toml`, so a change here reaches a nest only when that pin moves.
 
+Since then, to 2026-11-11: day pruning through a join's range condition (#68), exact `SUM` and `AVG`
+over `DOUBLE` (#77), the budgeted batch at 2,048 rows rather than 128 (#112), a bound on computed
+values (#122), the engine in a browser tab (#106), untrusted CSV ingest and the demo page (#128), and
+CI with a supply-chain check (#35, #206). RFC-0046, partial state over sealed history, is a design
+with nothing built. The progress log has each with its figures.
+
 ## What it is
 
-Two layers, one crate.
+Five crates. `burrmill` is the engine and is what nuthatch embeds; `burrmill-ingest` turns an
+untrusted CSV into Arrow under counted budgets, with no engine dependency; `burrmill-wasm` puts ingest
+and the engine in a browser tab for the `demo/` page; `burrmill-size` links them for the wasm size
+probes; `burrmill-bench` holds the oracles and harnesses. `fuzz/` fuzzes ingest's CSV reader.
+
+The `burrmill` crate has two layers.
 
 **The engine** (`burrmill::Engine`, feature `datafusion`) is DataFusion 55 as the host planner and
 executor, with Burrmill owning the parts DataFusion gets wrong for an indexer:
@@ -85,10 +96,13 @@ Through nuthatch's `/sql` on the allocations nest's real dashboard statements (`
 on a copy, 2026-10-01), Burrmill at two sessions of 2 GB and eight threads served 11, 26 and 28 qps at
 1, 4 and 8 clients where DuckDB at four sessions of 256 MB served 29, 112 and 123: **about 2.5x
 DuckDB's time a statement**, p99 about 620 ms against 128 to 184. On the QoS nest, Lodestar's eight
-one-day statements take 3.2 to 4.1 s against DuckDB's 0.6 to 0.7, because a date range that arrives
-through a join filter is not pushed to the scan and Burrmill reads every segment where DuckDB read
-the day's. Byte-identical throughout, and the engine's memory limit holds; it is the speed that
-nuthatch's README now quotes, and the swap was not made for speed.
+one-day statements took 3.2 to 4.1 s against DuckDB's 0.6 to 0.7, because a date range arriving
+through a join was not pushed to the scan and Burrmill read every segment where DuckDB read the
+day's. `RangeBounds` (#68, 2026-10-04) now bounds the probe scan by the join's build-side extremes,
+and on a QoS copy the kittiwake one-day statements went from 7 to 11 s to 1.1 to 1.6 s, 47 of 5.32K
+row groups read. Lodestar's eight and the allocations figures have not been re-measured since #68 or
+the 2,048-row batch (#112). Byte-identical throughout, and the engine's memory limit holds; it is the
+speed that nuthatch's README now quotes, and the swap was not made for speed.
 
 **Exact.** Integer overflow returns an error, never a wrapped number, on both layers. The owned fold
 refuses when an intermediate partial sum leaves `i128`; the engine's `CheckedArithmetic` makes the
@@ -136,9 +150,9 @@ The confidence comes from running both engines on the same statements, not from 
 Said plainly, because a README that implies otherwise is the thing this project is against.
 
 - **The binary is bigger and the build is not faster.** On a nuthatch-shaped consumer, same machine,
-  32 jobs (`probes/footprint6/results/burrmill.txt`): querying test binary 495 MB against DuckDB's
-  162, release binary 112 MB against 41, `target/` 4.76 GB against 3.27, clean test build 84 s
-  against 77, incremental 1.8 s against 1.1. DuckDB is one C++ archive compiled once; DataFusion is
+  32 jobs (`docs/research/replacing-duckdb/probes/footprint6/results/burrmill.txt`): querying test
+  binary 495 MB against DuckDB's 162, release binary 112 MB against 41, `target/` 4.76 GB against
+  3.27, clean test build 84 s against 77, incremental 1.8 s against 1.1. DuckDB is one C++ archive compiled once; DataFusion is
   dozens of crates whose generic operators are instantiated per type into every test binary. The
   footprint is accepted; the build time is [burrmill#7](https://github.com/nuthatch-org/burrmill/issues/7).
 - **Small queries.** An eight-row view runs eighteen DataFusion operators. `lodestar_disputes` is
@@ -154,10 +168,12 @@ Said plainly, because a README that implies otherwise is the thing this project 
   answers by dropping what did not fit. The fuzzer counts these separately and they are allowed.
 - **What Burrmill computes and DuckDB refuses**: `TIMESTAMPTZ + INTERVAL` and a `TIMESTAMPTZ` to
   `DATE` cast, which nuthatch's DuckDB, built without ICU, will not do.
-- **Slower per statement in production**, as the figures above say: about 2.5x DuckDB's time
+- **Slower per statement in production**, as measured on 2026-10-01 and 02: about 2.5x DuckDB's time
   through `/sql` on the allocations nest, and 4.5 s against 0.7 for the QoS nest's eight one-day
-  statements, because a day range arriving through a one-row join side is not pushed into the scan.
-  Day pruning through a join side is the first thing owed.
+  statements. The QoS cause, a day range through a join side not reaching the scan, is fixed by
+  `RangeBounds` (#68) for a collect-left join that drops unmatched probe rows; a partitioned join,
+  an outer probe side or a float comparison still reads every segment. Both figures are owed a
+  re-measurement on the current tree.
 - **More memory per session.** The allocations nest's dashboard refuses 12 or 13 of its statements
   at 1 GB and 18 at 768 MB, so nuthatch runs it at two sessions of 2 GB and eight threads where
   DuckDB had four of 256 MB. The engine's limit holds; what glibc then kept of a whole-day statement's
@@ -192,6 +208,12 @@ Said plainly, because a README that implies otherwise is the thing this project 
                              object_store. No DuckDB. No C++. `src/df/` holds the engine and its
                              rules, one file each.
     crates/burrmill/examples hosted_fold: the memory gate in a Burrmill-only binary.
+    crates/burrmill-ingest   untrusted CSV to Arrow under counted budgets. No engine, no C, builds
+                             for wasm32.
+    crates/burrmill-wasm     the browser tab's package: ingest, the engine, and the checks on what
+                             a model is sent and answers, in schema, aggregates and pseudonymised
+                             modes. The page does the HTTP.
+    crates/burrmill-size     the wasm size probes' binaries (docs/bench/*-wasm.txt).
     crates/burrmill-bench    publish = false. Both oracles (DuckDB, the umbrella DataFusion) live
                              here, so neither can reach the shipped graph. Note it lends the crate
                              DataFusion features by unification; test a consumer on burrmill alone.
@@ -199,6 +221,10 @@ Said plainly, because a README that implies otherwise is the thing this project 
     docs/research/replacing-duckdb  the investigations, plan.md, and migration.md with the tick lists
     docs/upstream            bugs found in DuckDB, DataFusion and nuthatch, drafted for filing
     docs/bench               transcripts the numbers above are quoted from
+    docs/rfc                 RFC-0044 to RFC-0046
+    demo/                    the browser page over burrmill-wasm, offline once loaded
+    fuzz/                    cargo-fuzz targets for burrmill-ingest, in their own workspace
+    corpus/                  ingest's CSV corpus
 
 ## Running Gate 1
 
