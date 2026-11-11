@@ -6,10 +6,35 @@ crates.io.
 
 ## 0.0.1 - 2026-11-11
 
-The first tag, on main as it stands. What the pull requests since #95 changed:
+The first tag, on main as it stands. What the pull requests since #95 changed, #277 the last:
 
 Engine (`burrmill`, feature `datafusion`)
 
+- A batch over 4 MiB is handed to the caller alone, so nothing is built behind it (#273).
+- A spill past its disk cap is `LimitExceeded` (#272).
+- A statement reads at most 128 relations (#271).
+- Rules over shared definitions move the plans they walk (#274).
+- Local segments' footers are cached once for the process (#267), a table bound again to the same
+  files reuses its file list (#268), and a scan holds pool memory for the segments it has
+  opened (#269). RFC-0047 says what a process keeps (#270).
+- A statement still planning stops when cancelled; SQL is capped at 1 MiB and error text at
+  4 KiB (#252).
+- Cancelling one statement stops that statement, and a statement can have a deadline (#239).
+- An overflow or a budget refusal is its own error, `Overflow` or `LimitExceeded`, and
+  `BurrmillError` is non-exhaustive (#230).
+- `Engine::builder()` opens an engine from any source, budget and shared pool (#222).
+- A statement can take `$n` placeholders (#233).
+- A host can refuse EXPLAIN, which names segment paths (#246).
+- A cast to TIMESTAMP is microseconds (#250).
+- `list_sum`, `list_min` and `list_max` answer as DuckDB's (#248).
+- A refused DuckDB form names what to write instead, and `docs/sql.md` lists what is
+  admitted (#232).
+- An address decodes only from lower-case hex (#219), and `register_facts` says what declaring
+  one promises (#259).
+- A hot tip folds only the credit and debit shape, and a cold row without a block is
+  refused (#216).
+- A shared subquery's readers hold a bounded number of its rows (#228).
+- DataFusion 55.2 (#249); hashbrown 0.17 (#231).
 - A statement always runs on its own thread, and one its caller stops still reports what it read (#207).
 - Only a decode the rewrite placed can turn addresses off (#205).
 - A hidden registration name is refused whatever comes before it (#204).
@@ -39,6 +64,18 @@ Engine (`burrmill`, feature `datafusion`)
 
 Ingest and the tab (`burrmill-ingest`, `burrmill-wasm`, `demo/`)
 
+- Ingest opens Parquet (#257) and JSON (#262) under the same budgets as CSV. A Parquet page
+  claiming more than the budget (#261) and a list or map column (#266) are refused first.
+- A first row is taken as names only when the rows under it are not all text (#238).
+- A decimal with a negative scale prints with its zeros appended (#234).
+- Aggregates mode returns the statement's own groups and still counts every small one (#221).
+- Pseudonymised mode finds a tokenised value by rolling hash (#218) and deals token numbers at
+  random (#256).
+- In schema mode only a statement that does not plan goes back to the model (#240).
+- The demo page passes an axe run (#241), fits a 360 px screen, exports CSV and runs edited
+  SQL (#255), and requires Trusted Types, caches only its shell and budgets aggregate
+  asks (#260).
+- The tab is described in `docs/browser.md` (#235).
 - Untrusted CSV becomes Arrow in a browser tab, and the demo page asks a model about it in four
   privacy modes (#128).
 - Values are no longer changed silently: decimal marks per column, real dates, offsets, leading
@@ -49,6 +86,13 @@ Ingest and the tab (`burrmill-ingest`, `burrmill-wasm`, `demo/`)
 
 Build and CI
 
+- A nightly job fuzzes each target for ten minutes, SQL among them (#251, #258, #263, #264).
+- CI runs every demo browser test against the built engine (#242, #277) and keeps the wasm32
+  build free of warnings (#265).
+- Every crate sets `publish = false` (#229). Dependabot leaves what moves with DataFusion, and
+  the DuckDB oracle, alone (#217, #237, #247).
+- The README's QoS and allocations figures are re-measured (#276), and the docs describe the
+  tree as it stands (#220).
 - Arrow 59.3.2; zstd and tokio move past their advisories (#202).
 - CI checks dependencies with cargo deny, runs read-only, and pins the toolchain (#206).
 - CI tests `burrmill-wasm` and gates the tab's engine at 8 MiB gzipped (#192).
