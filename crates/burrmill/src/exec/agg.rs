@@ -612,7 +612,7 @@ impl Scatter {
 ///
 /// Here a key exists in exactly one table no matter how many threads touched it, so the aggregate's
 /// size is a property of the data and not of the machine. What replaces the duplication is a lock
-/// per partition, amortised by [`Scatter`] over [`FLUSH_ROWS`] rows, and the merge phase disappears
+/// per partition, amortised by [`Scatter`] over `FLUSH_ROWS` rows, and the merge phase disappears
 /// entirely: there is nothing left to merge, because the workers were writing into the answer all
 /// along.
 pub struct SharedAgg {

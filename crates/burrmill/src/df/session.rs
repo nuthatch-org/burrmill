@@ -214,8 +214,14 @@ impl MiniSession {
             let f = match f.name() {
                 "array_prepend" => super::lists::ElementAndList::udf(f, true),
                 "array_append" => super::lists::ElementAndList::udf(f, false),
+                "array_sum" => super::lists::ListSum::udf(f),
+                "array_min" | "array_max" => super::lists::ListExtreme::udf(f),
                 _ => f,
             };
+            // DataFusion names `array_max` `list_max` too, and `array_min` only so.
+            if f.name() == "array_min" {
+                scalar.insert("list_min".into(), Arc::clone(&f));
+            }
             for a in f.aliases() {
                 scalar.insert(a.clone(), Arc::clone(&f));
             }
