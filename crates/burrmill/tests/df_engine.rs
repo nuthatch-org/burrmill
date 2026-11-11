@@ -335,6 +335,42 @@ fn a_statement_keeps_its_footers_for_the_next() {
     );
 }
 
+/// A plan names the segment files, so a host serving untrusted SQL can refuse `EXPLAIN` however
+/// it is written, and every other statement still answers.
+#[test]
+fn explain_is_refused_when_the_host_says_so() {
+    let (tmp, engine) = nest_with_transfer();
+    let plan: String = engine
+        .sql("EXPLAIN SELECT * FROM token__transfer")
+        .unwrap()
+        .iter()
+        .map(|b| {
+            arrow::util::pretty::pretty_format_batches(std::slice::from_ref(b))
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    let dir = tmp.path().file_name().unwrap().to_str().unwrap();
+    assert!(plan.contains(dir), "{plan}");
+
+    engine.set_explain(false);
+    for sql in [
+        "EXPLAIN SELECT * FROM token__transfer",
+        "explain verbose SELECT * FROM token__transfer",
+        "EXPLAIN ANALYZE SELECT count(*) FROM token__transfer",
+        "/* x */ EXPLAIN SELECT 1",
+    ] {
+        match engine.sql(sql) {
+            Err(BurrmillError::NotAllowed(m)) => assert!(m.contains("EXPLAIN"), "{sql}: {m}"),
+            other => panic!("{sql}: {:?}", other.map(|_| ())),
+        }
+    }
+    assert_eq!(
+        engine.sql("SELECT count(*) FROM token__transfer").unwrap()[0].num_rows(),
+        1
+    );
+}
+
 /// A statement past the length limit is refused before it is parsed, and an error quoting an
 /// input quotes a few KiB of it.
 #[test]
