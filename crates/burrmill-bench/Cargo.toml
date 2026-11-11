@@ -36,7 +36,7 @@ sqlparser.workspace = true
 walkdir = "2"
 # `df-views`: a custom DataFusion table provider over an explicit segment list, and the nest's
 # schema.json for the tables it declares but has not sealed.
-object_store = "0.13"
+object_store = "0.14"
 futures = "0.3"
 async-trait = "0.1"
 bytes = "1"

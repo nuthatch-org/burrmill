@@ -72,7 +72,7 @@ futures = { version = "0.3", optional = true }
 indexmap = { version = "2", optional = true }
 itertools = { version = "0.14", optional = true }
 log = { version = "0.4", optional = true }
-object_store = { version = "0.13", default-features = false, optional = true }
+object_store = { version = "0.14", default-features = false, optional = true }
 serde_json = { version = "1", optional = true }
 tokio = { version = "1", features = ["sync"], optional = true }
 arrow-schema = { version = "59", default-features = false, optional = true }
@@ -114,7 +114,7 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 [dev-dependencies]
 tempfile = "3"
 # The store a tab reads from, run natively (`tests/df_store.rs`).
-object_store = { version = "0.13", default-features = false }
+object_store = { version = "0.14", default-features = false }
 futures = "0.3"
 # Already normal dependencies; repeated here because an integration test links the crate and not its
 # graph. The generated-fold tests write their own segments and vary the thread count on purpose.
