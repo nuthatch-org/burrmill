@@ -531,6 +531,70 @@ fn duckdb_answers_still_refused_say_so_by_name() {
     }
 }
 
+/// #173: a refusal with a supported equivalent names it, and the equivalent answers.
+#[test]
+fn refusals_name_what_to_write_instead() {
+    let engine = Engine::open_empty().unwrap();
+    for (refused, hint, instead, want) in [
+        (
+            "SELECT approx_count_distinct(x) a FROM range(100) t(x)",
+            "COUNT(DISTINCT ...)",
+            "SELECT COUNT(DISTINCT x) a FROM range(100) t(x)",
+            serde_json::json!({"a": 100}),
+        ),
+        (
+            "SELECT list_aggregate([1, 2, 3], 'sum') a",
+            "sum(v) FROM (SELECT unnest(...) AS v)",
+            "SELECT (SELECT sum(v) FROM (SELECT unnest([1, 2, 3]) AS v)) a",
+            serde_json::json!({"a": "6"}),
+        ),
+        (
+            "SELECT array_aggregate([1, 2, 3], 'max') a",
+            "(SELECT sum(v) FROM (SELECT unnest(...) AS v))",
+            "SELECT (SELECT max(v) FROM (SELECT unnest([1, 2, 3]) AS v)) a",
+            serde_json::json!({"a": 3}),
+        ),
+        (
+            "SELECT COLUMNS('a') FROM (SELECT 1 AS a, 2 AS b) t",
+            "* EXCLUDE (...)",
+            "SELECT * EXCLUDE (b) FROM (SELECT 1 AS a, 2 AS b) t",
+            serde_json::json!({"a": 1}),
+        ),
+        (
+            "SELECT 'abc' GLOB 'a?c*' a",
+            "LIKE is, with % for * and _ for ?",
+            "SELECT 'abc' LIKE 'a_c%' a",
+            serde_json::json!({"a": true}),
+        ),
+        (
+            "PIVOT (SELECT 1 AS a, 'x' AS k) ON k USING sum(a)",
+            "FILTER (WHERE ...) or CASE, under GROUP BY",
+            "SELECT sum(a) FILTER (WHERE k = 'x') AS x FROM (SELECT 1 AS a, 'x' AS k) t",
+            serde_json::json!({"x": "1"}),
+        ),
+        (
+            "UNPIVOT (SELECT 1 AS a) ON a INTO NAME k VALUE v",
+            "UNION ALL",
+            "SELECT 'a' AS k, a AS v FROM (SELECT 1 AS a) t",
+            serde_json::json!({"k": "a", "v": 1}),
+        ),
+        (
+            "SELECT s LIKE p ESCAPE '$' AS m FROM (VALUES ('a%', 'a$%')) t(s, p)",
+            r"ESCAPE '\' is",
+            r"SELECT s LIKE p ESCAPE '\' AS m FROM (VALUES ('a%', 'a\%')) t(s, p)",
+            serde_json::json!({"m": true}),
+        ),
+    ] {
+        let e = engine.sql(refused).expect_err(refused).to_string();
+        let first = e.lines().next().unwrap_or_default();
+        assert!(
+            first.contains("is not supported here") && first.contains(hint),
+            "{refused}: {e}"
+        );
+        assert_eq!(one_row(&engine, instead), vec![want], "{instead}");
+    }
+}
+
 /// What a statement builds is bounded per value (`df_valuebound` measures the heap), and nothing
 /// under the bound answers differently for it: `||` keeps DataFusion's NULL and its column name, a
 /// literal repeated per row keeps its name, a long constant left unfolded still answers, and the
