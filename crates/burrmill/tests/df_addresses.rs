@@ -541,3 +541,20 @@ fn a_pushed_filter_compares_the_text_and_a_window_over_it_plans() {
         vec![json!(7)]
     );
 }
+
+/// #188: only a value in an address column turns the lever off, not a message that says so.
+#[test]
+fn a_caller_cannot_turn_the_lever_off() {
+    let (_tmp, e) = engine();
+    for sql in [
+        "SELECT address_bytes('zz') AS b",
+        "SELECT error('not an address: \"zz\"') AS b",
+    ] {
+        assert!(e.sql(sql).is_err(), "{sql}");
+    }
+    let plan = rows(&e, "EXPLAIN SELECT who FROM t")
+        .iter()
+        .map(|r| r.to_string())
+        .collect::<String>();
+    assert!(plan.contains("address_bytes"), "{plan}");
+}
