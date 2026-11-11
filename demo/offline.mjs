@@ -1,8 +1,6 @@
-import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
 
-const require = createRequire('/Users/pepe/Projects/IRMarket/web/package.json');
-const { chromium } = require('playwright');
+import { chromium } from 'playwright';
 
 const csv = ['posted,merchant,amount', '2024-01-02,CANARY_MERCHANT_AAA,-100.00', ''].join('\n');
 
@@ -149,6 +147,7 @@ if ((await page.locator('#chart svg').count()) !== 1) bad('chart did not draw');
 
 await page.locator('#key').fill('sk-ant-test-key');
 await page.getByRole('button', { name: 'Largest single debit' }).click();
+await page.locator('#confirm').uncheck();
 await page.locator('#ask').click();
 await page.waitForFunction(() => {
   const text = document.getElementById('status').textContent || '';

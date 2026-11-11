@@ -5,3 +5,4 @@ Cargo.lock.bak
 /scratchpad
 # wasm-bindgen output for the schema-mode page
 /demo/pkg
+/demo/node_modules
