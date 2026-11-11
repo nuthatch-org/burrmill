@@ -11,6 +11,14 @@ const DEFAULT_MODEL = 'claude-sonnet-4-5';
 // For the prompt and the blurb. The filter is AGGREGATE_K in crates/burrmill-wasm/src/aggregates.rs.
 const AGGREGATE_K = 10;
 
+// Each ask in aggregates mode is a set of groups, and differencing two of them can isolate a
+// small one. A fixed number per page load bounds that; it does not prevent it.
+const AGGREGATE_ASKS = 20;
+let aggregateAsks = 0;
+
+// Set by the first local-model ask, after which this document cannot reach another host.
+let heldLocal = false;
+
 // A label check only, and a warning: it does not stop a send (docs/browser.md).
 const IDENTIFIER_LABELS = new Set(['email', 'phone', 'iban', 'ssn', 'patient', 'hiv', 'id']);
 
@@ -28,7 +36,9 @@ if (window.trustedTypes && window.trustedTypes.createPolicy) {
     },
     createScriptURL(url) {
       const resolved = new URL(url, window.location.href);
-      if (resolved.origin === window.location.origin && resolved.pathname.endsWith('.wasm')) {
+      const own = resolved.origin === window.location.origin;
+      const path = resolved.pathname;
+      if (own && (path.endsWith('.wasm') || path.endsWith('/worker.js') || path.endsWith('/sw.js'))) {
         return resolved.href;
       }
       throw new Error('script url refused');
@@ -129,7 +139,9 @@ function describeMode() {
   } else if (mode === 'pseudonymised') {
     blurb.textContent = 'Identifier columns leave as tokens. The values stay here.';
   } else if (mode === 'local-model') {
-    blurb.textContent = 'Rows go to 127.0.0.1. Nothing leaves this machine.';
+    blurb.textContent =
+      'Rows go to 127.0.0.1. Nothing leaves this machine. The first ask holds this tab to ' +
+      '127.0.0.1 until it is reloaded.';
   } else {
     blurb.textContent =
       'The schema leaves this browser. The rows stay. A statement that does not plan goes back ' +
@@ -137,6 +149,24 @@ function describeMode() {
       'What the model can still learn is that its statement planned, which the schema decides.';
   }
   document.getElementById('port-label').hidden = mode !== 'local-model';
+  showBudget();
+}
+
+function showBudget() {
+  const el = document.getElementById('budget');
+  el.hidden = document.getElementById('mode').value !== 'aggregates';
+  el.textContent =
+    AGGREGATE_ASKS - aggregateAsks + ' of ' + AGGREGATE_ASKS + ' aggregate asks left in this page load.';
+}
+
+// A policy added to the document only narrows it, and stays until the page is reloaded.
+function holdLocal() {
+  if (heldLocal) return;
+  const meta = document.createElement('meta');
+  meta.httpEquiv = 'Content-Security-Policy';
+  meta.content = "connect-src 'self' http://127.0.0.1:*";
+  document.head.appendChild(meta);
+  heldLocal = true;
 }
 
 function dropStatus(text) {
@@ -597,7 +627,7 @@ function showColumns(columns, proposals) {
       field.sign = tick(row, 'Sign', 'sign');
     }
     if (column.temporal) {
-      field.date = tick(row, 'Date range', '');
+      field.date = tick(row, 'Date range (sends the real min and max)', '');
     }
     const kind = proposed.get(column.name);
     field.identifier = tick(row, kind ? 'Identifier, ' + kind : 'Identifier', 'identifier');
@@ -817,6 +847,19 @@ async function ask() {
       status('The key stays in this tab. Paste one to ask.');
       return;
     }
+    if (heldLocal && mode !== 'local-model') {
+      status('This tab sent rows to 127.0.0.1 and is held there. Reload to use another mode.');
+      return;
+    }
+    if (mode === 'aggregates') {
+      if (aggregateAsks >= AGGREGATE_ASKS) {
+        status('The ' + AGGREGATE_ASKS + ' aggregate asks for this page load are spent.');
+        return;
+      }
+      aggregateAsks++;
+      showBudget();
+    }
+    if (mode === 'local-model') holdLocal();
     const identifiers = mode === 'pseudonymised' ? ticked('identifier') : [];
     await call('bind', { identifiers });
     const packed = await call('card', { signs: ticked('sign'), dates: ticked('date') });

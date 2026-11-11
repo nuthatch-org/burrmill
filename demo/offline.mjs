@@ -51,7 +51,7 @@ try {
   await page.waitForFunction(async () => {
     const reg = await navigator.serviceWorker.ready;
     if (!reg.active || !navigator.serviceWorker.controller) return false;
-    const cache = await caches.open('burrmill-shell-1');
+    const cache = await caches.open('burrmill-shell-2');
     const keys = await cache.keys();
     return keys.some((key) => key.url.endsWith('burrmill_wasm_bg.wasm'));
   });
@@ -94,6 +94,15 @@ const shell = await page.evaluate(async () => {
 if (!shell.manifestType || !shell.manifestType.includes('manifest+json')) {
   bad('manifest type: ' + shell.manifestType);
 }
+// Only the shell list is kept; anything else on the origin goes to the network each time.
+const kept = await page.evaluate(async () => {
+  const res = await fetch('./package.json');
+  await res.text();
+  const cache = await caches.open('burrmill-shell-2');
+  return (await cache.keys()).map((key) => new URL(key.url).pathname);
+});
+if (kept.some((path) => path.endsWith('package.json'))) bad('the worker cached a file off the shell list');
+if (!kept.includes('/app.js')) bad('shell not cached: ' + kept.join(' '));
 if (shell.manifest.display !== 'standalone') bad('display: ' + shell.manifest.display);
 if (shell.manifest.start_url !== './') bad('start_url: ' + shell.manifest.start_url);
 const declared = (shell.manifest.icons || []).map((icon) => icon.sizes).sort().join(',');

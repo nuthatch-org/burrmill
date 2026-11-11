@@ -82,10 +82,22 @@ await page.waitForFunction(
   { timeout: 120000 },
 );
 
+// After a local ask the document itself refuses the hosted model, whatever the script does.
+const direct = await page.evaluate(() =>
+  fetch('https://api.anthropic.com/v1/messages', { method: 'POST', body: 'x' }).then(
+    () => 'sent',
+    () => 'refused',
+  ),
+);
+await page.locator('#mode').selectOption('schema');
+await page.locator('#ask').click();
+await page.waitForFunction(() => (document.getElementById('status').textContent || '').includes('Reload'));
+await page.locator('#mode').selectOption('local-model');
+
 const narration = await page.locator('#narration').innerText();
 const log = await page.locator('#log').innerText();
 const blurb = await page.locator('#blurb').innerText();
-const csp = await page.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute('content');
+const csp = await page.locator('meta[http-equiv="Content-Security-Policy"]').first().getAttribute('content');
 const stored = await page.evaluate(() => ({
   local: window.localStorage.getItem('burrmill-key'),
   session: window.sessionStorage.getItem('burrmill-key'),
@@ -98,6 +110,7 @@ function bad(message) {
 }
 
 const expected = 'http://127.0.0.1:' + modelPort + '/v1/messages';
+if (direct !== 'refused') bad('a direct call to the hosted model was ' + direct);
 if (calls.length !== 1) bad('expected one model call, got ' + calls.length + ' ' + calls.map((c) => c.url).join(' '));
 if (calls[0] && calls[0].url !== expected) bad('url ' + (calls[0] && calls[0].url));
 if (calls[0] && !calls[0].body.includes('CANARY_MERCHANT_AAA')) bad('rows were not in the body');

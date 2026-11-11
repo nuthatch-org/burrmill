@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- The meta policy is fixed for the document. The page calls only the host for the mode. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://api.anthropic.com http://127.0.0.1:*; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<!-- What a meta policy can carry. _headers adds frame-ancestors and covers the worker. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://api.anthropic.com http://127.0.0.1:*; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types default">
 <meta name="theme-color" content="#1c1917">
 <title>Burrmill</title>
 <link rel="manifest" href="manifest.webmanifest">
@@ -41,6 +41,7 @@
       <option value="local-model">Local model</option>
     </select>
   </label>
+  <p id="budget" hidden></p>
   <label id="port-label" hidden>Port on this machine
     <input id="port" type="text" inputmode="numeric" autocomplete="off">
   </label>

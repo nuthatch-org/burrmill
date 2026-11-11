@@ -1,0 +1,8 @@
+# Response headers for a host that reads this format (Netlify, Cloudflare Pages). The policy is
+# the meta tag's plus frame-ancestors, which a meta tag cannot carry, and as a header it also
+# covers worker.js. `python3 -m http.server` ignores this file; headers.mjs serves it.
+# Host the page on an origin of its own: OPFS and Cache Storage are shared across one origin.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://api.anthropic.com http://127.0.0.1:*; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types default; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer

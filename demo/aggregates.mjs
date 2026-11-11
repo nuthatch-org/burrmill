@@ -92,6 +92,21 @@ function bad(message) {
   console.error(message);
 }
 
+const budget = await page.locator('#budget').innerText();
+if (!budget.startsWith('19 of 20')) bad('budget after one ask: ' + budget);
+const sentBefore = bodies.length;
+for (let i = 1; i < 20; i++) {
+  await page.locator('#ask').click();
+  await page.waitForFunction(() => !document.getElementById('ask').disabled);
+}
+const spentBudget = await page.locator('#budget').innerText();
+if (!spentBudget.startsWith('0 of 20')) bad('budget after twenty asks: ' + spentBudget);
+const sentSpent = bodies.length;
+if (sentSpent <= sentBefore) bad('the remaining asks sent nothing');
+await page.locator('#ask').click();
+await page.waitForFunction(() => (document.getElementById('status').textContent || '').includes('spent'));
+if (bodies.length !== sentSpent) bad('an ask past the budget sent ' + (bodies.length - sentSpent));
+
 if (bodies.length < 2) bad('expected two requests, got ' + bodies.length);
 if (!blurb.includes('Groups of 10')) bad('blurb: ' + blurb);
 if (stored.local) bad('key landed in localStorage');

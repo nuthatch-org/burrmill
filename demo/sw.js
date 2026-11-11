@@ -1,4 +1,5 @@
-const CACHE = 'burrmill-shell-1';
+// A new name drops what the earlier worker kept beyond the shell.
+const CACHE = 'burrmill-shell-2';
 
 const SHELL = [
   './',
@@ -28,10 +29,12 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Same-origin only. The model call stays a network request, so airplane mode fails it.
+const SHELL_URLS = new Set(SHELL.map((path) => new URL(path, self.location.href).href));
+
+// The shell only. The model call stays a network request, so airplane mode fails it, and
+// anything else on this origin is left to the network rather than kept.
 self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url);
-  if (url.origin !== self.location.origin || event.request.method !== 'GET') return;
+  if (event.request.method !== 'GET' || !SHELL_URLS.has(event.request.url)) return;
   event.respondWith(shell(event.request));
 });
 
