@@ -91,6 +91,7 @@ impl CancelExec {
 
 /// Arm every segment scan in `plan` to time its polls, and hand back their counters, before it runs.
 /// A scan decodes inside its own `poll_next`, so the thread CPU spent there is the scan's.
+#[recursive::recursive]
 pub(super) fn arm_scan_cpu(plan: &Arc<dyn ExecutionPlan>, out: &mut Vec<Count>) {
     if let Some(cpu) = plan
         .downcast_ref::<CancelExec>()
@@ -363,5 +364,96 @@ impl PhysicalExpr for CancelExpr {
     }
     fn fmt_sql(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.inner.fmt_sql(f)
+    }
+}
+
+thread_local! {
+    /// The token of the statement this thread is planning. The rules are the engine's and cannot
+    /// be handed it, and a statement is planned on one thread from start to finish.
+    static PLANNING: std::cell::RefCell<Option<CancelToken>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `f`, with every planning rule it runs stopping once `token` is cancelled.
+pub(super) fn planning<T>(token: &CancelToken, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<CancelToken>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PLANNING.with(|p| *p.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(PLANNING.with(|p| p.replace(Some(token.clone()))));
+    f()
+}
+
+/// Refuses once the statement being planned on this thread is cancelled.
+pub(super) fn planning_goes_on() -> Result<()> {
+    if PLANNING.with(|p| p.borrow().as_ref().is_some_and(CancelToken::is_cancelled)) {
+        return Err(DataFusionError::Execution("cancelled".into()));
+    }
+    Ok(())
+}
+
+type Analyzing = dyn datafusion_optimizer::AnalyzerRule + Send + Sync;
+type Optimizing = dyn datafusion_optimizer::OptimizerRule + Send + Sync;
+type Physical = dyn PhysicalOptimizerRule + Send + Sync;
+
+/// A planning rule that checks the statement's token first: before each rule, and before each node
+/// for a rule the optimizer applies node by node.
+#[derive(Debug)]
+pub(super) struct Stoppable<R: ?Sized>(pub(super) Arc<R>);
+
+impl datafusion_optimizer::AnalyzerRule for Stoppable<Analyzing> {
+    fn analyze(
+        &self,
+        plan: datafusion_expr::LogicalPlan,
+        config: &ConfigOptions,
+    ) -> Result<datafusion_expr::LogicalPlan> {
+        planning_goes_on()?;
+        self.0.analyze(plan, config)
+    }
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+}
+
+impl datafusion_optimizer::OptimizerRule for Stoppable<Optimizing> {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn apply_order(&self) -> Option<datafusion_optimizer::optimizer::ApplyOrder> {
+        self.0.apply_order()
+    }
+    fn rewrite(
+        &self,
+        plan: datafusion_expr::LogicalPlan,
+        config: &dyn datafusion_optimizer::OptimizerConfig,
+    ) -> Result<Transformed<datafusion_expr::LogicalPlan>> {
+        planning_goes_on()?;
+        self.0.rewrite(plan, config)
+    }
+}
+
+impl PhysicalOptimizerRule for Stoppable<Physical> {
+    fn optimize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        config: &ConfigOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        planning_goes_on()?;
+        self.0.optimize(plan, config)
+    }
+    fn optimize_with_context(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        context: &dyn datafusion_session::PhysicalOptimizerContext,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        planning_goes_on()?;
+        self.0.optimize_with_context(plan, context)
+    }
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn schema_check(&self) -> bool {
+        self.0.schema_check()
     }
 }

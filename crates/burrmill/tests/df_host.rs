@@ -286,6 +286,20 @@ fn a_statement_stops_at_its_own_token_and_deadline() {
     assert_eq!(rows(&engine, "SELECT 1 AS one"), vec![json!({"one": 1})]);
 }
 
+/// A chain of joins under the relation bound still takes seconds to optimize, and a cancel then
+/// stops it between planning rules rather than after the plan has run.
+#[test]
+fn a_cancel_stops_a_statement_still_planning() {
+    let mut chain = String::from("SELECT count(*) AS n FROM range(1) t0");
+    for i in 1..200 {
+        chain.push_str(&format!(
+            " JOIN range(1) t{i} ON t{i}.range = t{}.range",
+            i - 1
+        ));
+    }
+    stops_on_cancel(&chain);
+}
+
 #[test]
 fn a_cancel_stops_a_join_of_ranges() {
     stops_on_cancel(
