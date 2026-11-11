@@ -3,6 +3,8 @@
 //! Encoding is decided from the first `sniff_bytes` only. A file that is ASCII for that prefix
 //! and Windows-1251 after it will be read as UTF-8.
 
+use std::collections::HashMap;
+
 use crate::encoding::{CP1251, CP1252, decode_table};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,8 +68,13 @@ pub fn sniff_encoding(sample: &[u8]) -> EncodingKind {
     if sample.starts_with(&[0xFE, 0xFF]) {
         return EncodingKind::Utf16Be;
     }
-    if std::str::from_utf8(sample).is_ok() {
-        return EncodingKind::Utf8;
+    match std::str::from_utf8(sample) {
+        Ok(_) => return EncodingKind::Utf8,
+        // The window can end inside a character; only a sequence cut by the end is forgiven.
+        Err(e) if e.error_len().is_none() && sample.len() - e.valid_up_to() <= 3 => {
+            return EncodingKind::Utf8;
+        }
+        Err(_) => {}
     }
     let as_1251 = decode_table(sample, &CP1251);
     let cyrillic = as_1251
@@ -205,10 +212,15 @@ fn field_counts(sample: &str, delim: u8, quote: u8) -> Vec<usize> {
 }
 
 fn mode_count(counts: &[usize]) -> usize {
+    let mut tally: HashMap<usize, usize> = HashMap::new();
+    for &c in counts {
+        *tally.entry(c).or_default() += 1;
+    }
+    // Walk the slice, not the map: on a tie the value seen first wins.
     let mut best = 0;
     let mut best_n = 0;
     for &c in counts {
-        let n = counts.iter().filter(|x| **x == c).count();
+        let n = tally[&c];
         if n > best_n {
             best_n = n;
             best = c;
