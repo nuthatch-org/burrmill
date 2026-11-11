@@ -1,0 +1,1 @@
+SELECT (block_number, who) > (1, 'a') FROM t WHERE who IS DISTINCT FROM 'b' OR amount = 1.5

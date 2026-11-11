@@ -1,0 +1,1 @@
+SELECT * FROM t WHERE block_number IN (SELECT max(block_number) FROM t) AND EXISTS (SELECT 1 FROM t u WHERE u.who = t.who)
