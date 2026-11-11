@@ -1,7 +1,7 @@
 [package]
 name = "burrmill-ingest"
 version = "0.0.1"
-description = "Turn untrusted CSV into Arrow under hard budgets. RFC-0047 slice 1."
+description = "Turn untrusted CSV into Arrow under hard budgets. See docs/browser.md."
 keywords = ["csv", "arrow", "ingest"]
 categories = ["parser-implementations"]
 edition = "2024"

@@ -8,7 +8,7 @@ const QUESTIONS = [
 
 const DEFAULT_MODEL = 'claude-sonnet-4-5';
 
-// RFC-0047's stated default. Whether k should differ, or be per column, is open.
+// For the prompt and the blurb. The filter is AGGREGATE_K in crates/burrmill-wasm/src/aggregates.rs.
 const AGGREGATE_K = 10;
 
 // Each ask in aggregates mode is a set of groups, and differencing two of them can isolate a
@@ -19,7 +19,7 @@ let aggregateAsks = 0;
 // Set by the first local-model ask, after which this document cannot reach another host.
 let heldLocal = false;
 
-// A label check only. The RFC says this is not a compliance claim.
+// A label check only, and a warning: it does not stop a send (docs/browser.md).
 const IDENTIFIER_LABELS = new Set(['email', 'phone', 'iban', 'ssn', 'patient', 'hiv', 'id']);
 
 const SVG_NS = 'http://www.w3.org/2000/svg';

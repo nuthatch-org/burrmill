@@ -80,7 +80,7 @@ jobs:
           command: check
           arguments: --all-features
 
-  # RFC-0047 slice 2. The reader builds for wasm32 and its graph has no C.
+  # The browser tab's reader (docs/browser.md) builds for wasm32 and its graph has no C.
   ingest-wasm:
     runs-on: ubuntu-latest
     timeout-minutes: 30

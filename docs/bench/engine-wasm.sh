@@ -1,5 +1,5 @@
 #!/bin/sh
-# RFC-0047. Gzip of ingest plus the operator, of the engine, and of both.
+# docs/browser.md. Gzip of ingest plus the operator, of the engine, and of both.
 # The 8 MB figure is the gate for whichever of these the demo actually downloads.
 set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)

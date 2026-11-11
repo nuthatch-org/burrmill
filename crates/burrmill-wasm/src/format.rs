@@ -33,10 +33,9 @@ pub fn cell_string(col: &dyn Array, row: usize) -> Option<String> {
         DataType::LargeUtf8 => col.as_string::<i64>().value(row).to_string(),
         DataType::Utf8View => col.as_string_view().value(row).to_string(),
         DataType::Date32 => format_date(col.as_primitive::<Date32Type>().value(row)),
-        DataType::Decimal128(_, scale) => format_decimal(
-            col.as_primitive::<Decimal128Type>().value(row),
-            *scale as u8,
-        ),
+        DataType::Decimal128(_, scale) => {
+            format_decimal(col.as_primitive::<Decimal128Type>().value(row), *scale)
+        }
         DataType::Timestamp(TimeUnit::Microsecond, _) => {
             format_timestamp(col.as_primitive::<TimestampMicrosecondType>().value(row))
         }
@@ -54,10 +53,12 @@ pub fn cell_string(col: &dyn Array, row: usize) -> Option<String> {
     })
 }
 
-pub fn format_decimal(unscaled: i128, scale: u8) -> String {
+pub fn format_decimal(unscaled: i128, scale: i8) -> String {
     let neg = unscaled < 0;
     let digits = unscaled.unsigned_abs().to_string();
-    let body = if scale == 0 {
+    let body = if scale < 0 && unscaled != 0 {
+        format!("{digits}{}", "0".repeat(usize::from(scale.unsigned_abs())))
+    } else if scale <= 0 {
         digits
     } else {
         let scale = scale as usize;
@@ -168,4 +169,18 @@ pub fn is_ident(name: &str) -> bool {
 pub fn reserved_suffix(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.ends_with("__raw") || lower.ends_with("__hot") || lower.ends_with("__union")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_negative_scale_appends_zeros() {
+        assert_eq!(format_decimal(12, -2), "1200");
+        assert_eq!(format_decimal(-12, -2), "-1200");
+        assert_eq!(format_decimal(0, -2), "0");
+        assert_eq!(format_decimal(12, 0), "12");
+        assert_eq!(format_decimal(-5, 2), "-0.05");
+    }
 }
