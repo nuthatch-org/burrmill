@@ -14,4 +14,6 @@ fuzz_target!(|data: &[u8]| {
         .max_memory_bytes(8 << 20);
     let _ = ingest_bytes(data, FormatHint::Sniff, &budget);
     let _ = ingest_bytes(data, FormatHint::Csv, &budget);
+    let _ = ingest_bytes(data, FormatHint::Json, &budget);
+    let _ = ingest_bytes(data, FormatHint::Parquet, &budget);
 });
