@@ -3,7 +3,7 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -17,6 +17,7 @@ use datafusion_common::config::{ConfigOptions, TableOptions};
 use datafusion_common::display::{PlanType, ToStringifiedPlan};
 use datafusion_common::{DFSchema, Result as DFResult, TableReference, plan_datafusion_err};
 use datafusion_execution::TaskContext;
+use datafusion_execution::cache::Cache;
 use datafusion_execution::cache::cache_manager::{
     CacheManagerConfig, CachedFileMetadataEntry, FileMetadataCache,
 };
@@ -54,11 +55,58 @@ use super::rule::CheckedArithmetic;
 /// Parquet footers by segment path. Segments never change once sealed, so an entry stays right.
 pub(super) type Footers = DefaultCache<object_store::path::Path, CachedFileMetadataEntry>;
 
+/// The footers of segments on this machine, one cache for every engine in the process: a host
+/// opens an engine at each seal, and each read every footer again (#152). A path is absolute and an
+/// entry answers only for the size it was read at. Store keys mean what the engine's store says,
+/// so those stay in the engine's own cache.
+static LOCAL_FOOTERS: LazyLock<Arc<Footers>> =
+    LazyLock::new(|| Arc::new(Footers::new(0).with_name("burrmill local footers")));
+
+/// What each live engine allows the local footers.
+static LOCAL_SHARES: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+pub(super) fn local_footers() -> Arc<FileMetadataCache> {
+    Arc::clone(&*LOCAL_FOOTERS) as Arc<FileMetadataCache>
+}
+
+/// One engine's allowance in the local footers' limit, given back when the engine goes.
+struct LocalShare(usize);
+
+impl LocalShare {
+    fn new(bytes: usize) -> Self {
+        let mut live = LOCAL_SHARES.lock().unwrap_or_else(|p| p.into_inner());
+        live.push(bytes);
+        LOCAL_FOOTERS.update_cache_limit(local_limit(&live));
+        Self(bytes)
+    }
+}
+
+impl Drop for LocalShare {
+    fn drop(&mut self) {
+        let mut live = LOCAL_SHARES.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(i) = live.iter().position(|b| *b == self.0) {
+            live.swap_remove(i);
+        }
+        // The last engine out leaves the limit as it stood: a host that closes one engine before
+        // it opens the next keeps the footers between them.
+        if !live.is_empty() {
+            LOCAL_FOOTERS.update_cache_limit(local_limit(&live));
+        }
+    }
+}
+
+/// The most any live engine allows: the largest budget in the process set that much aside, outside
+/// its pool, and the engines beside it now add nothing to it.
+fn local_limit(live: &[usize]) -> usize {
+    live.iter().copied().max().unwrap_or(0)
+}
+
 pub struct MiniSession {
     session_id: String,
     config: SessionConfig,
     runtime: Arc<RuntimeEnv>,
     footers: Arc<Footers>,
+    _local_share: LocalShare,
     catalog_list: Arc<MemoryCatalogProviderList>,
     scalar: HashMap<String, Arc<ScalarUDF>>,
     higher: HashMap<String, Arc<HigherOrderUDF>>,
@@ -135,8 +183,9 @@ impl MiniSession {
             // costs as fine; 128 was 1.7-2.1x on every heavy view (where-the-time-goes.md).
             config = config.with_batch_size(2048);
         }
-        // The footer cache sits outside the pool, so under a budget it takes an eighth of the bound
-        // rather than adding to it. Only `SegmentTable`'s reader factory consults it.
+        // The footer caches sit outside the pool, so under a budget they take an eighth of the bound
+        // rather than adding to it. Only `SegmentTable`'s reader factory consults them: this one
+        // for a store's segments, the process's for local ones.
         let footer_limit = budget.map_or(1 << 30, |b| b.memory_bytes / 8);
         let footers = Arc::new(Footers::new(footer_limit).with_name("burrmill footers"));
         let cache = CacheManagerConfig::default()
@@ -303,6 +352,7 @@ impl MiniSession {
             config,
             runtime,
             footers,
+            _local_share: LocalShare::new(footer_limit),
             catalog_list,
             scalar,
             higher,
@@ -458,7 +508,7 @@ impl MiniSession {
     /// `.schema`: the visible tables, all views, with DuckDB's type names. A subset of DuckDB's
     /// columns, the ones those commands and a person reading them use.
     pub fn footer_bytes(&self) -> usize {
-        self.footers.memory_used()
+        self.footers.memory_used() + LOCAL_FOOTERS.memory_used()
     }
 
     pub fn build_information_schema(&mut self, hidden: fn(&str) -> bool) -> DFResult<()> {
