@@ -512,19 +512,18 @@ fn over(
     };
     // With the node's own copies gone, the rule moves what it walks and copies nothing.
     drop(plan);
+    // The definitions the rule has given new columns so far. Each later plan takes them all in
+    // one walk, just before the rule reaches it.
+    let mut retyped: Vec<(u64, DFSchemaRef)> = Vec::new();
     for i in 0..defs.len() {
-        let def = std::mem::take(&mut defs[i]);
+        let def = refresh(std::mem::take(&mut defs[i]), &retyped)?;
         defs[i] = rule.analyze(def, config)?;
-        if *defs[i].schema() == schemas[i] {
-            continue;
+        if *defs[i].schema() != schemas[i] {
+            schemas[i] = Arc::clone(defs[i].schema());
+            retyped.push((ids[i], Arc::clone(&schemas[i])));
         }
-        schemas[i] = Arc::clone(defs[i].schema());
-        let (id, schema) = (ids[i], &schemas[i]);
-        for later in &mut defs[i + 1..] {
-            *later = refresh(std::mem::take(later), id, schema)?;
-        }
-        body = refresh(body, id, schema)?;
     }
+    body = refresh(body, &retyped)?;
     let body = rule.analyze(body, config)?;
     Ok(LogicalPlan::Extension(Extension {
         node: Arc::new(SharedDefs {
@@ -537,13 +536,19 @@ fn over(
     }))
 }
 
-/// `plan` with each reference to `id` carrying `schema`, and every node above one rebuilt for it.
-/// A node that reads no such reference keeps the schema it has.
-fn refresh(plan: LogicalPlan, id: u64, schema: &DFSchemaRef) -> Result<LogicalPlan> {
+/// `plan` with each reference to a definition in `retyped` carrying its new schema, and every node
+/// above one rebuilt for it. A node that reads no such reference keeps the schema it has.
+fn refresh(plan: LogicalPlan, retyped: &[(u64, DFSchemaRef)]) -> Result<LogicalPlan> {
+    if retyped.is_empty() {
+        return Ok(plan);
+    }
+    let mut refresh = Refresh {
+        retyped,
+        reads: Vec::new(),
+    };
     let mut reads = false;
     plan.apply_with_subqueries(|n| {
-        reads = matches!(n, LogicalPlan::Extension(e)
-            if e.node.as_any().downcast_ref::<SharedRef>().is_some_and(|r| r.id == id));
+        reads = refresh.retyped(n).is_some();
         Ok(match reads {
             true => TreeNodeRecursion::Stop,
             false => TreeNodeRecursion::Continue,
@@ -552,19 +557,29 @@ fn refresh(plan: LogicalPlan, id: u64, schema: &DFSchemaRef) -> Result<LogicalPl
     if !reads {
         return Ok(plan);
     }
-    plan.rewrite_with_subqueries(&mut Refresh {
-        id,
-        schema,
-        reads: Vec::new(),
-    })
-    .map(|t| t.data)
+    plan.rewrite_with_subqueries(&mut refresh).map(|t| t.data)
 }
 
 struct Refresh<'a> {
-    id: u64,
-    schema: &'a DFSchemaRef,
+    retyped: &'a [(u64, DFSchemaRef)],
     /// Per node on the path from the root, whether a reference has been met under it.
     reads: Vec<bool>,
+}
+
+impl Refresh<'_> {
+    /// `n` as a reference with its definition's new schema, if it reads a retyped one.
+    fn retyped(&self, n: &LogicalPlan) -> Option<SharedRef> {
+        let LogicalPlan::Extension(e) = n else {
+            return None;
+        };
+        let r = e.node.as_any().downcast_ref::<SharedRef>()?;
+        let (_, schema) = self.retyped.iter().find(|(id, _)| *id == r.id)?;
+        Some(SharedRef {
+            id: r.id,
+            state: Arc::clone(&r.state),
+            schema: Arc::clone(schema),
+        })
+    }
 }
 
 impl TreeNodeRewriter for Refresh<'_> {
@@ -577,19 +592,7 @@ impl TreeNodeRewriter for Refresh<'_> {
 
     fn f_up(&mut self, n: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
         let under = self.reads.pop().unwrap_or(true);
-        let reference = match &n {
-            LogicalPlan::Extension(e) => e
-                .node
-                .as_any()
-                .downcast_ref::<SharedRef>()
-                .filter(|r| r.id == self.id)
-                .map(|r| SharedRef {
-                    id: r.id,
-                    state: Arc::clone(&r.state),
-                    schema: Arc::clone(self.schema),
-                }),
-            _ => None,
-        };
+        let reference = self.retyped(&n);
         if reference.is_none() && !under {
             return Ok(Transformed::no(n));
         }
@@ -1527,6 +1530,69 @@ mod tests {
             .analyze(shared_once(None), &ConfigOptions::default())
             .unwrap();
         with_definitions(shared_once(None), &mut |p, _| sole(p)).unwrap();
+    }
+
+    #[test]
+    fn a_plan_takes_every_retyped_definition_before_the_rule_reaches_it() {
+        let one = || {
+            LogicalPlanBuilder::empty(true)
+                .project(vec![lit(1i64).alias("x")])
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        let reference = |id: u64, state: &Shared, schema: &DFSchemaRef| {
+            LogicalPlan::Extension(Extension {
+                node: Arc::new(SharedRef {
+                    id,
+                    state: Arc::clone(state),
+                    schema: Arc::clone(schema),
+                }),
+            })
+        };
+        let states = vec![Shared::default(), Shared::default(), Shared::default()];
+        // The second reads the first; the third stands alone; the body reads the last two.
+        let first = one();
+        let second = LogicalPlanBuilder::from(reference(7, &states[0], first.schema()))
+            .project(vec![col("x").alias("y")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let third = one();
+        let body = LogicalPlanBuilder::from(reference(8, &states[1], second.schema()))
+            .cross_join(reference(9, &states[2], third.schema()))
+            .unwrap()
+            .build()
+            .unwrap();
+        let defs = vec![first, second, third];
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(SharedDefs {
+                ids: vec![7, 8, 9],
+                states,
+                schemas: defs.iter().map(|d| Arc::clone(d.schema())).collect(),
+                defs,
+                body,
+            }),
+        });
+        let out = OverShared(Arc::new(Narrow))
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+        let types: Vec<_> = out
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.data_type())
+            .collect();
+        let int = arrow::datatypes::DataType::Int32;
+        assert_eq!(types, vec![&int, &int], "{out}");
+        let LogicalPlan::Extension(e) = &out else {
+            panic!("{out}")
+        };
+        let d = e.node.as_any().downcast_ref::<SharedDefs>().unwrap();
+        assert!(
+            d.schemas.iter().all(|s| s.field(0).data_type() == &int),
+            "{out}"
+        );
     }
 
     #[test]
