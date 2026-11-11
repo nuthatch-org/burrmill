@@ -25,11 +25,24 @@ registration not in the fold map  registered HOSTED  registered=true  folded=fal
 
 == again with the process's wall, user and system seconds
 registration in the fold map      opened folded=true groups=989690 ms=1053 VmHWM:=255220=kB wall=1.150 user=2.632 sys=0.315
+registration in the fold map      opened folded=true groups=989690 ms=1153 VmHWM:=263268=kB wall=1.242 user=2.755 sys=0.391
 registration in the fold map      opened folded=true groups=989690 ms=948 VmHWM:=272272=kB wall=1.028 user=2.555 sys=0.464
+registration in the fold map      opened folded=true groups=989690 ms=992 VmHWM:=250216=kB wall=1.054 user=2.675 sys=0.409
+registration in the fold map      opened folded=true groups=989690 ms=999 VmHWM:=261636=kB wall=1.075 user=2.665 sys=0.364
+registration in the fold map      registered folded=true groups=989690 ms=1153 VmHWM:=261996=kB wall=1.246 user=2.910 sys=0.364
+registration in the fold map      registered folded=true groups=989690 ms=1173 VmHWM:=250560=kB wall=1.251 user=2.835 sys=0.422
+registration in the fold map      registered folded=true groups=989690 ms=1182 VmHWM:=251028=kB wall=1.261 user=2.972 sys=0.392
 registration in the fold map      registered folded=true groups=989690 ms=1205 VmHWM:=249280=kB wall=1.303 user=2.746 sys=0.456
+registration in the fold map      registered folded=true groups=989690 ms=1261 VmHWM:=255452=kB wall=1.352 user=2.841 sys=0.307
+registration not in the fold map  opened folded=true groups=989690 ms=1013 VmHWM:=260696=kB wall=1.097 user=2.682 sys=0.441
+registration not in the fold map  opened folded=true groups=989690 ms=1107 VmHWM:=249460=kB wall=1.183 user=2.587 sys=0.473
+registration not in the fold map  opened folded=true groups=989690 ms=1108 VmHWM:=262220=kB wall=1.206 user=2.677 sys=0.412
 registration not in the fold map  opened folded=true groups=989690 ms=1835 VmHWM:=265556=kB wall=1.937 user=3.051 sys=0.479
 registration not in the fold map  opened folded=true groups=989690 ms=994 VmHWM:=257376=kB wall=1.080 user=2.632 sys=0.459
+registration not in the fold map  registered folded=false groups=989690 ms=1019 VmHWM:=355116=kB wall=1.145 user=3.236 sys=0.589
+registration not in the fold map  registered folded=false groups=989690 ms=1052 VmHWM:=346140=kB wall=1.173 user=3.348 sys=0.521
 registration not in the fold map  registered folded=false groups=989690 ms=1619 VmHWM:=355016=kB wall=1.773 user=3.541 sys=0.592
+registration not in the fold map  registered folded=false groups=989690 ms=936 VmHWM:=404556=kB wall=1.051 user=3.191 sys=0.522
 registration not in the fold map  registered folded=false groups=989690 ms=951 VmHWM:=342060=kB wall=1.085 user=3.247 sys=0.518
 
 == the six production nest copies under the release gate's statements, the engine at main and
