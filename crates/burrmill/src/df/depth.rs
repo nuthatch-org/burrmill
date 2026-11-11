@@ -16,9 +16,10 @@ const MAX_EXPR_DEPTH: usize = 64;
 const MAX_EXPR_TERMS: usize = 1024;
 /// Nested queries and set operations. A visitor descends the left spine before it can stop.
 const MAX_SET_DEPTH: usize = 64;
-/// Tables, subqueries and table functions in one statement. Planning is about cubic in them:
-/// 1,200 took 28 s and could not be cancelled. The largest authored view has under 80.
-const MAX_RELATIONS: usize = 256;
+/// Tables, subqueries and table functions in one statement. Planning is about cubic in them,
+/// inside one DataFusion rule where no cancel reaches: a chain of 256 `JOIN ... ON` took 14 s in
+/// a release build and 128 takes 1.6. The largest authored view reads 65.
+const MAX_RELATIONS: usize = 128;
 
 /// Refuse a statement whose plan would recurse deep enough to abort the process.
 ///
