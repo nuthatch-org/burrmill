@@ -51,11 +51,16 @@ impl WasmSession {
         self.inner.grammar()
     }
 
-    /// `{"answer": ..}`, or `{"error": .., "feedback": ..}` where only `feedback` may leave.
+    /// `{"answer": ..}`, or `{"error": .., "feedback": .., "before_rows": ..}` where only
+    /// `feedback` may leave.
     pub async fn query(&self, sql: &str) -> Result<String, JsError> {
         match self.inner.query(sql).await {
             Ok(out) => json_out(serde_json::json!({ "answer": out })),
-            Err(f) => json_out(serde_json::json!({ "error": f.local, "feedback": f.feedback })),
+            Err(f) => json_out(serde_json::json!({
+                "error": f.local,
+                "feedback": f.feedback,
+                "before_rows": f.before_rows,
+            })),
         }
     }
 

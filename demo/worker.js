@@ -47,7 +47,9 @@ async function handle(msg) {
   }
   if (msg.op === 'query') {
     const out = JSON.parse(await session.query(msg.sql));
-    if (out.error !== undefined) return { error: out.error, feedback: out.feedback };
+    if (out.error !== undefined) {
+      return { error: out.error, feedback: out.feedback, before_rows: out.before_rows };
+    }
     return { answer: out.answer, feedback: shape_feedback(JSON.stringify(out.answer)) };
   }
   if (msg.op === 'aggregates') {
