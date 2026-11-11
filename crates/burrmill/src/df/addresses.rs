@@ -9,7 +9,7 @@ use arrow::array::{Array, ArrayRef, AsArray, FixedSizeBinaryBuilder, StringViewB
 use arrow::datatypes::{DataType, Schema};
 use datafusion_catalog::Session;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{Column, DFSchema, DFSchemaRef, Result as DFResult, ScalarValue, plan_err};
 use datafusion_expr::Operator;
 use datafusion_expr::expr::ScalarFunction;
@@ -437,16 +437,29 @@ impl AnalyzerRule for Addresses {
         // A recursive query's work table has the text schema the parser gave it. Before the walk,
         // each work table takes the schema its static term will have, so the recursive term reads
         // fixed binary where the static term writes it.
+        let mut recursive = false;
+        plan.apply_with_subqueries(|p| {
+            recursive = matches!(p, LogicalPlan::RecursiveQuery(_));
+            Ok(match recursive {
+                true => TreeNodeRecursion::Stop,
+                false => TreeNodeRecursion::Continue,
+            })
+        })?;
+        if !recursive {
+            return self.pass(plan, false);
+        }
         let plan = plan
             .transform_down_with_subqueries(|p| match p {
                 LogicalPlan::RecursiveQuery(r) => {
-                    let probe = self.pass(Arc::unwrap_or_clone(Arc::clone(&r.static_term)))?;
+                    let probe =
+                        self.pass(Arc::unwrap_or_clone(Arc::clone(&r.static_term)), true)?;
                     fixed_work_table(r, probe.schema())
                 }
                 p => Ok(Transformed::no(p)),
             })?
             .data;
-        self.pass(plan)
+        // A work table's new schema is not yet in the nodes over it.
+        self.pass(plan, true)
     }
 }
 
@@ -454,18 +467,37 @@ impl Addresses {
     /// The walk, bottom up, a subquery handled at the node that holds it: its outer references
     /// are retyped from that node's inputs first, so a comparison inside it meets what the
     /// outer plan now gives rather than what the parser recorded.
-    fn pass(&self, plan: LogicalPlan) -> DFResult<LogicalPlan> {
+    ///
+    /// A node's schema is derived again where its expressions or an input's schema changed, and
+    /// at every node with `stale`, for a plan whose schemas are already behind its expressions.
+    fn pass(&self, plan: LogicalPlan, stale: bool) -> DFResult<LogicalPlan> {
+        // Whether the schema of each finished subtree changed, a node's inputs last.
+        let mut moved: Vec<bool> = Vec::new();
         plan.transform_up(|p| {
+            let below = match moved.len().checked_sub(p.inputs().len()) {
+                Some(at) => moved.drain(at..).fold(stale, |any, m| any | m),
+                None => true,
+            };
+            let before = Arc::clone(p.schema());
+            // A filter or a sort has its input's schema, which is the new one by now.
+            let through = matches!(p.inputs().as_slice(), [i] if Arc::ptr_eq(i.schema(), &before));
             let p = match p {
                 LogicalPlan::TableScan(scan) => decoded_scan(scan, &self.0)?,
                 LogicalPlan::Union(u) => textual_union(u)?,
                 LogicalPlan::Join(j) => textual_join_keys(j)?,
                 p => Transformed::no(p),
             };
-            let mut schema = DFSchema::empty();
-            for i in p.data.inputs() {
-                schema.merge(i.schema());
-            }
+            // One input's columns are the schema as it stands; merging copies every field.
+            let schema = match p.data.inputs().as_slice() {
+                [one] => Arc::clone(one.schema()),
+                inputs => {
+                    let mut schema = DFSchema::empty();
+                    for i in inputs {
+                        schema.merge(i.schema());
+                    }
+                    Arc::new(schema)
+                }
+            };
             let names_matter = matches!(
                 p.data,
                 LogicalPlan::Projection(_) | LogicalPlan::Aggregate(_) | LogicalPlan::Window(_)
@@ -473,7 +505,7 @@ impl Addresses {
             let was = p.transformed;
             let mut t = p.data.map_expressions(|e| {
                 let name = e.schema_name().to_string();
-                let e = self.with_subqueries(e, &schema)?;
+                let e = self.with_subqueries(e, &schema, stale)?;
                 let t = e.transform_up(|e| rewrite(e, &schema))?;
                 if t.transformed && names_matter && t.data.schema_name().to_string() != name {
                     Ok(Transformed::yes(t.data.alias(name)))
@@ -483,26 +515,30 @@ impl Addresses {
             })?;
             t.transformed |= was;
             // A node keeps the schema it was built with when a child changes under it; with its
-            // expressions rewritten for the child it has, it can be told what it holds.
-            t.data = t.data.recompute_schema()?;
+            // expressions rewritten for the child it has, it can be told what it holds. Where
+            // nothing under it or in it changed, it holds what it did.
+            if t.transformed || below {
+                t.data = t.data.recompute_schema()?;
+            }
+            moved.push((through && below) || *t.data.schema() != before);
             Ok(t)
         })
         .map(|t| t.data)
     }
 
     /// `e` with each subquery in it walked, its outer references typed from `outer`.
-    fn with_subqueries(&self, e: Expr, outer: &DFSchema) -> DFResult<Expr> {
+    fn with_subqueries(&self, e: Expr, outer: &DFSchema, stale: bool) -> DFResult<Expr> {
         e.transform_up(|e| {
             Ok(match e {
                 Expr::ScalarSubquery(s) => {
-                    Transformed::yes(Expr::ScalarSubquery(self.subquery(s, outer)?))
+                    Transformed::yes(Expr::ScalarSubquery(self.subquery(s, outer, stale)?))
                 }
                 Expr::InSubquery(mut i) => {
-                    i.subquery = self.subquery(i.subquery, outer)?;
+                    i.subquery = self.subquery(i.subquery, outer, stale)?;
                     Transformed::yes(Expr::InSubquery(i))
                 }
                 Expr::Exists(mut x) => {
-                    x.subquery = self.subquery(x.subquery, outer)?;
+                    x.subquery = self.subquery(x.subquery, outer, stale)?;
                     Transformed::yes(Expr::Exists(x))
                 }
                 e => Transformed::no(e),
@@ -515,6 +551,7 @@ impl Addresses {
         &self,
         s: datafusion_expr::Subquery,
         outer: &DFSchema,
+        stale: bool,
     ) -> DFResult<datafusion_expr::Subquery> {
         let retype = |e: Expr| -> DFResult<Transformed<Expr>> {
             Ok(match e {
@@ -529,10 +566,10 @@ impl Addresses {
                 e => Transformed::no(e),
             })
         };
-        let plan = Arc::unwrap_or_clone(s.subquery)
-            .transform_up(|p| p.map_expressions(|e| e.transform_up(retype)))?
-            .data;
-        let plan = self.pass(plan)?;
+        let retyped = Arc::unwrap_or_clone(s.subquery)
+            .transform_up(|p| p.map_expressions(|e| e.transform_up(retype)))?;
+        // A retyped reference is in no schema yet.
+        let plan = self.pass(retyped.data, stale || retyped.transformed)?;
         let outer_ref_columns = s
             .outer_ref_columns
             .into_iter()

@@ -24,7 +24,9 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion_catalog::Session;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
+use datafusion_common::tree_node::{
+    Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
+};
 use datafusion_common::{Column, DFSchemaRef, DataFusionError, Result, ScalarValue, internal_err};
 use datafusion_execution::TaskContext;
 use datafusion_execution::memory_pool::{MemoryConsumer, MemoryReservation};
@@ -444,18 +446,13 @@ pub(super) fn with_definitions(
             .map(|t| t.data);
     }
     let mut new = Definitions { added: Vec::new() };
-    let mut node = match &plan {
-        LogicalPlan::Extension(e) => match e.node.as_any().downcast_ref::<SharedDefs>() {
-            Some(d) => SharedDefs {
-                ids: d.ids.clone(),
-                states: d.states.clone(),
-                schemas: d.schemas.clone(),
-                defs: d.defs.clone(),
-                body: d.body.clone(),
-            },
-            None => SharedDefs::around(plan),
-        },
-        _ => SharedDefs::around(plan),
+    let mut node = match SharedDefs::taken(&plan) {
+        Some(node) => {
+            // With the node's own copies gone, `f` moves what it walks and copies nothing.
+            drop(plan);
+            node
+        }
+        None => SharedDefs::around(plan),
     };
     for def in &mut node.defs {
         *def = f(std::mem::take(def), &mut new)?;
@@ -503,15 +500,18 @@ fn over(
     plan: LogicalPlan,
     config: &ConfigOptions,
 ) -> Result<LogicalPlan> {
-    let LogicalPlan::Extension(e) = &plan else {
+    let Some(SharedDefs {
+        ids,
+        states,
+        mut schemas,
+        mut defs,
+        mut body,
+    }) = SharedDefs::taken(&plan)
+    else {
         return rule.analyze(plan, config);
     };
-    let Some(d) = e.node.as_any().downcast_ref::<SharedDefs>() else {
-        return rule.analyze(plan, config);
-    };
-    let mut defs = d.defs.clone();
-    let mut schemas = d.schemas.clone();
-    let mut body = d.body.clone();
+    // With the node's own copies gone, the rule moves what it walks and copies nothing.
+    drop(plan);
     for i in 0..defs.len() {
         let def = std::mem::take(&mut defs[i]);
         defs[i] = rule.analyze(def, config)?;
@@ -519,7 +519,7 @@ fn over(
             continue;
         }
         schemas[i] = Arc::clone(defs[i].schema());
-        let (id, schema) = (d.ids[i], &schemas[i]);
+        let (id, schema) = (ids[i], &schemas[i]);
         for later in &mut defs[i + 1..] {
             *later = refresh(std::mem::take(later), id, schema)?;
         }
@@ -528,8 +528,8 @@ fn over(
     let body = rule.analyze(body, config)?;
     Ok(LogicalPlan::Extension(Extension {
         node: Arc::new(SharedDefs {
-            ids: d.ids.clone(),
-            states: d.states.clone(),
+            ids,
+            states,
             schemas,
             defs,
             body,
@@ -538,6 +538,7 @@ fn over(
 }
 
 /// `plan` with each reference to `id` carrying `schema`, and every node above one rebuilt for it.
+/// A node that reads no such reference keeps the schema it has.
 fn refresh(plan: LogicalPlan, id: u64, schema: &DFSchemaRef) -> Result<LogicalPlan> {
     let mut reads = false;
     plan.apply_with_subqueries(|n| {
@@ -551,22 +552,57 @@ fn refresh(plan: LogicalPlan, id: u64, schema: &DFSchemaRef) -> Result<LogicalPl
     if !reads {
         return Ok(plan);
     }
-    plan.transform_up_with_subqueries(|n| {
-        if let LogicalPlan::Extension(e) = &n
-            && let Some(r) = e.node.as_any().downcast_ref::<SharedRef>()
-            && r.id == id
-        {
-            return Ok(Transformed::yes(LogicalPlan::Extension(Extension {
-                node: Arc::new(SharedRef {
-                    id,
-                    state: Arc::clone(&r.state),
-                    schema: Arc::clone(schema),
-                }),
-            })));
-        }
-        n.recompute_schema().map(Transformed::yes)
+    plan.rewrite_with_subqueries(&mut Refresh {
+        id,
+        schema,
+        reads: Vec::new(),
     })
     .map(|t| t.data)
+}
+
+struct Refresh<'a> {
+    id: u64,
+    schema: &'a DFSchemaRef,
+    /// Per node on the path from the root, whether a reference has been met under it.
+    reads: Vec<bool>,
+}
+
+impl TreeNodeRewriter for Refresh<'_> {
+    type Node = LogicalPlan;
+
+    fn f_down(&mut self, n: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
+        self.reads.push(false);
+        Ok(Transformed::no(n))
+    }
+
+    fn f_up(&mut self, n: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
+        let under = self.reads.pop().unwrap_or(true);
+        let reference = match &n {
+            LogicalPlan::Extension(e) => e
+                .node
+                .as_any()
+                .downcast_ref::<SharedRef>()
+                .filter(|r| r.id == self.id)
+                .map(|r| SharedRef {
+                    id: r.id,
+                    state: Arc::clone(&r.state),
+                    schema: Arc::clone(self.schema),
+                }),
+            _ => None,
+        };
+        if reference.is_none() && !under {
+            return Ok(Transformed::no(n));
+        }
+        if let Some(over) = self.reads.last_mut() {
+            *over = true;
+        }
+        match reference {
+            Some(r) => Ok(Transformed::yes(LogicalPlan::Extension(Extension {
+                node: Arc::new(r),
+            }))),
+            None => n.recompute_schema().map(Transformed::yes),
+        }
+    }
 }
 
 /// Where a shared subquery was: its batches, computed by whichever reader comes first.
@@ -638,6 +674,21 @@ pub struct SharedDefs {
 }
 
 impl SharedDefs {
+    /// The definitions `plan` is, if it is that node: its fields, each plan's top node copied.
+    fn taken(plan: &LogicalPlan) -> Option<Self> {
+        let LogicalPlan::Extension(e) = plan else {
+            return None;
+        };
+        let d = e.node.as_any().downcast_ref::<SharedDefs>()?;
+        Some(SharedDefs {
+            ids: d.ids.clone(),
+            states: d.states.clone(),
+            schemas: d.schemas.clone(),
+            defs: d.defs.clone(),
+            body: d.body.clone(),
+        })
+    }
+
     fn around(body: LogicalPlan) -> Self {
         Self {
             ids: Vec::new(),
