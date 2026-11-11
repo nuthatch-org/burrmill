@@ -70,7 +70,8 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
 - Rows handed to the page from one query: 5,000 (`RESULT_ROWS`).
 - The page: a file over 200 MB is refused before it is read (`MAX_FILE_BYTES`); a request asks for
   at most 2,048 tokens; four attempts per question; the outbound log keeps eight requests, each
-  shown to 64 KB.
+  shown to 64 KB; aggregates mode takes 20 asks per page load (`AGGREGATE_ASKS`), counted on the
+  page, which bounds differencing across asks without preventing it.
 - The gzip of ingest plus the engine for wasm32 must be at most 8 MiB (`tab-wasm` in
   `.github/workflows/ci.yml`).
 
@@ -79,8 +80,17 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
 From `demo/index.html` and `demo/app.js`:
 
 - A Content Security Policy: `connect-src` is the page's origin, `https://api.anthropic.com` and
-  `http://127.0.0.1:*`; scripts from the origin only, with wasm compilation allowed; no objects, base or form targets.
-- A Trusted Types policy that refuses HTML and script, and script URLs except same-origin `.wasm`.
+  `http://127.0.0.1:*`; scripts from the origin only, with wasm compilation allowed; no objects, base or form targets;
+  Trusted Types required for script sinks. The meta tag carries what a meta tag can; `demo/_headers`
+  is the same policy as headers, adding `frame-ancestors 'none'` and covering `worker.js`, for a host
+  that reads that file (`headers.mjs` serves it). The page should have an origin of its own, since
+  OPFS and Cache Storage are shared across one.
+- A Trusted Types policy that refuses HTML and script, and script URLs except same-origin `.wasm`,
+  `worker.js` and `sw.js`.
+- The service worker answers and caches only the files in its `SHELL` list.
+- The first local-model ask adds a second policy holding `connect-src` to the origin and
+  `http://127.0.0.1:*`, so the document cannot reach `api.anthropic.com` until it is reloaded, and
+  an ask in another mode after it is refused.
 - Requests with `redirect: 'error'` and `credentials: 'omit'`.
 - The key stays in the tab, and in `sessionStorage` only if "Remember the key in this tab" is ticked.
 - "Confirm before sending" is on by default; each request is shown in the log and waits for Send or
