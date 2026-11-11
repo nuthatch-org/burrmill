@@ -9,7 +9,8 @@ it. The page does the HTTP (`demo/app.js`); the crates do none.
 - `crates/burrmill-ingest`: untrusted CSV, Parquet with its `parquet` feature and JSON with `json`,
   to Arrow under a budget. It does not depend on the engine. JSON is an array of objects or objects
   one after another; a key is a column name, so it is part of the schema and leaves with it, and a
-  nested value stays in its cell as text.
+  nested value stays in its cell as text. A Parquet file with a list or map column is refused,
+  since nothing in the file bounds what one decodes to; a struct of plain fields is read as text.
 - `crates/burrmill-wasm`: the JS package. Ingest, the engine (`Engine::open_empty_within`, one table
   `t`), the card, the checks on each mode's feedback and on the model's answer (`src/session.rs`,
   `src/aggregates.rs`, `src/pseudonym.rs`, `src/redact.rs`, `src/model.rs`, `src/chart.rs`).

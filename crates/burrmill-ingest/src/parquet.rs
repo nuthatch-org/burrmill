@@ -39,6 +39,14 @@ pub(crate) fn read(
     let schema = Arc::clone(builder.schema());
     let width = schema.fields().len() as u64;
     budget.charge("max_columns", budget.max_columns, width)?;
+    // A flat column decodes a value a row, and rows are counted. A repeated one decodes as many
+    // as its levels say, which neither the footer nor a page header has to admit to.
+    let schema_descr = meta.file_metadata().schema_descr();
+    if schema_descr.columns().iter().any(|c| c.max_rep_level() > 0) {
+        return Err(IngestError::Unsupported {
+            format: "parquet with a list or map column",
+        });
+    }
     let mut declared_rows = meta.file_metadata().num_rows().max(0) as u64;
     for rg in meta.row_groups() {
         declared_rows = declared_rows.max(rg.num_rows().max(0) as u64);
