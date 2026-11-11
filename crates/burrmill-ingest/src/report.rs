@@ -73,8 +73,17 @@ pub struct RowIssue {
     pub reason: Issue,
 }
 
+/// What the bytes were read as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Csv,
+    Parquet,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestReport {
+    pub format: Format,
+    /// How CSV was read. For Parquet, the defaults: nothing here was read from the file.
     pub dialect: Dialect,
     pub header: bool,
     pub rows: u64,
@@ -96,19 +105,23 @@ impl IngestReport {
 
 impl std::fmt::Display for IngestReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "csv delim={} quote={} encoding={} locale={} header={} rows={}",
-            self.dialect.delimiter as char,
-            self.dialect.quote as char,
-            self.dialect.encoding.name(),
-            match self.dialect.locale {
-                Locale::Point => "point",
-                Locale::Comma => "comma",
-            },
-            self.header,
-            self.rows,
-        )?;
+        if self.format == Format::Parquet {
+            writeln!(f, "parquet rows={}", self.rows)?;
+        } else {
+            writeln!(
+                f,
+                "csv delim={} quote={} encoding={} locale={} header={} rows={}",
+                self.dialect.delimiter as char,
+                self.dialect.quote as char,
+                self.dialect.encoding.name(),
+                match self.dialect.locale {
+                    Locale::Point => "point",
+                    Locale::Comma => "comma",
+                },
+                self.header,
+                self.rows,
+            )?;
+        }
         for c in &self.columns {
             writeln!(
                 f,

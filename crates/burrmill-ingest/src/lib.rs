@@ -1,14 +1,18 @@
-//! `burrmill-ingest`: untrusted CSV in, Arrow out, under counted budgets.
+//! `burrmill-ingest`: untrusted CSV, and Parquet with the `parquet` feature, in; Arrow out, under
+//! counted budgets.
 //!
-//! The browser tab's reader (`docs/browser.md`). The engine is not a dependency; `burrmill-wasm` joins the two for the browser
-//! tab. CSV is the only input (#147). The report describes the file and does not contain cell
-//! values; [`Table::preview`] is how a local UI reads rows.
+//! The browser tab's reader (`docs/browser.md`). The engine is not a dependency; `burrmill-wasm`
+//! joins the two for the browser tab. JSON (#253) and XLSX (#254) are not read yet. The report
+//! describes the file and does not contain cell values; [`Table::preview`] is how a local UI reads
+//! rows.
 
 mod budget;
 mod csv;
 mod encoding;
 mod error;
 mod infer;
+#[cfg(feature = "parquet")]
+mod parquet;
 mod report;
 mod sniff;
 mod source;
@@ -30,16 +34,18 @@ use arrow::datatypes::{
 
 pub use budget::{Budget, BudgetUse};
 pub use error::{BudgetBreach, IngestError, Result};
-pub use report::{ColumnReport, InferredType, IngestReport, Issue, MAX_ISSUES, RowIssue};
+pub use report::{ColumnReport, Format, InferredType, IngestReport, Issue, MAX_ISSUES, RowIssue};
 pub use sniff::{Dialect, EncodingKind, Locale};
 pub use source::{ByteSource, ReadSource, SliceSource};
 
-/// What the caller claims the bytes are. [`FormatHint::Sniff`] refuses Parquet, zip and gzip
-/// magic instead of parsing them as text. [`FormatHint::Csv`] parses anyway.
+/// What the caller claims the bytes are. [`FormatHint::Sniff`] opens Parquet by its magic, where
+/// the `parquet` feature is on, and refuses it, zip and gzip otherwise rather than parse them as
+/// text. [`FormatHint::Csv`] parses anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatHint {
     Sniff,
     Csv,
+    Parquet,
 }
 
 /// Local table. `Debug` prints the report only, so logging a table cannot leak a cell.
@@ -127,6 +133,20 @@ pub fn ingest(source: &mut dyn ByteSource, hint: FormatHint, budget: &Budget) ->
         raw.len() as u64,
     )?;
 
+    let parquet = match hint {
+        FormatHint::Parquet => true,
+        FormatHint::Sniff => raw.starts_with(b"PAR1"),
+        FormatHint::Csv => false,
+    };
+    if parquet {
+        #[cfg(feature = "parquet")]
+        {
+            let (batches, report) = parquet::read(raw, budget, &check_clock)?;
+            return Ok(Table { batches, report });
+        }
+        #[cfg(not(feature = "parquet"))]
+        return Err(IngestError::Unsupported { format: "parquet" });
+    }
     if hint == FormatHint::Sniff
         && let Some(format) = sniff::refused_magic(&raw)
     {

@@ -17,6 +17,10 @@ pub enum IngestError {
     Unsupported {
         format: &'static str,
     },
+    /// The bytes claim the container named and do not decode. The decoder's message is not kept.
+    Invalid {
+        format: &'static str,
+    },
     /// The byte source failed. The message is the source's, not a cell.
     Source(String),
 }
@@ -36,6 +40,7 @@ impl fmt::Display for IngestError {
             Self::Unsupported { format } => {
                 write!(f, "unsupported format: {format}")
             }
+            Self::Invalid { format } => write!(f, "not a readable {format} file"),
             Self::Source(m) => write!(f, "source: {m}"),
         }
     }
