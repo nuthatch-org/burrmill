@@ -227,7 +227,7 @@ fn refusals_carry_over() {
     let e = Engine::open_segments(&segs).unwrap();
     assert!(explain(&e, &fold("")).contains("OwnedSignedFold"));
     match e.sql(&fold("")) {
-        Err(BurrmillError::Substrate(m)) => assert!(m.contains("does not fit"), "{m}"),
+        Err(BurrmillError::Overflow(m)) => assert!(m.contains("does not fit"), "{m}"),
         other => panic!("{other:?}"),
     }
 

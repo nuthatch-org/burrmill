@@ -361,7 +361,9 @@ impl<const N: usize> Groups<N> {
         let name = self.spec.name;
         let out_ty = &self.spec.out_ty;
         let overflow = |v: Wide<N>| -> Result<ArrayRef> {
-            exec_err!("{name} overflow: exact result {v} does not fit {out_ty}")
+            Err(super::errors::overflow(format!(
+                "{name} overflow: exact result {v} does not fit {out_ty}"
+            )))
         };
         let n = sums.len();
         Ok(match out_ty {
@@ -596,13 +598,13 @@ fn validate_precision(a: &ArrayRef) -> Result<()> {
     match a.data_type() {
         DataType::Decimal128(p, _) => a
             .as_primitive::<Decimal128Type>()
-            .validate_decimal_precision(*p)?,
+            .validate_decimal_precision(*p),
         DataType::Decimal256(p, _) => a
             .as_primitive::<Decimal256Type>()
-            .validate_decimal_precision(*p)?,
-        _ => {}
+            .validate_decimal_precision(*p),
+        _ => Ok(()),
     }
-    Ok(())
+    .map_err(|e| super::errors::overflow(e.to_string()))
 }
 
 impl ScalarUDFImpl for CheckedBinary {
@@ -641,15 +643,16 @@ impl ScalarUDFImpl for CheckedBinary {
             .all(|a| matches!(a, ColumnarValue::Scalar(_)));
         let arrays = ColumnarValue::values_to_arrays(&args.args)?;
         let out: ArrayRef = match self.op {
-            Some(Operator::Plus) => numeric::add(&arrays[0], &arrays[1])?,
-            Some(Operator::Minus) => numeric::sub(&arrays[0], &arrays[1])?,
-            Some(Operator::Multiply) => numeric::mul(&arrays[0], &arrays[1])?,
+            Some(Operator::Plus) => numeric::add(&arrays[0], &arrays[1]),
+            Some(Operator::Minus) => numeric::sub(&arrays[0], &arrays[1]),
+            Some(Operator::Multiply) => numeric::mul(&arrays[0], &arrays[1]),
             Some(Operator::Modulo) => {
                 least_modulo_minus_one(&arrays[0], &arrays[1])?;
-                numeric::rem(&arrays[0], &arrays[1])?
+                numeric::rem(&arrays[0], &arrays[1])
             }
-            _ => numeric::neg(&arrays[0])?,
-        };
+            _ => numeric::neg(&arrays[0]),
+        }
+        .map_err(super::errors::arithmetic)?;
         validate_precision(&out)?;
         let want = args.return_field.data_type();
         let out = if out.data_type() == want {
@@ -662,7 +665,8 @@ impl ScalarUDFImpl for CheckedBinary {
                     safe: false,
                     ..Default::default()
                 },
-            )?;
+            )
+            .map_err(|e| super::errors::overflow(e.to_string()))?;
             validate_precision(&c)?;
             c
         };
@@ -684,7 +688,9 @@ fn least_modulo_minus_one(l: &ArrayRef, r: &ArrayRef) -> Result<()> {
         let minus_one = T::Native::ONE.neg_wrapping();
         for (x, y) in l.as_primitive::<T>().iter().zip(r.as_primitive::<T>()) {
             if x == Some(least) && y == Some(minus_one) {
-                return exec_err!("Overflow in division of {least} % -1");
+                return Err(super::errors::overflow(format!(
+                    "Overflow in division of {least} % -1"
+                )));
             }
         }
         Ok(())
@@ -787,7 +793,9 @@ impl ScalarUDFImpl for CheckedShift {
                 }
                 let v = x << n;
                 if v > max || v < min {
-                    return exec_err!("Overflow in left shift ({x} << {n})");
+                    return Err(super::errors::overflow(format!(
+                        "Overflow in left shift ({x} << {n})"
+                    )));
                 }
                 v
             }));

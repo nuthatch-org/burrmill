@@ -6,7 +6,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use burrmill::{Budget, Engine};
+use burrmill::{Budget, BurrmillError, Engine};
 
 struct Counting;
 static LIVE: AtomicUsize = AtomicUsize::new(0);
@@ -124,8 +124,8 @@ fn no_statement_builds_values_past_its_pool() {
     for sql in &refused {
         let (grew, got) = peak(&e, sql);
         let err = match got {
-            Ok(_) => panic!("answered: {sql}"),
-            Err(err) => err.to_string(),
+            Err(err @ BurrmillError::LimitExceeded(_)) => err.to_string(),
+            other => panic!("{sql}: {other:?}"),
         };
         eprintln!(
             "{:>6.1} MiB  {}",

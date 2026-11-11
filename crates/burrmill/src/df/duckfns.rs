@@ -1085,7 +1085,11 @@ fn date_diff(part: &str, a: NaiveDateTime, b: NaiveDateTime, ua: i64, ub: i64) -
         "millisecond" | "ms" | "msec" => floor(ub, 1_000) - floor(ua, 1_000),
         "microsecond" | "us" | "usec" => match ub.checked_sub(ua) {
             Some(v) => v,
-            None => return exec_err!("Overflow in date_diff of {ub} - {ua} microseconds"),
+            None => {
+                return Err(super::errors::overflow(format!(
+                    "Overflow in date_diff of {ub} - {ua} microseconds"
+                )));
+            }
         },
         other => return exec_err!("date_diff: unit {other} is not supported here"),
     })
