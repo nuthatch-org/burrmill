@@ -168,7 +168,7 @@ pub fn duckdb_phrase(msg: &str) -> Option<String> {
     if msg.contains("ParserError(") {
         if let Some(why) = after(msg, "ParserError(\"")
             .and_then(|r| r.split('"').next())
-            .filter(|w| w.ends_with("is not supported here"))
+            .filter(|w| w.contains(" is not supported here"))
         {
             return Some(format!("Parser Error: {why}"));
         }

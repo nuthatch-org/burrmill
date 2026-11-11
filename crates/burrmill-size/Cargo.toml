@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "RFC-0047 size probe. Links ingest with the operator, and with the engine. Not a JS API."
+description = "Size probe for the browser tab (docs/browser.md). Links ingest with the operator, and with the engine. Not a JS API."
 
 [dependencies]
 burrmill = { path = "../burrmill" }
