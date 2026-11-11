@@ -767,3 +767,20 @@ fn a_missing_column_reads_as_duckdb_with_or_without_a_near_match() {
         r#"Binder Error: Table "t" does not have a column named "zzzz""#
     );
 }
+
+#[test]
+fn levenshtein_answers_short_strings_and_refuses_a_long_pair_at_once() {
+    let engine = Engine::open_empty().unwrap();
+    assert_eq!(
+        value_of(engine, "SELECT levenshtein('kitten', 'sitting') AS n"),
+        r#"[{"n":3}]"#
+    );
+    // A hundred thousand bytes a side was 7 s past its cancel, and twelve minutes at a million.
+    let engine = Engine::open_empty().unwrap();
+    let started = std::time::Instant::now();
+    let err = engine
+        .sql("SELECT levenshtein(repeat('a', 100000), repeat('b', 100000)) AS n")
+        .unwrap_err();
+    assert!(err.to_string().contains("levenshtein over"), "{err}");
+    assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+}
