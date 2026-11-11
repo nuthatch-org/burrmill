@@ -39,7 +39,10 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
 
 ## The four modes
 
-- **Schema** (the default). Only the above.
+- **Schema** (the default). Only the above, and a second request only after a failure before any
+  row was read (`Failure::before_rows`). A statement that finds no rows, or fails while reading
+  them, is shown on the page and nothing more is sent, so whether another request arrives depends
+  on the schema alone.
 - **Aggregates**, k = 10 (`AGGREGATE_K`). The model's statement is rewritten by `measure_sql`: it
   must be one grouped read of `t`; `HAVING`, `LIMIT` and any `group_n` it wrote are removed, and
   `count(*) AS group_n` is added. Each output must be a grouping key, or `count`, `sum` or `avg` of a
