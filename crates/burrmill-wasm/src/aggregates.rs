@@ -23,9 +23,16 @@ const UNMEASURED: &str = "group size was not measured";
 const NOT_SUMMARY: &str = "only grouping keys and count, sum or avg of a column leave";
 const SHADOWED: &str = "a CTE named t is not the upload";
 
+pub(crate) struct Measured {
+    /// The statement as written, with `count(*) AS group_n` added to each group.
+    pub answer: String,
+    /// How many groups are under k, before `HAVING` or a limit can hide one.
+    pub dropped: String,
+}
+
 /// Rewrite a grouped read of `t` so `count(*) AS group_n` is measured here.
 /// A count the model wrote is removed: `10 AS group_n` would let a small group through.
-pub(crate) fn measure_sql(sql: &str) -> Result<String, &'static str> {
+pub(crate) fn measure_sql(sql: &str) -> Result<Measured, &'static str> {
     let mut query = parse_one(sql)?;
     if !query_ok(&query) {
         return Err(SKIP);
@@ -40,12 +47,17 @@ pub(crate) fn measure_sql(sql: &str) -> Result<String, &'static str> {
     let Some(select) = outermost_mut(&mut query.body) else {
         return Err(SKIP);
     };
-    // HAVING and LIMIT can hide how many groups were under k.
-    select.having = None;
     select.projection.retain(|item| !alias_is_group_n(item));
     select.projection.push(count_star());
+    let answer = Statement::Query(query.clone()).to_string();
+    if let Some(select) = outermost_mut(&mut query.body) {
+        select.having = None;
+    }
     clear_limits(&mut query);
-    Ok(Statement::Query(query).to_string())
+    let dropped = format!(
+        "SELECT count(*) AS dropped FROM ({query}) AS measured WHERE group_n < {AGGREGATE_K}"
+    );
+    Ok(Measured { answer, dropped })
 }
 
 pub(crate) fn skipped(reason: &str) -> String {
@@ -58,7 +70,7 @@ pub(crate) fn skipped(reason: &str) -> String {
     .to_string()
 }
 
-pub(crate) fn filter_payload(out: &QueryOut) -> String {
+pub(crate) fn filter_payload(out: &QueryOut, measured: &QueryOut) -> String {
     let Some(idx) = out
         .columns
         .iter()
@@ -66,16 +78,24 @@ pub(crate) fn filter_payload(out: &QueryOut) -> String {
     else {
         return skipped(UNMEASURED);
     };
+    let Some(dropped) = measured
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .and_then(|cell| cell.as_deref())
+        .and_then(parse_size)
+    else {
+        return skipped(UNMEASURED);
+    };
     let mut groups = Vec::new();
-    let mut dropped = 0u64;
     for row in &out.rows {
-        match row
+        if row
             .get(idx)
             .and_then(|cell| cell.as_deref())
             .and_then(parse_size)
+            .is_some_and(|n| n >= AGGREGATE_K)
         {
-            Some(n) if n >= AGGREGATE_K => groups.push(row_object(&out.columns, row)),
-            _ => dropped += 1,
+            groups.push(row_object(&out.columns, row));
         }
     }
     let columns: Vec<_> = out
@@ -170,7 +190,52 @@ fn accept(select: &Select) -> Result<(), &'static str> {
     if exprs.iter().any(tainted) {
         return Err(TAINTED);
     }
-    items_ok(&select.projection, exprs)
+    items_ok(&select.projection, exprs)?;
+    match &select.having {
+        Some(having) if !condition(having, &select.projection, exprs) => Err(NOT_SUMMARY),
+        _ => Ok(()),
+    }
+}
+
+/// `HAVING` chooses among groups by what may leave anyway, so `max(salary) > ..` cannot ask
+/// about one member.
+fn condition(expr: &Expr, items: &[SelectItem], keys: &[Expr]) -> bool {
+    match expr {
+        Expr::Nested(inner) => condition(inner, items, keys),
+        Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            expr,
+        } => condition(expr, items, keys),
+        Expr::BinaryOp { left, op, right } => match op {
+            BinaryOperator::And | BinaryOperator::Or => {
+                condition(left, items, keys) && condition(right, items, keys)
+            }
+            BinaryOperator::Eq
+            | BinaryOperator::NotEq
+            | BinaryOperator::Lt
+            | BinaryOperator::LtEq
+            | BinaryOperator::Gt
+            | BinaryOperator::GtEq => operand(left, items, keys) && operand(right, items, keys),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn operand(expr: &Expr, items: &[SelectItem], keys: &[Expr]) -> bool {
+    let named = |name: &Ident| {
+        items.iter().any(|item| match item {
+            SelectItem::ExprWithAlias { alias, .. } => {
+                alias.value.eq_ignore_ascii_case(&name.value)
+            }
+            _ => false,
+        })
+    };
+    match expr {
+        Expr::Identifier(name) if named(name) => true,
+        expr if keys.contains(expr) => true,
+        expr => summary(expr),
+    }
 }
 
 /// A CTE named `t` shadows the upload, so `FROM t` would read rows this crate never counted.
@@ -570,6 +635,60 @@ mod tests {
             );
             assert_eq!(value["dropped"], AGGREGATE_K - 1, "{sql}: {payload}");
         }
+    }
+
+    #[test]
+    fn having_and_limit_shape_the_answer_and_a_small_group_still_counts() {
+        let mut lines = vec!["merchant,amount".to_string()];
+        for (merchant, rows, amount) in [
+            ("BIG_A", 10, "1.00"),
+            ("BIG_B", 12, "5.00"),
+            ("BIG_C", 15, "2.00"),
+            ("CANARY_SMALL", 3, "0.50"),
+        ] {
+            for _ in 0..rows {
+                lines.push(format!("{merchant},{amount}"));
+            }
+        }
+        let table = burrmill_ingest::ingest_bytes(
+            lines.join("\n").as_bytes(),
+            FormatHint::Sniff,
+            &Budget::untrusted(),
+        )
+        .unwrap();
+        let s = Session::open(table).unwrap();
+        let base = "SELECT merchant, sum(amount) AS total FROM t GROUP BY merchant";
+        let cases = [
+            (
+                "HAVING sum(amount) > 15 ORDER BY merchant",
+                vec!["BIG_B", "BIG_C"],
+            ),
+            (
+                "HAVING total > 15 ORDER BY merchant",
+                vec!["BIG_B", "BIG_C"],
+            ),
+            ("ORDER BY total DESC LIMIT 1", vec!["BIG_B"]),
+            ("ORDER BY total LIMIT 1", vec![]),
+            ("HAVING count(*) < 5", vec![]),
+        ];
+        for (tail, want) in cases {
+            let sql = format!("{base} {tail}");
+            let payload = s.aggregate_feedback(&sql).unwrap();
+            assert!(!payload.contains("CANARY_SMALL"), "{sql}: {payload}");
+            let value: Value = serde_json::from_str(&payload).unwrap();
+            let got: Vec<_> = value["groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|g| g["merchant"].as_str().unwrap())
+                .collect();
+            assert_eq!(got, want, "{sql}: {payload}");
+            assert_eq!(value["dropped"], 1, "{sql}: {payload}");
+        }
+        let probe = format!("{base} HAVING max(amount) > 4");
+        let payload = s.aggregate_feedback(&probe).unwrap();
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["omitted"], NOT_SUMMARY, "{payload}");
     }
 
     #[test]
