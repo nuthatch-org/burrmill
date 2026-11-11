@@ -157,8 +157,14 @@ impl sqlparser::dialect::Dialect for Duck {
             sqlparser::tokenizer::Token::Word(w)
                 if matches!(w.keyword, Keyword::PIVOT | Keyword::UNPIVOT) =>
             {
+                let instead = match w.keyword {
+                    Keyword::PIVOT => {
+                        "one aggregate per value, with FILTER (WHERE ...) or CASE, under GROUP BY"
+                    }
+                    _ => "one SELECT per column, joined by UNION ALL",
+                };
                 Some(Err(sqlparser::parser::ParserError::ParserError(format!(
-                    "{} is not supported here",
+                    "{} is not supported here; write {instead}",
                     w.value.to_ascii_uppercase()
                 ))))
             }
@@ -201,7 +207,7 @@ impl sqlparser::dialect::Dialect for Duck {
             }
             sqlparser::tokenizer::Token::Word(w) if w.value.eq_ignore_ascii_case("glob") => {
                 return Some(Err(sqlparser::parser::ParserError::ParserError(
-                    "GLOB is not supported here".into(),
+                    "GLOB is not supported here; LIKE is, with % for * and _ for ?".into(),
                 )));
             }
             _ => {}
@@ -1313,16 +1319,25 @@ fn minutes_only(s: &str) -> bool {
         && b[7] == b'-'
 }
 
-/// DuckDB functions with no counterpart here, refused by name rather than as unknown.
+/// DuckDB functions with no counterpart here, refused by name with what to write instead.
 fn unsupported_function(f: &sq::Function) -> Option<String> {
     let [sq::ObjectNamePart::Identifier(name)] = f.name.0.as_slice() else {
         return None;
     };
-    matches!(
-        name.value.to_ascii_lowercase().as_str(),
-        "approx_count_distinct" | "list_aggregate" | "array_aggregate" | "strptime" | "columns"
-    )
-    .then(|| format!("{} is not supported here", name.value))
+    let instead = match name.value.to_ascii_lowercase().as_str() {
+        "approx_count_distinct" => Some("COUNT(DISTINCT ...) gives the exact count"),
+        "list_aggregate" | "array_aggregate" => {
+            Some("aggregate in a subquery, as (SELECT sum(v) FROM (SELECT unnest(...) AS v))")
+        }
+        // `CAST(... AS TIMESTAMP)` is nanoseconds here and microseconds in DuckDB, so not named.
+        "strptime" => None,
+        "columns" => Some("name the columns, or use * EXCLUDE (...)"),
+        _ => return None,
+    };
+    Some(match instead {
+        Some(instead) => format!("{} is not supported here; {instead}", name.value),
+        None => format!("{} is not supported here", name.value),
+    })
 }
 
 /// DuckDB's `if(c, a, b)`, which is `CASE WHEN c THEN a ELSE b END`.
@@ -1396,7 +1411,7 @@ fn like_pattern(
             Some('\\') => return Ok(()),
             Some(c) => {
                 return Err(format!(
-                    "LIKE ... ESCAPE '{c}' over a pattern that is not a literal is not supported here"
+                    "LIKE ... ESCAPE '{c}' over a pattern that is not a literal is not supported here; ESCAPE '\\' is"
                 ));
             }
         }
@@ -3542,7 +3557,9 @@ impl ScalarUDFImpl for RoundInt {
                             match q.checked_mul(unit) {
                                 Some(x) => Some(x),
                                 None => {
-                                    return exec_err!("Overflow rounding {v} to a whole number");
+                                    return Err(super::errors::overflow(format!(
+                                        "Overflow rounding {v} to a whole number"
+                                    )));
                                 }
                             }
                         }

@@ -1,33 +1,37 @@
 //! # Burrmill
 //!
-//! SQL over sealed Parquet segments plus a live tip, with exact integer arithmetic and
-//! refuse-on-overflow, in one binary with nothing to configure.
+//! SQL over sealed Parquet segments plus a live tip, in DuckDB's dialect, with exact integer
+//! arithmetic that refuses rather than wraps. The engine nuthatch embeds.
 //!
-//! ## What this is
+//! ## The engine
 //!
-//! A **query engine-layer**. It owns the semantics *and* the execution of a deliberately small
-//! admitted subset of SQL - the shapes a blockchain indexer actually runs - and it owns them all the
-//! way down to the vectorised operator. It is not a general database and does not want to be. It
-//! needs to be faster than DuckDB on *these* shapes over *this* layout, and merely honest about
-//! everything else.
+//! `Engine` (feature `datafusion`) is DataFusion 55 with Burrmill's rules: checked arithmetic,
+//! DuckDB's dialect, plan shapes DataFusion lacks, and a catalogue that registers the nest's tables
+//! and nothing else. Only `SELECT` runs; DDL, DML, `COPY` and table functions refuse before they
+//! plan.
 //!
-//! ## What it rents, permanently
+//! - **Open.** `Engine::open_nest` reads a nest root (`segments/` and an optional `schema.json`),
+//!   `Engine::open_segments` a bare segments directory, `Engine::open_store` an object store.
+//! - **Budget.** `Engine::open_nest_budgeted` holds every statement to a `Budget`: memory, threads,
+//!   and where to spill. Engines opened on one `SharedPool` share its bound.
+//! - **Cancel.** `Engine::cancel_token` gives a [`CancelToken`] that stops the statement in flight
+//!   from another thread.
+//! - **Errors.** Every failure is a [`BurrmillError`]: a refused statement, an overflow, an exhausted
+//!   budget or a cancel is an error, never a wrapped number or a partial answer.
 //!
-//! Arrow for the in-memory format and its kernels, and parquet-rs for decode. Nobody solo-maintains
-//! a better SIMD kernel library, and the evidence that trying would pay does not exist. Everything
-//! above them is ours.
+//! ```no_run
+//! # #[cfg(feature = "datafusion")] {
+//! let engine = burrmill::Engine::open_nest(std::path::Path::new("./nest"))?;
+//! let batches = engine.sql("SELECT count(*) FROM transfers")?;
+//! # let _ = batches; }
+//! # Ok::<(), burrmill::BurrmillError>(())
+//! ```
 //!
-//! ## The three claims, and how to check them
+//! ## The owned operator
 //!
-//! - **Faster.** The ancestor of [`exec::SignedFoldExec`] measured 0.55-0.85x DuckDB across 24 of 24
-//!   configurations where general DataFusion measured 2.53-2.80x *slower* on the same query. The
-//!   `burrmill-bench` crate reproduces that head to head, parity first, timings second.
-//! - **Exact.** Integer overflow returns [`BurrmillError::Overflow`], never a wrapped number.
-//!   DataFusion wraps silently and has no core flag to stop it; DuckDB errors on `HUGEINT` but is
-//!   not watertight everywhere.
-//! - **Closed.** Table names resolve against a positive allowlist and there are no file-reading SQL
-//!   functions to register. `read_parquet('/etc/passwd')` does not fail a check - it has nowhere to
-//!   parse to.
+//! [`Burrmill`], the default build, is the vectorised signed fold the project began with: checked
+//! `i128` partial sums over arrow and parquet-rs, under a FIFO [`Gate`]. It answers the one shape it
+//! admits on its own, and the engine swaps it into its plans where the answer is provably equal.
 //!
 //! ```no_run
 //! use burrmill::{Burrmill, Limits};
@@ -69,7 +73,7 @@ pub const ENGINE: &str = concat!(
     env!("BURRMILL_SOURCE_HASH")
 );
 #[cfg(feature = "datafusion")]
-pub use df::{Budget, Engine, QueryMetrics, SharedPool, Stop};
+pub use df::{Budget, Engine, Param, QueryMetrics, SharedPool, Stop};
 pub use exec::agg::Rows;
 pub use exec::{CancelToken, FoldMetrics};
 pub use gate::Gate;

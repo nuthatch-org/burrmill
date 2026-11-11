@@ -10,6 +10,8 @@ edition = "2024"
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+# Nuthatch pins a git revision; crates.io is off by decision (#169).
+publish = false
 
 # **The default graph stays short.** Arrow and Parquet are rented permanently (RFC-0044 §4.2).
 # DataFusion is the optional host planner (roadmap 6.0, route C): component crates plus an owned

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use burrmill::Engine;
+use burrmill::{BurrmillError, Engine};
 use serde_json::{Value, json};
 
 fn segment(dir: &std::path::Path, n: u64, rows: &[(u64, &str, &str)]) -> (std::path::PathBuf, u64) {
@@ -252,7 +252,7 @@ fn a_statement_stops_at_its_own_token_and_deadline() {
     };
     let (mine_r, mine_took, theirs_r, theirs_took) = std::thread::scope(|s| {
         let theirs = s.spawn(|| {
-            let r = engine.sql_for_each_stoppable(RUNAWAY, &neighbour, None, |_| Ok(()));
+            let r = engine.sql_for_each_stoppable(RUNAWAY, &[], &neighbour, None, |_| Ok(()));
             (r, started.elapsed())
         });
         let (done, finished) = std::sync::mpsc::channel::<()>();
@@ -264,7 +264,7 @@ fn a_statement_stops_at_its_own_token_and_deadline() {
                 late.cancel();
             }
         });
-        let r = engine.sql_for_each_stoppable(RUNAWAY, &mine, None, |_| Ok(()));
+        let r = engine.sql_for_each_stoppable(RUNAWAY, &[], &mine, None, |_| Ok(()));
         let took = started.elapsed();
         let (theirs_r, theirs_took) = theirs.join().unwrap();
         let _ = done.send(());
@@ -399,8 +399,9 @@ fn a_bounded_engine_refuses_what_an_unbounded_one_answers() {
     bounded
         .register_facts("t", &declared(), vec![seg], &[], (None, None))
         .unwrap();
-    let err = bounded.sql(sql).unwrap_err().to_string();
-    assert!(err.contains("Resources exhausted"), "{err}");
+    let err = bounded.sql(sql).unwrap_err();
+    assert!(matches!(err, BurrmillError::LimitExceeded(_)), "{err:?}");
+    assert!(err.to_string().contains("Resources exhausted"), "{err}");
     assert_eq!(
         rows(&bounded, "SELECT count(*) AS n FROM t"),
         vec![json!({"n": 200000})]

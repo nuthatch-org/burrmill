@@ -42,7 +42,7 @@ fn hidden(name: &str) -> bool {
 impl Engine {
     /// No tables until the host registers them.
     pub fn open_empty() -> Result<Self> {
-        Self::from_tables(Vec::new(), Limits::default().max_threads, None, None)
+        Self::builder().open()
     }
 
     /// As `open_empty`, with every statement's working memory and the footer cache held under
@@ -58,12 +58,12 @@ impl Engine {
 
     /// As `open_empty`, held to `budget`.
     pub fn open_empty_budgeted(budget: super::Budget) -> Result<Self> {
-        Self::from_tables(Vec::new(), budget.threads, Some(budget), None)
+        Self::builder().budget(budget).open()
     }
 
     /// As `open_empty_budgeted`, with its statements drawing on `pool`, which other engines share.
     pub fn open_empty_sharing(budget: super::Budget, pool: &super::SharedPool) -> Result<Self> {
-        Self::from_tables(Vec::new(), budget.threads, Some(budget), Some(pool))
+        Self::builder().budget(budget).shared_pool(pool).open()
     }
 
     /// Define `name` over `files`, unioned by name with `hot` (unsealed rows as nuthatch keeps
@@ -301,7 +301,8 @@ impl Engine {
             .any(|t| t.to_ascii_lowercase() == lower)
     }
 
-    /// Every table and view except the parts a registration is built from, sorted.
+    /// Every table and view except the parts a registration is built from, sorted. This is the
+    /// canonical listing.
     pub fn visible_tables(&self) -> Vec<String> {
         self.session
             .table_names()

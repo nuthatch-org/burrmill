@@ -3,7 +3,6 @@
 //! Off unless the `datafusion` feature is enabled. The default `burrmill` graph stays free of it.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
@@ -14,7 +13,6 @@ use datafusion_sql::planner::SqlToRel;
 use sqlparser::ast::Statement as SqlStatement;
 
 use crate::error::{BurrmillError, Result};
-use crate::limits::Limits;
 
 mod addresses;
 mod bound;
@@ -32,8 +30,12 @@ mod latest;
 mod narrow;
 mod nullsub;
 mod onerow;
+mod params;
+pub use params::Param;
 mod outerorder;
 pub use depth::check_expr_bounds;
+mod builder;
+pub use builder::EngineBuilder;
 mod buildside;
 mod distinct;
 mod distinctrows;
@@ -74,7 +76,7 @@ mod running;
 #[path = "generated/schema_equivalence.rs"]
 mod schema_equivalence;
 
-use catalog::{NestTable, SegmentTable, apply_schema_json, discover_tables};
+use catalog::{NestTable, SegmentTable};
 use session::MiniSession;
 
 /// What one engine may use, as a host gives DuckDB `max_memory`, `threads` and `temp_directory`.
@@ -178,78 +180,7 @@ pub struct Engine {
     bound_segments: HashMap<(std::path::PathBuf, u64), arrow::datatypes::SchemaRef>,
 }
 
-fn nest_tables(root: &Path) -> Result<Vec<NestTable>> {
-    let mut tables = discover_tables(&root.join("segments"))?;
-    let schema = root.join("schema.json");
-    if schema.is_file() {
-        apply_schema_json(&mut tables, &schema)?;
-    }
-    if tables.is_empty() {
-        return Err(BurrmillError::NoSegments(format!(
-            "no tables under {}",
-            root.display()
-        )));
-    }
-    Ok(tables)
-}
-
 impl Engine {
-    /// Open every table under a `segments/` directory.
-    pub fn open_segments(segments: &Path) -> Result<Self> {
-        let tables = discover_tables(segments)?;
-        if tables.is_empty() {
-            return Err(BurrmillError::NoSegments(format!(
-                "no parquet tables under {}",
-                segments.display()
-            )));
-        }
-        Self::from_tables(tables, Limits::default().max_threads, None, None)
-    }
-
-    /// Open a nest root (`segments/` plus optional `schema.json` for unsealed and `_dec`).
-    pub fn open_nest(root: &Path) -> Result<Self> {
-        Self::from_tables(
-            nest_tables(root)?,
-            Limits::default().max_threads,
-            None,
-            None,
-        )
-    }
-
-    /// As `open_nest`, held to `budget`: the session a host opens, batch size included.
-    pub fn open_nest_budgeted(root: &Path, budget: Budget) -> Result<Self> {
-        Self::from_tables(nest_tables(root)?, budget.threads, Some(budget), None)
-    }
-
-    /// Open a nest held in an object store, `<root>/segments/` plus an optional `<root>/schema.json`:
-    /// a bucket, a mirror over HTTP, or bytes a tab already holds. Footers are read by range.
-    pub async fn open_store(
-        store: Arc<dyn object_store::ObjectStore>,
-        root: &str,
-        threads: usize,
-    ) -> Result<Self> {
-        let sub = |e: object_store::Error| BurrmillError::Substrate(e.to_string());
-        let root = object_store::path::Path::parse(root)
-            .map_err(|e| BurrmillError::Substrate(e.to_string()))?;
-        let mut tables = catalog::discover_store_tables(&store, &root).await?;
-        match object_store::ObjectStoreExt::get(&store, &root.clone().join("schema.json")).await {
-            Ok(got) => {
-                let raw = got.bytes().await.map_err(sub)?;
-                let raw = std::str::from_utf8(&raw)
-                    .map_err(|e| BurrmillError::Substrate(format!("schema.json: {e}")))?;
-                catalog::apply_schema_text(&mut tables, raw)?;
-            }
-            Err(object_store::Error::NotFound { .. }) => {}
-            Err(e) => return Err(sub(e)),
-        }
-        if tables.is_empty() {
-            return Err(BurrmillError::NoSegments(format!("no tables under {root}")));
-        }
-        let engine = Self::from_tables(tables, threads, None, None)?;
-        engine.attach_store(store)?;
-        Ok(engine)
-    }
-
     /// The store that [`Engine::register_store_facts`] reads segments from, and any table opened
     /// by [`Engine::open_store`]. Replaces an earlier one.
     pub fn attach_store(&self, store: Arc<dyn object_store::ObjectStore>) -> Result<()> {
@@ -422,6 +353,8 @@ impl Engine {
         self.session.function_names()
     }
 
+    /// Every registered name, the `__raw`, `__hot` and `__union` parts a statement may not name
+    /// included. [`Engine::visible_tables`] is the listing a host serves.
     pub fn tables(&self) -> Vec<String> {
         self.session.table_names()
     }
@@ -463,8 +396,9 @@ impl Engine {
         self.session.footer_bytes()
     }
 
-    /// Tasks alive on the engine's runtime. A cancelled statement returns before its partition tasks
-    /// stop, each at its next yield, and its memory goes back as they do: zero here is when it has.
+    /// Tasks alive on the engine's runtime. A cancelled or refused statement returns before its
+    /// partition tasks stop, each at its next yield, and its memory goes back as they do: zero here
+    /// is when it has.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn tasks_alive(&self) -> usize {
         self.runtime().metrics().num_alive_tasks()
@@ -506,21 +440,35 @@ impl Engine {
         metrics: Option<&mut QueryMetrics>,
         f: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
-        self.sql_for_each_stoppable(sql, &Stop::default(), metrics, f)
+        self.sql_for_each_with_params(sql, &[], metrics, f)
     }
 
-    /// As [`Engine::sql_for_each_metered`], stopped by `stop` as well as by the engine's token:
+    /// As [`Engine::sql_for_each_metered`], with `params` bound to `$1`, `$2` and on once the
+    /// statement has been refused or planned as any other is.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn sql_for_each_with_params(
+        &self,
+        sql: &str,
+        params: &[Param],
+        metrics: Option<&mut QueryMetrics>,
+        f: impl FnMut(RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        self.sql_for_each_stoppable(sql, params, &Stop::default(), metrics, f)
+    }
+
+    /// As [`Engine::sql_for_each_with_params`], stopped by `stop` as well as by the engine's token:
     /// `Cancelled` when its token or the engine's is cancelled, `Timeout` once its deadline passes.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn sql_for_each_stoppable(
         &self,
         sql: &str,
+        params: &[Param],
         stop: &Stop,
         metrics: Option<&mut QueryMetrics>,
         f: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
         let token = crate::CancelToken::under(&[&self.cancel, &stop.cancel], stop.deadline);
-        match self.run_statement(sql, &token, metrics, f) {
+        match self.run_statement(sql, params, &token, metrics, f) {
             Err(BurrmillError::Cancelled)
                 if token.timed_out()
                     && !self.cancel.is_cancelled()
@@ -536,6 +484,7 @@ impl Engine {
     fn run_statement(
         &self,
         sql: &str,
+        params: &[Param],
         token: &crate::CancelToken,
         mut metrics: Option<&mut QueryMetrics>,
         mut f: impl FnMut(RecordBatch) -> Result<()>,
@@ -544,6 +493,7 @@ impl Engine {
         refuse_hidden_names(sql)?;
         let logical = plan_query(&self.session, sql)?;
         refuse_non_query(sql)?;
+        let logical = params::bind(logical, params)?;
         // The host arms the engine's token and clears it. Clearing it here would run a statement
         // whose cancel arrived before it, or while it was still being planned.
         if token.is_cancelled() {
@@ -572,7 +522,7 @@ impl Engine {
                         })
                     };
                     self.runtime()
-                        .block_on(self.stream(logical, sql, token, &mut send, held))
+                        .block_on(self.stream(logical, sql, params, token, &mut send, held))
                 })
                 .map_err(|e| BurrmillError::Substrate(format!("statement thread: {e}")))?;
             // Refused by `f`: `rx` goes with the loop, the next send fails and the statement ends.
@@ -605,16 +555,29 @@ impl Engine {
     pub async fn sql_async_for_each(
         &self,
         sql: &str,
+        f: impl FnMut(RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        self.sql_async_for_each_with_params(sql, &[], f).await
+    }
+
+    /// As [`Engine::sql_async_for_each`], with `params` bound to `$1`, `$2` and on.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn sql_async_for_each_with_params(
+        &self,
+        sql: &str,
+        params: &[Param],
         mut f: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
         refuse_hidden_names(sql)?;
         let logical = plan_query(&self.session, sql)?;
         refuse_non_query(sql)?;
+        let logical = params::bind(logical, params)?;
         let token = crate::CancelToken::under(&[&self.cancel], None);
         if token.is_cancelled() {
             return Err(BurrmillError::Cancelled);
         }
-        self.stream(logical, sql, &token, &mut f, None).await
+        self.stream(logical, sql, params, &token, &mut f, None)
+            .await
     }
 
     /// Addresses are read as fixed binary while every value in an address column is one. The
@@ -624,6 +587,7 @@ impl Engine {
         &self,
         logical: datafusion_expr::LogicalPlan,
         sql: &str,
+        params: &[Param],
         token: &crate::CancelToken,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
         mut metrics: Option<&mut QueryMetrics>,
@@ -649,7 +613,7 @@ impl Engine {
             {
                 log::warn!("{m}: addresses are read as text from now on");
                 // Planned afresh: the plan that refused holds what its shared subqueries ran.
-                let fresh = plan_query(&self.session, sql)?;
+                let fresh = params::bind(plan_query(&self.session, sql)?, params)?;
                 self.stream_once(fresh, token, f, metrics).await
             }
             r => r,
@@ -809,9 +773,16 @@ impl Engine {
     /// once: a nested-loop join, and a recursive query, which has no static scan count at all.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn parquet_scans(&self, sql: &str) -> Result<u64> {
+        self.parquet_scans_with_params(sql, &[])
+    }
+
+    /// As [`Engine::parquet_scans`], for the statement `params` complete.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn parquet_scans_with_params(&self, sql: &str, params: &[Param]) -> Result<u64> {
         refuse_hidden_names(sql)?;
         let logical = plan_query(&self.session, sql)?;
         refuse_non_query(sql)?;
+        let logical = params::bind(logical, params)?;
         let plan = || {
             self.runtime()
                 .block_on(self.session.create_physical_plan(&logical))
@@ -1124,7 +1095,9 @@ fn plan_err(e: datafusion_common::DataFusionError) -> BurrmillError {
 
 fn df_err(e: datafusion_common::DataFusionError) -> BurrmillError {
     let s = errors::restate(e.to_string());
-    if s.contains("not yet implemented")
+    if let Some(typed) = errors::typed(&e, &s) {
+        typed
+    } else if s.contains("not yet implemented")
         || (s.contains("table function ") && s.contains("is not supported here"))
     {
         BurrmillError::NotAllowed(s)

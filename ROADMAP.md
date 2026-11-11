@@ -87,9 +87,10 @@ and occasionally double-counts is worthless.
 
 ## Stage 4 — more shapes, and the ratchet that measures them
 
-Today Burrmill owns exactly one plan shape. The coverage ratio (§4.6) is therefore 1 shape / n, and
-publishing that honestly from the start is what stops "hybrid now, own more later" becoming
-"hybrid forever".
+When this stage was written Burrmill owned exactly one plan shape, and the owned operator still
+does: the signed fold. Everything else runs as DataFusion plans under Burrmill's rules (stage 6), so
+the coverage ratio (§4.6) is still 1 shape / n, and publishing that honestly is what stops "hybrid
+now, own more later" becoming "hybrid forever".
 
 | # | Work | Done when |
 |---|---|---|
@@ -182,6 +183,20 @@ is not a win and is tracked as burrmill#7.
 
 Phases 2 (engine trait, shadow mode) and 3 (cutover and removal) happen in nuthatch and are listed
 in the plan.
+
+---
+
+## Stage 7 · the engine in a browser tab · **BUILT, PAGE NOT YET SAFE TO HAND A STRANGER**
+
+What the browser crates and the page do today is in `docs/browser.md`.
+
+| # | Work | Done when |
+|---|---|---|
+| ~~7.1~~ | ~~The engine on wasm32~~ **· LANDED 2026-10-16** (#106, #109, #111) | No native-only runtime, an async query path, an engine opened from an object store. The Lodestar nest's 23 views answer identically to native |
+| ~~7.2~~ | ~~Untrusted CSV to Arrow~~ **· LANDED 2026-11-10** (#128, then #195, #196, #208) | `burrmill-ingest` under counted budgets, no C in its wasm32 graph, a fuzz target. CSV only (#147) |
+| ~~7.3~~ | ~~The tab and the 8 MiB gate~~ **· LANDED** (#128, #192) | `burrmill-wasm` and `demo/`: schema, aggregates, pseudonymised and local-only modes. Reader plus engine 7.47 MB gzipped, gated in CI |
+| 7.4 | The privacy modes hold | The cold audit's leaks are closed: #129, #130, #131, #133 (p0), #132, #134, #135, #136. Until then no mode is a privacy claim |
+| 7.5 | The page is usable | #175, #176, #177, #178, #179, and its browser tests run in CI (#166) |
 
 ---
 
