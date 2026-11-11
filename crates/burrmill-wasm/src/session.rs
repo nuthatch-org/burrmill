@@ -642,8 +642,10 @@ fn date_bounds(batches: &[RecordBatch], idx: usize) -> Option<(String, String)> 
 }
 
 fn dialect_label(report: &IngestReport) -> String {
-    if report.format == burrmill_ingest::Format::Parquet {
-        return "parquet".to_string();
+    match report.format {
+        burrmill_ingest::Format::Parquet => return "parquet".to_string(),
+        burrmill_ingest::Format::Json => return "json".to_string(),
+        burrmill_ingest::Format::Csv => {}
     }
     let d = &report.dialect;
     format!(

@@ -24,13 +24,16 @@ enum Kind {
     Text,
 }
 
+/// `keyed` is for records with keys, JSON's: the first row is the names whatever it looks like,
+/// a short row is missing its last keys, and a column flagged in `keyed` held nested values.
 pub fn build(
     parsed: Parsed,
     dialect: Dialect,
     budget_bytes: u64,
+    keyed: Option<&[bool]>,
 ) -> (Vec<RecordBatch>, IngestReport) {
     let width = parsed.rows.iter().map(|r| r.len()).max().unwrap_or(0);
-    let header = is_header(&parsed.rows, dialect.locale);
+    let header = keyed.is_some() || is_header(&parsed.rows, dialect.locale);
     let data: &[Row] = if header {
         &parsed.rows[1..]
     } else {
@@ -39,7 +42,10 @@ pub fn build(
     let names = column_names(header.then(|| parsed.rows.first()).flatten(), width);
 
     let mut report = IngestReport {
-        format: crate::report::Format::Csv,
+        format: match keyed {
+            Some(_) => crate::report::Format::Json,
+            None => crate::report::Format::Csv,
+        },
         dialect,
         header,
         rows: data.len() as u64,
@@ -87,7 +93,7 @@ pub fn build(
             if col_idx >= row.len() {
                 kinds.push(Kind::Empty);
                 nulls += 1;
-                if col_idx == row.len() {
+                if col_idx == row.len() && keyed.is_none() {
                     report.push_issue(RowIssue {
                         row: (row_idx as u64) + 1,
                         column: Some(name.clone()),
@@ -118,6 +124,9 @@ pub fn build(
             note = Some(NOTE_LEADING_ZERO);
         } else if numeric && column_locale.is_none() {
             note = Some(NOTE_AMBIGUOUS_MARK);
+        }
+        if keyed.is_some_and(|nested| nested[col_idx]) {
+            note = Some(NOTE_NESTED);
         }
         if note.is_some() {
             (inferred, matched) = (InferredType::Text, non_empty);
@@ -559,6 +568,7 @@ fn digits<T: std::str::FromStr>(text: &str) -> Option<T> {
     text.parse().ok()
 }
 
+const NOTE_NESTED: &str = "kept as text: a value is a JSON object or array";
 const NOTE_LEADING_ZERO: &str = "kept as text: a value has a leading zero";
 const NOTE_AMBIGUOUS_MARK: &str = "kept as text: every number reads both as 1.234 and as 1,234, and nothing in the file says which";
 

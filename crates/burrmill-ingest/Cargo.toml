@@ -17,6 +17,9 @@ arrow = { workspace = true }
 bytes = "1"
 # The engine's own Parquet, Snappy only. Optional, so the CSV-only reader stays small.
 parquet = { workspace = true, optional = true }
+# The engine's own serde_json, for its syntax only. `raw_value` hands back a value's text.
+serde = { version = "1", default-features = false, features = ["std"], optional = true }
+serde_json = { version = "1", features = ["raw_value"], optional = true }
 
 # Feature unification only. Not called. See `lib.rs`.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -29,6 +32,8 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 link-wasm = []
 # Opens Parquet (#147). The tab and the size probe turn it on.
 parquet = ["dep:parquet"]
+# Opens JSON (#253). On for the tab and the size probe, as `parquet` is.
+json = ["dep:serde", "dep:serde_json"]
 
 [[bin]]
 name = "ingest-wasm"
@@ -43,6 +48,10 @@ parquet = { workspace = true, features = ["lz4"] }
 [[test]]
 name = "parquet"
 required-features = ["parquet"]
+
+[[test]]
+name = "json"
+required-features = ["json"]
 
 [[test]]
 name = "parquet_pages"

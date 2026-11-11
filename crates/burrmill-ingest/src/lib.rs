@@ -1,8 +1,8 @@
-//! `burrmill-ingest`: untrusted CSV, and Parquet with the `parquet` feature, in; Arrow out, under
-//! counted budgets.
+//! `burrmill-ingest`: untrusted CSV, Parquet with the `parquet` feature and JSON with `json`, in;
+//! Arrow out, under counted budgets.
 //!
 //! The browser tab's reader (`docs/browser.md`). The engine is not a dependency; `burrmill-wasm`
-//! joins the two for the browser tab. JSON (#253) and XLSX (#254) are not read yet. The report
+//! joins the two for the browser tab. XLSX is not read (#254). The report
 //! describes the file and does not contain cell values; [`Table::preview`] is how a local UI reads
 //! rows.
 
@@ -11,6 +11,8 @@ mod csv;
 mod encoding;
 mod error;
 mod infer;
+#[cfg(feature = "json")]
+mod json;
 #[cfg(feature = "parquet")]
 mod pages;
 #[cfg(feature = "parquet")]
@@ -42,12 +44,14 @@ pub use source::{ByteSource, ReadSource, SliceSource};
 
 /// What the caller claims the bytes are. [`FormatHint::Sniff`] opens Parquet by its magic, where
 /// the `parquet` feature is on, and refuses it, zip and gzip otherwise rather than parse them as
-/// text. [`FormatHint::Csv`] parses anyway.
+/// text. With the `json` feature it reads text that opens with `{` or `[` as JSON, and as CSV after
+/// all where that is not what it turns out to be. [`FormatHint::Csv`] parses anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatHint {
     Sniff,
     Csv,
     Parquet,
+    Json,
 }
 
 /// Local table. `Debug` prints the report only, so logging a table cannot leak a cell.
@@ -138,7 +142,7 @@ pub fn ingest(source: &mut dyn ByteSource, hint: FormatHint, budget: &Budget) ->
     let parquet = match hint {
         FormatHint::Parquet => true,
         FormatHint::Sniff => raw.starts_with(b"PAR1"),
-        FormatHint::Csv => false,
+        FormatHint::Csv | FormatHint::Json => false,
     };
     if parquet {
         #[cfg(feature = "parquet")]
@@ -166,10 +170,25 @@ pub fn ingest(source: &mut dyn ByteSource, hint: FormatHint, budget: &Budget) ->
         text.len() as u64,
     )?;
 
-    let dialect = sniff::sniff_dialect(&text, encoding);
-    let parsed = csv::parse_csv(&text, &dialect, budget, text.len() as u64, || {
-        check_clock(budget)
-    })?;
+    let records = keyed_records(&text, hint, budget, &mut || check_clock(budget))?;
+    let (parsed, dialect, nested) = match records {
+        Some((parsed, nested)) => {
+            let dialect = Dialect {
+                delimiter: b',',
+                quote: b'"',
+                encoding,
+                locale: Locale::Point,
+            };
+            (parsed, dialect, Some(nested))
+        }
+        None => {
+            let dialect = sniff::sniff_dialect(&text, encoding);
+            let parsed = csv::parse_csv(&text, &dialect, budget, text.len() as u64, || {
+                check_clock(budget)
+            })?;
+            (parsed, dialect, None)
+        }
+    };
     drop(text);
     check_clock(budget)?;
 
@@ -178,7 +197,7 @@ pub fn ingest(source: &mut dyn ByteSource, hint: FormatHint, budget: &Budget) ->
         return Err(budget.breach("max_rows", budget.max_rows, data_rows_with_possible_header));
     }
 
-    let (batches, mut report) = infer::build(parsed, dialect, bytes_read);
+    let (batches, mut report) = infer::build(parsed, dialect, bytes_read, nested.as_deref());
     if report.rows > budget.max_rows {
         return Err(budget.breach("max_rows", budget.max_rows, report.rows));
     }
@@ -194,6 +213,39 @@ pub fn ingest(source: &mut dyn ByteSource, hint: FormatHint, budget: &Budget) ->
         report.budget_used.memory_bytes,
     )?;
     Ok(Table { batches, report })
+}
+
+/// The text as JSON records and which columns held nested values, or `None` where it is to be
+/// read as CSV: the hint says so, or a sniffed `{` or `[` opened a CSV cell and not a document.
+#[cfg(feature = "json")]
+fn keyed_records(
+    text: &str,
+    hint: FormatHint,
+    budget: &Budget,
+    clock: &mut dyn FnMut() -> Result<()>,
+) -> Result<Option<(csv::Parsed, Vec<bool>)>> {
+    let sniffed = hint == FormatHint::Sniff && json::looks_like(text);
+    if hint != FormatHint::Json && !sniffed {
+        return Ok(None);
+    }
+    match json::parse(text, budget, text.len() as u64, clock) {
+        Ok(r) => Ok(Some((r.parsed, r.nested))),
+        Err(IngestError::Invalid { .. }) if sniffed => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(not(feature = "json"))]
+fn keyed_records(
+    _text: &str,
+    hint: FormatHint,
+    _budget: &Budget,
+    _clock: &mut dyn FnMut() -> Result<()>,
+) -> Result<Option<(csv::Parsed, Vec<bool>)>> {
+    if hint == FormatHint::Json {
+        return Err(IngestError::Unsupported { format: "json" });
+    }
+    Ok(None)
 }
 
 fn cell_string(col: &Arc<dyn Array>, row: usize) -> Option<String> {

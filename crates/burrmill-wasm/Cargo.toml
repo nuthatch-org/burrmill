@@ -13,7 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 burrmill = { path = "../burrmill", features = ["datafusion"] }
-burrmill-ingest = { path = "../burrmill-ingest", features = ["parquet"] }
+burrmill-ingest = { path = "../burrmill-ingest", features = ["json", "parquet"] }
 arrow = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

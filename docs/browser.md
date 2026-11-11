@@ -1,13 +1,15 @@
 # The browser tab
 
-What the demo page and `burrmill-wasm` do today, read from the code. A CSV or Parquet file is read
-and queried inside the tab; a model is asked for SQL, and only what is listed below goes to it. The
-page does the HTTP (`demo/app.js`); the crates do none.
+What the demo page and `burrmill-wasm` do today, read from the code. A CSV, JSON or Parquet file
+is read and queried inside the tab; a model is asked for SQL, and only what is listed below goes to
+it. The page does the HTTP (`demo/app.js`); the crates do none.
 
 ## Pieces
 
-- `crates/burrmill-ingest`: untrusted CSV, and Parquet with its `parquet` feature, to Arrow under a
-  budget. It does not depend on the engine.
+- `crates/burrmill-ingest`: untrusted CSV, Parquet with its `parquet` feature and JSON with `json`,
+  to Arrow under a budget. It does not depend on the engine. JSON is an array of objects or objects
+  one after another; a key is a column name, so it is part of the schema and leaves with it, and a
+  nested value stays in its cell as text.
 - `crates/burrmill-wasm`: the JS package. Ingest, the engine (`Engine::open_empty_within`, one table
   `t`), the card, the checks on each mode's feedback and on the model's answer (`src/session.rs`,
   `src/aggregates.rs`, `src/pseudonym.rs`, `src/redact.rs`, `src/model.rs`, `src/chart.rs`).
@@ -20,9 +22,9 @@ page does the HTTP (`demo/app.js`); the crates do none.
 
 Each request to the model (`promptText` and `requestBody` in `demo/app.js`) carries:
 
-- the card (`Session::card`): table name, row count, CSV dialect (`parquet` for a Parquet file),
-  each column's name, inferred type, null count and note, and ingest issues as row number, column
-  and reason. No cell value.
+- the card (`Session::card`): table name, row count, CSV dialect (`parquet` or `json` for those
+  files), each column's name, inferred type, null count and note, and ingest issues as row number,
+  column and reason. No cell value.
   For a column the user ticks as a sign, one word for its sign; for one ticked as a date, its
   minimum and maximum;
 - the grammar (`Session::grammar`): the admitted statement kinds and every function name;
