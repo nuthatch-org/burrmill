@@ -1072,7 +1072,9 @@ fn plan_err(e: datafusion_common::DataFusionError) -> BurrmillError {
 
 fn df_err(e: datafusion_common::DataFusionError) -> BurrmillError {
     let s = errors::restate(e.to_string());
-    if s.contains("not yet implemented")
+    if let Some(typed) = errors::typed(&e, &s) {
+        typed
+    } else if s.contains("not yet implemented")
         || (s.contains("table function ") && s.contains("is not supported here"))
     {
         BurrmillError::NotAllowed(s)

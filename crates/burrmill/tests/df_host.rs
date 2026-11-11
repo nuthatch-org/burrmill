@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use burrmill::Engine;
+use burrmill::{BurrmillError, Engine};
 use serde_json::{Value, json};
 
 fn segment(dir: &std::path::Path, n: u64, rows: &[(u64, &str, &str)]) -> (std::path::PathBuf, u64) {
@@ -344,8 +344,9 @@ fn a_bounded_engine_refuses_what_an_unbounded_one_answers() {
     bounded
         .register_facts("t", &declared(), vec![seg], &[], (None, None))
         .unwrap();
-    let err = bounded.sql(sql).unwrap_err().to_string();
-    assert!(err.contains("Resources exhausted"), "{err}");
+    let err = bounded.sql(sql).unwrap_err();
+    assert!(matches!(err, BurrmillError::LimitExceeded(_)), "{err:?}");
+    assert!(err.to_string().contains("Resources exhausted"), "{err}");
     assert_eq!(
         rows(&bounded, "SELECT count(*) AS n FROM t"),
         vec![json!({"n": 200000})]

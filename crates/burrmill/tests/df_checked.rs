@@ -163,6 +163,14 @@ fn refused(e: &Engine, sql: &str) -> String {
     }
 }
 
+/// Refused as overflow, and not as a broken file or a plan it could not make.
+fn overflowed(e: &Engine, sql: &str) -> String {
+    match e.sql(sql) {
+        Err(BurrmillError::Overflow(m)) => m,
+        other => panic!("{sql}: {other:?}"),
+    }
+}
+
 fn result_type(e: &Engine, sql: &str) -> DataType {
     e.sql(sql).unwrap()[0].schema().field(0).data_type().clone()
 }
@@ -193,7 +201,7 @@ fn order_independent_refusal() {
     )]);
     assert_eq!(one(&e, "SELECT SUM(v) FROM t"), D38MAX);
     let (_t, e) = engine(&[("t", vec![dec128(&[D38MAX]), dec128(&["1"])])]);
-    let m = refused(&e, "SELECT SUM(v) FROM t");
+    let m = overflowed(&e, "SELECT SUM(v) FROM t");
     assert!(m.contains("100000000000000000000000000000000000000"), "{m}");
 }
 
@@ -202,7 +210,7 @@ fn order_independent_refusal() {
 #[test]
 fn decimal128_sums() {
     let (_t, e) = engine(&[("t", vec![dec128(&[D38MAX]), dec128(&[D38MAX])])]);
-    refused(&e, "SELECT SUM(v) FROM t");
+    overflowed(&e, "SELECT SUM(v) FROM t");
     let (_t, e) = engine(&[(
         "t",
         vec![dec128(&[D38MAX, D38MAX]), dec128(&[&format!("-{D38MAX}")])],
@@ -214,7 +222,7 @@ fn decimal128_sums() {
 #[test]
 fn decimal256_sums() {
     let (_t, e) = engine(&[("t", vec![dec256(&[D76MAX]), dec256(&["1"])])]);
-    refused(&e, "SELECT SUM(v) FROM t");
+    overflowed(&e, "SELECT SUM(v) FROM t");
     let (_t, e) = engine(&[(
         "t",
         vec![dec256(&[D76MAX, D76MAX]), dec256(&[&format!("-{D76MAX}")])],
@@ -242,18 +250,18 @@ fn decimal_avg() {
 #[test]
 fn scalars_refuse() {
     let (_t, e) = engine(&[("t", vec![i64s(&[i64::MAX, i64::MIN])])]);
-    refused(&e, "SELECT 9223372036854775807 + 1");
-    refused(&e, "SELECT 10000000000 * 10000000000");
-    refused(&e, "SELECT v + 1 FROM t");
-    refused(&e, "SELECT v * 2 FROM t");
-    refused(&e, "SELECT v - (-1) FROM t");
-    refused(&e, "SELECT -v FROM t");
+    overflowed(&e, "SELECT 9223372036854775807 + 1");
+    overflowed(&e, "SELECT 10000000000 * 10000000000");
+    overflowed(&e, "SELECT v + 1 FROM t");
+    overflowed(&e, "SELECT v * 2 FROM t");
+    overflowed(&e, "SELECT v - (-1) FROM t");
+    overflowed(&e, "SELECT -v FROM t");
     assert_eq!(
         one(&e, "SELECT v - 1 FROM t WHERE v > 0"),
         "9223372036854775806"
     );
     let (_t, e) = engine(&[("t", vec![dec128(&[D38MAX])])]);
-    refused(&e, "SELECT v + 1 FROM t");
+    overflowed(&e, "SELECT v + 1 FROM t");
     assert_eq!(
         one(&e, "SELECT v - 1 FROM t"),
         "99999999999999999999999999999999999998"
@@ -271,7 +279,7 @@ fn least_integer_modulo_minus_one_refuses() {
         "SELECT CAST(-2147483648 AS INTEGER) % -1",
         "SELECT CAST(-128 AS TINYINT) % CAST(-1 AS TINYINT)",
     ] {
-        let m = refused(&e, sql);
+        let m = overflowed(&e, sql);
         assert!(m.contains("Overflow in division"), "{sql}: {m}");
     }
     assert_eq!(one(&e, "SELECT v % -1 FROM t WHERE v > 0"), "0");
@@ -383,7 +391,7 @@ fn dec_companion_sums_are_exact() {
         "5"
     );
     let (_t, e) = transfers(&[&[("a", D38MAX), ("a", D38MAX)]]);
-    let m = refused(&e, "SELECT SUM(value_dec) FROM transfer");
+    let m = overflowed(&e, "SELECT SUM(value_dec) FROM transfer");
     assert!(m.contains("does not fit"), "{m}");
 }
 
@@ -751,7 +759,7 @@ fn hugeint_try_cast_past_38_digits_refuses_or_answers_as_duckdb() {
 
     // Each fits HUGEINT and their sum does not fit DECIMAL(38,0): refused, as DuckDB refuses past 2^127.
     let (_t, e) = transfers(&[&[("a", WINDOW), ("a", WINDOW)]]);
-    let m = refused(&e, "SELECT SUM(TRY_CAST(value AS HUGEINT)) FROM transfer");
+    let m = overflowed(&e, "SELECT SUM(TRY_CAST(value AS HUGEINT)) FROM transfer");
     assert!(m.contains("does not fit"), "{m}");
 }
 
@@ -857,7 +865,7 @@ fn hugeint_try_cast_of_a_float_past_38_digits_refuses_or_answers_as_duckdb() {
         one(&e, "SELECT SUM(TRY_CAST(v AS HUGEINT)) FROM f"),
         "-9999998666165212282482104879554756608"
     );
-    let m = refused(
+    let m = overflowed(
         &e,
         "SELECT SUM(TRY_CAST(v AS HUGEINT)) FROM d WHERE v > 1e38",
     );
