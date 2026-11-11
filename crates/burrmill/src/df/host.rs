@@ -5,8 +5,9 @@
 //! its unsealed rows, and it rebinds on every statement against a cached session. Its shadow needs
 //! the same, so these take exactly those inputs and replace whatever the name held before.
 //!
-//! A table registered this way is not in the fold substitution's table map, which is fixed when the
-//! engine opens; its aggregates run as DataFusion plans them, to the same answer.
+//! A table registered this way joins the fold substitution's table map when its segments are local
+//! files of one schema; a fold-shaped aggregate over it then runs on the owned fold wherever the
+//! table is read whole, with no unsealed rows and no window. Otherwise DataFusion plans it.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -157,6 +158,14 @@ impl Engine {
             .map(|(c, _)| c.clone())
             .collect();
         self.session.note_addresses(&raw, addresses.iter().cloned());
+        // The owned fold opens local files itself and refuses a column a segment lacks, where the
+        // scan reads NULL, so only segments that all carry the same columns.
+        let folded = (!files.is_empty() && !keyed && schemas.len() == 1).then(|| {
+            crate::segment::SealedSegments::from_files(
+                raw.clone(),
+                files.iter().map(|(p, _)| p.clone()),
+            )
+        });
         let raw_provider: Arc<dyn TableProvider> = if files.is_empty() {
             Arc::new(MemTable::try_new(raw_schema.clone(), vec![vec![]]).map_err(df_err)?)
         } else {
@@ -173,6 +182,8 @@ impl Engine {
             )?)
         };
         self.session.register_table(&raw, Arc::clone(&raw_provider));
+        self.fold
+            .set(&raw, folded.map(|s| (Arc::clone(&raw_provider), s)));
 
         let mut present: Vec<String> = raw_schema
             .fields()

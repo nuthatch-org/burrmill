@@ -15,13 +15,14 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use arrow::array::{ArrayRef, Decimal128Array, RecordBatch, StringArray, StringViewBuilder};
 use arrow::compute::SortOptions;
 use arrow::datatypes::{DataType, Decimal128Type, DecimalType, SchemaRef};
 use async_trait::async_trait;
-use datafusion_catalog::Session;
+use datafusion_catalog::default_table_source::source_as_provider;
+use datafusion_catalog::{Session, TableProvider};
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNodeRecursion};
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
@@ -29,7 +30,7 @@ use datafusion_execution::TaskContext;
 use datafusion_expr::expr::AggregateFunction;
 use datafusion_expr::logical_plan::{Aggregate, Extension, Filter, TableScan};
 use datafusion_expr::{
-    BinaryExpr, Cast, Expr, LogicalPlan, Operator, TryCast, UserDefinedLogicalNode,
+    BinaryExpr, Cast, Expr, LogicalPlan, Operator, TableSource, TryCast, UserDefinedLogicalNode,
     UserDefinedLogicalNodeCore,
 };
 use datafusion_optimizer::analyzer::AnalyzerRule;
@@ -53,17 +54,47 @@ use crate::limits::Limits;
 use crate::plan::{FoldBranch, FoldValue, KeyCol, KeyFn, KeyPart, Plan, SignedFold};
 use crate::segment::SealedSegments;
 
-/// The nest tables the owned fold may read, by the name DataFusion scans them under, and the pool
-/// it runs in.
+/// A table's provider and the segments it scans.
+type Folded = (Arc<dyn TableProvider>, SealedSegments);
+
+/// The tables the owned fold may read, by the name DataFusion scans them under, and the pool it
+/// runs in. Each is held with the provider it was registered as, and a scan is folded only when it
+/// reads that provider: a view keeps the plan it captured, so a name alone may be an older table.
 #[derive(Clone)]
 pub struct FoldTables {
-    pub tables: Arc<HashMap<String, SealedSegments>>,
+    tables: Arc<RwLock<HashMap<String, Folded>>>,
     pub pool: Arc<rayon::ThreadPool>,
+}
+
+impl FoldTables {
+    pub fn new(pool: Arc<rayon::ThreadPool>) -> Self {
+        Self {
+            tables: Default::default(),
+            pool,
+        }
+    }
+
+    /// `name` reads `segments` through `provider` from now on, or with `None` is no longer folded.
+    pub fn set(&self, name: &str, table: Option<Folded>) {
+        let mut tables = self.tables.write().unwrap_or_else(|e| e.into_inner());
+        match table {
+            Some(t) => tables.insert(name.to_string(), t),
+            None => tables.remove(name),
+        };
+    }
+
+    fn segments(&self, name: &str, source: &Arc<dyn TableSource>) -> Option<SealedSegments> {
+        let tables = self.tables.read().unwrap_or_else(|e| e.into_inner());
+        let (provider, segments) = tables.get(name)?;
+        let scanned = source_as_provider(source).ok()?;
+        Arc::ptr_eq(&scanned, provider).then(|| segments.clone())
+    }
 }
 
 impl fmt::Debug for FoldTables {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FoldTables({} tables)", self.tables.len())
+        let tables = self.tables.read().unwrap_or_else(|e| e.into_inner());
+        write!(f, "FoldTables({} tables)", tables.len())
     }
 }
 
@@ -169,14 +200,15 @@ fn unalias(e: &Expr) -> &Expr {
     }
 }
 
-/// A nest table column: table, name, nullable, type.
-type Base = (String, String, bool, DataType);
+/// A nest table column: table, name, nullable, type, and what the scan reads.
+type Base = (String, String, bool, DataType, Arc<dyn TableSource>);
 
 /// The nest table and column behind output column `idx`, through aliases and plain projections.
 fn base_column(plan: &LogicalPlan, idx: usize) -> Option<Base> {
     match plan {
         LogicalPlan::TableScan(TableScan {
             table_name,
+            source,
             projected_schema,
             filters,
             fetch,
@@ -188,6 +220,7 @@ fn base_column(plan: &LogicalPlan, idx: usize) -> Option<Base> {
                 f.name().clone(),
                 f.is_nullable(),
                 f.data_type().clone(),
+                Arc::clone(source),
             ))
         }
         LogicalPlan::SubqueryAlias(s) => base_column(&s.input, idx),
@@ -246,7 +279,7 @@ fn key_parts(
                 },
                 e => (e, None),
             };
-            let (t, name, _, ty) = branch_column(input, e)?;
+            let (t, name, _, ty, _) = branch_column(input, e)?;
             if !same_table(t)
                 || !(is_text(&ty) || ty.is_integer() || super::addresses::is_address(&ty))
             {
@@ -327,20 +360,27 @@ impl FoldSubstitution {
         filtered: bool,
         drop_zero: bool,
     ) -> Result<Option<LogicalPlan>> {
-        let Some(fold) = self.recognise(a, filtered, drop_zero) else {
+        let Some((fold, segments)) = self.recognise(a, filtered, drop_zero) else {
             return Ok(None);
         };
         let node = OwnedFoldNode {
             fold,
             schema: Arc::clone(&a.schema),
-            tables: self.0.clone(),
+            segments: Arc::new(segments),
+            pool: Arc::clone(&self.0.pool),
         };
         Ok(Some(LogicalPlan::Extension(Extension {
             node: Arc::new(node),
         })))
     }
 
-    fn recognise(&self, a: &Aggregate, filtered: bool, drop_zero: bool) -> Option<SignedFold> {
+    /// The fold and, per branch, the segments it reads: the ones registered as it is planned.
+    fn recognise(
+        &self,
+        a: &Aggregate,
+        filtered: bool,
+        drop_zero: bool,
+    ) -> Option<(SignedFold, Vec<SealedSegments>)> {
         let [e] = a.aggr_expr.as_slice() else {
             return None;
         };
@@ -372,6 +412,7 @@ impl FoldSubstitution {
         };
 
         let mut branches = Vec::with_capacity(u.inputs.len());
+        let mut segments = Vec::with_capacity(u.inputs.len());
         let mut nullable = false;
         let mut arms = Vec::new();
         flatten_union(&u.inputs, &mut arms);
@@ -414,10 +455,11 @@ impl FoldSubstitution {
                 }
                 s => s,
             };
-            let (t, col, is_null, ty) = branch_column(input, source)?;
-            if !same_table(t.clone()) || !is_text(&ty) || !self.0.tables.contains_key(&t) {
+            let (t, col, is_null, ty, scanned) = branch_column(input, source)?;
+            if !same_table(t.clone()) || !is_text(&ty) {
                 return None;
             }
+            segments.push(self.0.segments(&t, &scanned)?);
             nullable |= is_null;
             branches.push(FoldBranch {
                 table: t,
@@ -437,21 +479,24 @@ impl FoldSubstitution {
         };
         let key_aliases = names(0..keys.len());
         let sum_aliases = names(keys.len()..keys.len() + 1);
-        Some(SignedFold {
+        let fold = SignedFold {
             branches,
             key_alias: key_aliases[0].clone(),
             key_aliases,
             sum_alias: sum_aliases[0].clone(),
             sum_aliases,
             drop_zero,
-        })
+        };
+        Some((fold, segments))
     }
 }
 
 pub struct OwnedFoldNode {
     fold: SignedFold,
     schema: DFSchemaRef,
-    tables: FoldTables,
+    /// One per branch, in order.
+    segments: Arc<Vec<SealedSegments>>,
+    pool: Arc<rayon::ThreadPool>,
 }
 
 impl fmt::Debug for OwnedFoldNode {
@@ -503,7 +548,8 @@ impl UserDefinedLogicalNodeCore for OwnedFoldNode {
         Ok(Self {
             fold: self.fold.clone(),
             schema: Arc::clone(&self.schema),
-            tables: self.tables.clone(),
+            segments: Arc::clone(&self.segments),
+            pool: Arc::clone(&self.pool),
         })
     }
 }
@@ -551,7 +597,8 @@ impl ExtensionPlanner for OwnedFoldPlanner {
         Ok(Some(Arc::new(OwnedFoldExec {
             fold: n.fold.clone(),
             schema,
-            tables: n.tables.clone(),
+            segments: Arc::clone(&n.segments),
+            pool: Arc::clone(&n.pool),
             properties,
             metrics,
             bytes,
@@ -563,7 +610,8 @@ impl ExtensionPlanner for OwnedFoldPlanner {
 pub struct OwnedFoldExec {
     fold: SignedFold,
     schema: SchemaRef,
-    tables: FoldTables,
+    segments: Arc<Vec<SealedSegments>>,
+    pool: Arc<rayon::ThreadPool>,
     properties: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
     bytes: Count,
@@ -606,17 +654,18 @@ impl ExecutionPlan for OwnedFoldExec {
         _ctx: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let bytes = self.bytes.clone();
-        let (fold, schema, tables) = (
+        let (fold, schema, segments, pool) = (
             self.fold.clone(),
             Arc::clone(&self.schema),
-            self.tables.clone(),
+            Arc::clone(&self.segments),
+            Arc::clone(&self.pool),
         );
         let out = Arc::clone(&schema);
         // One chunk at a time, so what is live is the fold's own rows plus a chunk, not the rows
         // plus a copy of the whole answer.
         let stream = futures::stream::once(async move {
             let rows = tokio::task::spawn_blocking(move || {
-                let (rows, read) = fold_rows(&fold, &tables)?;
+                let (rows, read) = fold_rows(&fold, &segments, &pool)?;
                 bytes.add(read as usize);
                 Ok::<_, DataFusionError>((Arc::new(rows), fold))
             })
@@ -642,7 +691,11 @@ const CHUNK: usize = 8192;
 
 /// Runs the fold and checks every sum against 38 digits before a single row is emitted, so a
 /// consumer never sees part of an answer followed by a refusal.
-fn fold_rows(fold: &SignedFold, tables: &FoldTables) -> Result<(Rows, u64)> {
+fn fold_rows(
+    fold: &SignedFold,
+    segments: &[SealedSegments],
+    pool: &rayon::ThreadPool,
+) -> Result<(Rows, u64)> {
     // Every value here is read strictly, `TRY_CAST` included, so the owned fold's "the query used
     // CAST" would be wrong about half of them.
     let ext = |e: crate::BurrmillError| match e {
@@ -652,13 +705,8 @@ fn fold_rows(fold: &SignedFold, tables: &FoldTables) -> Result<(Rows, u64)> {
             "; a substituted fold refuses it rather than dropping the row",
         )),
     };
-    let segments: Vec<&SealedSegments> = fold
-        .branches
-        .iter()
-        .map(|b| &tables.tables[&b.table])
-        .collect();
-    let (rows, metrics) = tables
-        .pool
+    let segments: Vec<&SealedSegments> = segments.iter().collect();
+    let (rows, metrics) = pool
         .install(|| SignedFoldExec::new(fold, &segments, Limits::default()).run())
         .map_err(ext)?;
     for i in 0..rows.len() {

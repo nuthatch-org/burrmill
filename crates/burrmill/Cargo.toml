@@ -216,6 +216,11 @@ path = "tests/df_host.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_hostfold"
+path = "tests/df_hostfold.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_joinfilters"
 path = "tests/df_joinfilters.rs"
 required-features = ["datafusion"]

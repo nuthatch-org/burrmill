@@ -183,6 +183,8 @@ pub struct Engine {
     /// Each store segment's columns, as `register_store_facts` read them from its footer. Sealed
     /// segments never change, so once. Local files share a process-wide cache instead.
     bound_segments: HashMap<(std::path::PathBuf, u64), arrow::datatypes::SchemaRef>,
+    /// What the owned fold may read; a registration in `host.rs` adds its table or takes it out.
+    fold: fold::FoldTables,
 }
 
 impl Engine {
@@ -231,21 +233,6 @@ impl Engine {
                 .build()
                 .map_err(|e| BurrmillError::Substrate(e.to_string()))?
         };
-        let mut fold_tables = std::collections::HashMap::new();
-        // The owned fold opens segment files itself, so a table in a store has none; the
-        // substitution then declines and DataFusion's aggregate runs instead.
-        for t in tables.iter().filter(|t| !t.files.is_empty() && !t.keyed) {
-            let name = if t.wide.is_empty() {
-                t.name.clone()
-            } else {
-                format!("{}__raw", t.name)
-            };
-            let files = t.files.iter().map(|(p, _)| p.clone());
-            fold_tables.insert(
-                name.clone(),
-                crate::segment::SealedSegments::from_files(name, files),
-            );
-        }
         #[cfg(not(target_arch = "wasm32"))]
         let pool = Arc::new(
             rayon::ThreadPoolBuilder::new()
@@ -256,13 +243,16 @@ impl Engine {
         );
         #[cfg(target_arch = "wasm32")]
         let pool = tab_pool()?;
-        let fold = fold::FoldTables {
-            tables: Arc::new(fold_tables),
-            pool,
-        };
+        let fold = fold::FoldTables::new(pool);
         let cancel = crate::CancelToken::new();
-        let mut session = MiniSession::new(threads, fold, budget.as_ref(), shared, cancel.clone())
-            .map_err(df_err)?;
+        let mut session = MiniSession::new(
+            threads,
+            fold.clone(),
+            budget.as_ref(),
+            shared,
+            cancel.clone(),
+        )
+        .map_err(df_err)?;
         let groups = threads.max(1);
         for t in &tables {
             let provider: Arc<dyn TableProvider> = if t.files.is_empty() {
@@ -270,11 +260,22 @@ impl Engine {
             } else {
                 Arc::new(SegmentTable::new(t, groups)?)
             };
+            let scanned = match t.wide.is_empty() {
+                true => t.name.clone(),
+                false => format!("{}__raw", t.name),
+            };
+            // The owned fold opens segment files itself, so a table in a store has none; the
+            // substitution then declines and DataFusion's aggregate runs instead.
+            if !t.files.is_empty() && !t.keyed {
+                let files = t.files.iter().map(|(p, _)| p.clone());
+                let segments = crate::segment::SealedSegments::from_files(scanned.clone(), files);
+                fold.set(&scanned, Some((Arc::clone(&provider), segments)));
+            }
             if t.wide.is_empty() {
                 session.note_addresses(&t.name, t.lowercase.iter().cloned());
                 session.register_table(&t.name, provider);
             } else {
-                let raw = format!("{}__raw", t.name);
+                let raw = scanned;
                 session.note_addresses(&raw, t.lowercase.iter().cloned());
                 session.register_table(&raw, provider);
                 let dec: String = t
@@ -307,6 +308,7 @@ impl Engine {
             sql_limit: std::sync::atomic::AtomicUsize::new(SQL_LIMIT),
             txn: None,
             bound_segments: Default::default(),
+            fold,
         })
     }
 
