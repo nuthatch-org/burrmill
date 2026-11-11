@@ -93,6 +93,37 @@ fn first_and_last_are_duckdbs_aggregates() {
     assert_eq!(rows, vec![serde_json::json!({"a": null, "b": 3, "c": 4})]);
 }
 
+/// `list_sum` is DuckDB's `sum` over the elements, exact for integers and decimals and refused
+/// past 38 digits; `list_min` exists, and both extremes take a NULL list.
+#[test]
+fn list_sum_min_and_max_are_duckdbs() {
+    let engine = Engine::open_empty().unwrap();
+    let got = engine
+        .sql(
+            "SELECT list_sum([1, 2, 3]) AS a, list_sum([1.5, 2.25]) AS b, \
+             list_sum([9007199254740993, 1]) AS c, list_sum([NULL, 1]) AS d, list_sum([]) AS e, \
+             list_min([3, 1, NULL, 2]) AS f, list_min(NULL) AS g, list_max(NULL) AS h",
+        )
+        .unwrap();
+    let rows: Vec<_> = got
+        .iter()
+        .flat_map(|b| burrmill::df::encode::rows(b).unwrap())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![serde_json::json!({
+            "a": "6", "b": "3.75", "c": "9007199254740994", "d": "1", "e": null,
+            "f": 1, "g": null, "h": null,
+        })]
+    );
+    let past = format!(
+        "SELECT list_sum([CAST('{0}' AS HUGEINT), CAST('{0}' AS HUGEINT)]) AS a",
+        "9".repeat(38)
+    );
+    let err = engine.sql(&past).unwrap_err().to_string();
+    assert!(err.contains("list_sum does not fit"), "{err}");
+}
+
 /// DuckDB's `BIGNUM`, as the network nest's views write it: token amounts cast from text, added,
 /// negated and summed, exactly, and read back as text. It is `DECIMAL(38,0)` here, the nest's
 /// 38-digit line, so a value past it refuses rather than being guessed at.

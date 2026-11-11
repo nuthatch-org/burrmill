@@ -11,7 +11,7 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, AsArray, UInt32Array};
 use arrow::compute::{cast, concat, take, take_arrays};
 use arrow::datatypes::{DataType, Field, FieldRef};
-use datafusion_common::{Result, exec_err, plan_err};
+use datafusion_common::{Result, ScalarValue, exec_err, plan_err};
 use datafusion_expr::type_coercion::binary::type_union_resolution;
 use datafusion_expr::{
     ColumnarValue, HigherOrderFunctionArgs, HigherOrderReturnFieldArgs, HigherOrderSignature,
@@ -263,5 +263,140 @@ impl HigherOrderUDFImpl for ListReduce {
             &UInt32Array::from(position),
             None,
         )?))
+    }
+}
+
+/// `list_min` and `list_max` with a NULL list NULL, as DuckDB has it; DataFusion's refuse the type.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct ListExtreme {
+    sig: Signature,
+    inner: Arc<ScalarUDF>,
+}
+
+impl ListExtreme {
+    pub fn udf(inner: Arc<ScalarUDF>) -> Arc<ScalarUDF> {
+        Arc::new(ScalarUDF::from(Self {
+            sig: Signature::user_defined(Volatility::Immutable),
+            inner,
+        }))
+    }
+}
+
+impl ScalarUDFImpl for ListExtreme {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn aliases(&self) -> &[String] {
+        self.inner.aliases()
+    }
+    fn signature(&self) -> &Signature {
+        &self.sig
+    }
+    fn coerce_types(&self, args: &[DataType]) -> Result<Vec<DataType>> {
+        match args {
+            [DataType::Null | DataType::List(_) | DataType::LargeList(_)] => Ok(args.to_vec()),
+            [DataType::FixedSizeList(f, _)] => Ok(vec![DataType::List(Arc::clone(f))]),
+            [other] => plan_err!("{} does not support type {other}", self.name()),
+            _ => plan_err!("{} takes one list", self.name()),
+        }
+    }
+    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
+        match args {
+            [DataType::Null] => Ok(DataType::Null),
+            _ => self.inner.return_type(args),
+        }
+    }
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        match args.args.first().map(|a| a.data_type()) {
+            Some(DataType::Null) => Ok(ColumnarValue::Scalar(ScalarValue::Null)),
+            _ => self.inner.invoke_with_args(args),
+        }
+    }
+}
+
+/// `list_sum` as DuckDB's `sum` over the elements: integers and decimals sum exactly to a
+/// 38-digit decimal (HUGEINT here) and refuse past it, where DataFusion's sums every list as a
+/// DOUBLE. Any other element type is left to DataFusion's.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct ListSum {
+    sig: Signature,
+    inner: Arc<ScalarUDF>,
+}
+
+impl ListSum {
+    pub fn udf(inner: Arc<ScalarUDF>) -> Arc<ScalarUDF> {
+        Arc::new(ScalarUDF::from(Self {
+            sig: Signature::user_defined(Volatility::Immutable),
+            inner,
+        }))
+    }
+}
+
+/// The scale of a list's exact sum, or `None` where DataFusion's DOUBLE sum stands.
+fn exact_scale(list: &DataType) -> Option<i8> {
+    let e = match list {
+        DataType::List(f) | DataType::LargeList(f) | DataType::FixedSizeList(f, _) => f.data_type(),
+        _ => return None,
+    };
+    match e {
+        t if t.is_integer() => Some(0),
+        DataType::Decimal128(_, s) => Some(*s),
+        _ => None,
+    }
+}
+
+impl ScalarUDFImpl for ListSum {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn aliases(&self) -> &[String] {
+        self.inner.aliases()
+    }
+    fn signature(&self) -> &Signature {
+        &self.sig
+    }
+    fn coerce_types(&self, args: &[DataType]) -> Result<Vec<DataType>> {
+        match args {
+            [l @ (DataType::List(_) | DataType::LargeList(_))] if exact_scale(l).is_some() => {
+                Ok(args.to_vec())
+            }
+            [l @ DataType::FixedSizeList(f, _)] if exact_scale(l).is_some() => {
+                Ok(vec![DataType::List(Arc::clone(f))])
+            }
+            _ => self.inner.coerce_types(args),
+        }
+    }
+    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
+        match args.first().and_then(exact_scale) {
+            Some(s) => Ok(DataType::Decimal128(38, s)),
+            None => self.inner.return_type(args),
+        }
+    }
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        let Some(scale) = args.args.first().and_then(|a| exact_scale(&a.data_type())) else {
+            return self.inner.invoke_with_args(args);
+        };
+        let list = args.args[0].to_array(args.number_rows)?;
+        let (values, rows) = bounds(&list)?;
+        let values = cast(&values, &DataType::Decimal128(38, scale))?;
+        let values = values.as_primitive::<arrow::datatypes::Decimal128Type>();
+        const LIMIT: i128 = 10i128.pow(38);
+        let mut out = arrow::array::Decimal128Builder::with_capacity(rows.len());
+        for (i, (start, end)) in rows.into_iter().enumerate() {
+            let mut sum: Option<i128> = None;
+            for j in (start..end).filter(|&j| values.is_valid(j)) {
+                let s = sum.unwrap_or(0).saturating_add(values.value(j));
+                if s <= -LIMIT || s >= LIMIT {
+                    return exec_err!(
+                        "Out of Range Error: list_sum does not fit DECIMAL(38,{scale})"
+                    );
+                }
+                sum = Some(s);
+            }
+            out.append_option(sum.filter(|_| list.is_valid(i)));
+        }
+        Ok(ColumnarValue::Array(Arc::new(
+            out.finish().with_precision_and_scale(38, scale)?,
+        )))
     }
 }
