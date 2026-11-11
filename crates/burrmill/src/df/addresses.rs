@@ -599,13 +599,14 @@ impl Addresses {
             );
             let was = p.transformed;
             let mut t = p.data.map_expressions(|e| {
-                let name = e.schema_name().to_string();
+                let name = names_matter.then(|| e.schema_name().to_string());
                 let e = self.with_subqueries(e, &schema, stale)?;
                 let t = e.transform_up(|e| rewrite(e, &schema))?;
-                if t.transformed && names_matter && t.data.schema_name().to_string() != name {
-                    Ok(Transformed::yes(t.data.alias(name)))
-                } else {
-                    Ok(t)
+                match name {
+                    Some(name) if t.transformed && t.data.schema_name().to_string() != name => {
+                        Ok(Transformed::yes(t.data.alias(name)))
+                    }
+                    _ => Ok(t),
                 }
             })?;
             t.transformed |= was;
