@@ -1,21 +1,28 @@
-//! Query errors are shown to the model. A cell string must not travel with them.
+//! Error text that may go to the model has read no row, but it can quote the statement.
 //!
-//! Quoted spans of four characters or more are replaced, and so is any stored cell
-//! string of that length, longest first. A column name is left in place: short
-//! tokens such as `1` would otherwise eat the error text.
+//! Quoted spans of four characters or more are replaced, and so is any tokenised value
+//! of that length. A column name is left in place: short tokens such as `1` would
+//! otherwise eat the error text.
 
-pub fn redact(err: &str, cells: &[String], columns: &[String]) -> String {
-    let mut secrets: Vec<&str> = cells
-        .iter()
-        .map(String::as_str)
-        .filter(|s| s.len() >= 4 && !columns.iter().any(|c| c == *s))
+use crate::pseudonym::TokenMap;
+
+pub fn redact(err: &str, tokens: &TokenMap, columns: &[String]) -> String {
+    let mut hits: Vec<_> = tokens
+        .occurrences(err)
+        .into_iter()
+        .filter(|r| !columns.iter().any(|c| *c == err[r.clone()]))
         .collect();
-    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    secrets.dedup();
-    let mut out = err.to_string();
-    for s in secrets {
-        out = out.replace(s, "?");
+    hits.sort_by_key(|r| r.start);
+    let mut out = String::with_capacity(err.len());
+    let mut at = 0;
+    for r in hits {
+        if r.start >= at {
+            out.push_str(&err[at..r.start]);
+            out.push('?');
+        }
+        at = at.max(r.end);
     }
+    out.push_str(&err[at..]);
     redact_quotes(&out, columns)
 }
 
@@ -57,22 +64,42 @@ fn redact_quotes(s: &str, columns: &[String]) -> String {
 mod tests {
     use super::*;
 
+    fn tokens(values: &str) -> TokenMap {
+        let table = burrmill_ingest::ingest_bytes(
+            format!("email\n{values}").as_bytes(),
+            burrmill_ingest::FormatHint::Sniff,
+            &burrmill_ingest::Budget::untrusted(),
+        )
+        .unwrap();
+        crate::pseudonym::assign(
+            &["email".to_string()],
+            &std::collections::BTreeSet::from(["email".to_string()]),
+            table.batches(),
+        )
+    }
+
     #[test]
-    fn a_long_cell_and_a_quoted_span_go_but_a_column_name_stays() {
-        let cells = vec!["CANARY_VALUE_991".to_string(), "1".to_string()];
+    fn a_quoted_span_goes_but_a_column_name_stays() {
         let columns = vec!["amount".to_string()];
-        let err = "Cannot cast 'CANARY_VALUE_991' to INT; column amount; also CANARY_VALUE_991";
-        let got = redact(err, &cells, &columns);
+        let err = "Cannot cast 'CANARY_VALUE_991' to INT; column amount";
+        let got = redact(err, &TokenMap::default(), &columns);
         assert!(!got.contains("CANARY_VALUE_991"));
         assert!(got.contains("amount"));
         assert!(got.contains('?'));
     }
 
     #[test]
-    fn a_cell_that_is_a_column_name_is_not_stripped() {
-        let cells = vec!["amount".to_string()];
-        let columns = vec!["amount".to_string()];
+    fn a_tokenised_value_goes_and_overlaps_merge() {
+        let tokens = tokens("alice@mail.example\nce@mail.example.org\n");
+        let err = "no match for alice@mail.example.org near email";
+        let got = redact(err, &tokens, &["email".to_string()]);
+        assert_eq!(got, "no match for ? near email");
+    }
+
+    #[test]
+    fn a_value_that_is_a_column_name_is_not_stripped() {
+        let tokens = tokens("amount\n");
         let err = "no field named amount";
-        assert_eq!(redact(err, &cells, &columns), err);
+        assert_eq!(redact(err, &tokens, &["amount".to_string()]), err);
     }
 }
