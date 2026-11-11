@@ -604,6 +604,45 @@ fn a_sort_over_budget_spills_into_the_given_directory_only() {
     assert!(wrote_there, "nothing was spilled to the directory");
 }
 
+/// nuthatch #1650: a batch is in no pool, so one of wide cells waiting behind the caller's is
+/// memory nothing accounts for.
+#[test]
+fn nothing_is_built_behind_a_wide_batch_the_caller_holds() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut engine = Engine::open_empty_budgeted(burrmill::Budget {
+        memory_bytes: 512 << 20,
+        threads: 2,
+        spill: None,
+    })
+    .unwrap();
+    let built = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&built);
+    engine.register_text_function(
+        "t_wide",
+        1,
+        Arc::new(move |_| {
+            counted.fetch_add(1, Ordering::Relaxed);
+            Ok("A".repeat(16 << 10))
+        }),
+    );
+    let mut held = Vec::new();
+    let mut seen = 0;
+    engine
+        .sql_for_each(
+            "SELECT t_wide(CAST(range AS VARCHAR)) FROM range(8192)",
+            |b| {
+                seen += b.num_rows();
+                // Long enough for a statement reading ahead to have built its next batch.
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                held.push((seen, built.load(Ordering::Relaxed)));
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert!(held.len() > 1, "{held:?}");
+    assert!(held.iter().all(|(seen, built)| seen == built), "{held:?}");
+}
+
 #[test]
 fn a_host_text_function_propagates_null_refuses_on_error_and_stays_behind_a_case_guard() {
     let tmp = tempfile::tempdir().unwrap();
