@@ -19,7 +19,7 @@ datafusion = "55"
 duckdb = { version = "=1.10504.0", features = ["bundled"] }
 # duckdb-rs's own Arrow, with `ipc` switched on, so `encode-parity` can move DuckDB's batches into
 # Burrmill's Arrow version unchanged. Pinned to what duckdb-rs resolves; bench-only.
-arrow58 = { package = "arrow", version = "=58.4.0", default-features = false, features = ["ipc"] }
+arrow58 = { package = "arrow", version = "=58.4.1", default-features = false, features = ["ipc"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow = "1"
 tempfile = "3"
