@@ -25,6 +25,10 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all --check
+      # fuzz/ has its own lock and only the nightly job builds it: a pin bumped here that the
+      # lock there does not follow would otherwise first fail at night.
+      - name: fuzz lock resolves
+        run: cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
 
   # The library both ways: the default graph is pure Rust and must build on its own, and
   # `datafusion` is what nuthatch embeds.
