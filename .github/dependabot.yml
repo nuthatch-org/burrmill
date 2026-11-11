@@ -10,6 +10,16 @@ updates:
         patterns: ["arrow*", "parquet"]
       datafusion:
         patterns: ["datafusion*"]
+    # These majors move only with DataFusion's own.
+    ignore:
+      - dependency-name: "arrow*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "parquet"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "object_store"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "datafusion*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
