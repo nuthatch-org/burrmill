@@ -50,6 +50,7 @@ wherever the statement names them.
 | `TRY(x)`, `TRY_CAST` | NULL on failure, where that is certainly DuckDB's answer | corpus |
 | `to_timestamp(n)` | TIMESTAMPTZ, microseconds, UTC | corpus |
 | `date_trunc`, `DATE ± INTERVAL` | TIMESTAMP in microseconds | corpus |
+| `CAST(s AS TIMESTAMP)`, `DATETIME` | microseconds, a finer fraction cut off | corpus |
 | `printf`, `format`, `strftime`, `date_diff`, `hex`, `unhex`, `decode`, `xor` | DuckDB's | corpus |
 | `to_json`, `from_json`, `json_extract`, `string_split`, `len`, `typeof` | DuckDB's | corpus |
 | `range(...)`, `generate_series(...)` over integer literals | a BIGINT column | corpus |
@@ -73,7 +74,8 @@ does; the refusals and their messages are held by `duckdb_answers_still_refused_
 |---|---|
 | `approx_count_distinct(x)` | `COUNT(DISTINCT x)`, the exact count |
 | `list_aggregate(l, 'sum')`, `array_aggregate` | `(SELECT sum(v) FROM (SELECT unnest(l) AS v))` |
-| `strptime(s, fmt)` | none yet: `CAST(s AS TIMESTAMP)` reads ISO 8601 text, but in nanoseconds where DuckDB's are microseconds (in `KNOWN`) |
+| `strptime(s, fmt)` | for ISO 8601 text, `CAST(s AS TIMESTAMP)` |
+| `try_strptime(s, fmt)` | for ISO 8601 text, `TRY_CAST(s AS TIMESTAMP)` |
 | `COLUMNS(...)` | the columns by name, or `* EXCLUDE (...)` |
 | `a GLOB p` | `a LIKE p`, with `%` for `*` and `_` for `?` |
 | `PIVOT` | one aggregate per value, `sum(a) FILTER (WHERE k = 'x')` or `CASE`, under `GROUP BY` |

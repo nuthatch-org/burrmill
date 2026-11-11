@@ -1329,8 +1329,8 @@ fn unsupported_function(f: &sq::Function) -> Option<String> {
         "list_aggregate" | "array_aggregate" => {
             Some("aggregate in a subquery, as (SELECT sum(v) FROM (SELECT unnest(...) AS v))")
         }
-        // `CAST(... AS TIMESTAMP)` is nanoseconds here and microseconds in DuckDB, so not named.
-        "strptime" => None,
+        "strptime" => Some("for ISO 8601 text, CAST(... AS TIMESTAMP)"),
+        "try_strptime" => Some("for ISO 8601 text, TRY_CAST(... AS TIMESTAMP)"),
         "columns" => Some("name the columns, or use * EXCLUDE (...)"),
         _ => return None,
     };
@@ -1468,6 +1468,12 @@ fn retype(t: &mut SqlType) -> Option<String> {
         SqlType::UBigInt => SqlType::BigIntUnsigned(None),
         SqlType::UTinyInt => SqlType::TinyIntUnsigned(None),
         SqlType::USmallInt => SqlType::SmallIntUnsigned(None),
+        // DuckDB's TIMESTAMP is microseconds; DataFusion's, unqualified, is nanoseconds.
+        SqlType::Timestamp(
+            None,
+            tz @ (sq::TimezoneInfo::None | sq::TimezoneInfo::WithoutTimeZone),
+        ) => SqlType::Timestamp(Some(6), *tz),
+        SqlType::Datetime(None) => SqlType::Timestamp(Some(6), sq::TimezoneInfo::None),
         // `UINTEGER` and DuckDB's other unsigned spellings reach here as custom type names.
         SqlType::Custom(name, args) if args.is_empty() => {
             match name.to_string().to_ascii_uppercase().as_str() {
@@ -2008,6 +2014,7 @@ fn duck_decimal(e: &Expr, schema: &DFSchema, inputs: &[&LogicalPlan]) -> bool {
 }
 
 /// Whether output column `i` of `p` is a DuckDB DECIMAL, by [`duck_decimal`].
+#[recursive::recursive]
 fn decimal_output(p: &LogicalPlan, i: usize) -> bool {
     let produced = |e: Option<&Expr>, input: &LogicalPlan| {
         e.is_some_and(|e| duck_decimal(e, input.schema(), &[input]))

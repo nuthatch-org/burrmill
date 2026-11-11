@@ -395,6 +395,7 @@ const CORPUS: &[&str] = &[
     "SELECT approx_count_distinct(block_number) AS n FROM transfer",
     "SELECT list_aggregate([1, 2, 3], 'sum') AS a",
     "SELECT strptime('2024-01-02 03:04:05', '%Y-%m-%d %H:%M:%S') AS a",
+    "SELECT try_strptime('2024-01-02', '%Y-%m-%d') AS a",
     "SELECT COLUMNS('a') FROM (SELECT 1 AS a, 2 AS b) t",
     "SELECT 'abc' GLOB 'a*' AS a",
     "PIVOT (SELECT 1 AS a, 'x' AS k) ON k USING sum(a)",
@@ -406,8 +407,11 @@ const CORPUS: &[&str] = &[
     r"SELECT s LIKE p ESCAPE '\' AS m FROM (VALUES ('a%', 'a\%'), ('ab', 'a\%')) t(s, p)",
     "SELECT sum(a) FILTER (WHERE k = 'x') AS x FROM (SELECT 1 AS a, 'x' AS k) t",
     "SELECT 'a' AS k, a AS v FROM (SELECT 1 AS a, 2 AS b) t UNION ALL SELECT 'b', b FROM (SELECT 1 AS a, 2 AS b) t ORDER BY 1",
-    // Why strptime names nothing instead.
+    // What strptime and try_strptime name for ISO 8601 text: DuckDB's TIMESTAMP, in microseconds.
     "SELECT CAST('2024-01-02 03:04:05' AS TIMESTAMP) AS a",
+    "SELECT CAST('2024-01-02 03:04:05.123456789' AS TIMESTAMP) AS a, TRY_CAST('2024-01-02 03:04:05.1234567' AS TIMESTAMP) AS b, TRY_CAST('x' AS TIMESTAMP) AS c, '2024-01-02T03:04:05'::TIMESTAMP AS d, CAST('2024-01-02' AS DATETIME) AS e",
+    "SELECT CAST(CAST('2024-01-02 03:04:05.5' AS TIMESTAMP) AS VARCHAR) AS a, date_trunc('hour', CAST('2024-01-02 03:04:05' AS TIMESTAMP)) AS b, CAST('2024-01-02 03:04:05' AS TIMESTAMP) + INTERVAL 1 DAY AS c, CAST('2024-01-02' AS TIMESTAMP) < TIMESTAMP '2024-01-03' AS d",
+    "SELECT CAST(to_timestamp(block_timestamp) AS TIMESTAMP) AS t, CAST(CAST(to_timestamp(block_timestamp) AS VARCHAR) AS TIMESTAMP) AS u FROM transfer ORDER BY 1 LIMIT 2",
     "SELECT * FROM unnest([1, 2]) t(x)",
     "SELECT * FROM range(DATE '2024-01-01', DATE '2024-01-03', INTERVAL 1 DAY) t(d)",
     "SELECT * FROM (SELECT 3 AS n) s, range(s.n) t(x)",
@@ -462,13 +466,12 @@ const KNOWN: &[(&str, &str)] = &[
         "refused by name: DuckDB's format codes are not chrono's",
     ),
     (
-        "SELECT COLUMNS('a') FROM (SELECT 1 AS a, 2 AS b) t",
-        "refused by name: no COLUMNS() expansion here",
+        "SELECT try_strptime('2024-01-02', '%Y-%m-%d') AS a",
+        "refused by name, as strptime is",
     ),
     (
-        "SELECT CAST('2024-01-02 03:04:05' AS TIMESTAMP) AS a",
-        "the same instant, in nanoseconds where DuckDB's TIMESTAMP is microseconds, so nuthatch's \
-         JSON prints it differently",
+        "SELECT COLUMNS('a') FROM (SELECT 1 AS a, 2 AS b) t",
+        "refused by name: no COLUMNS() expansion here",
     ),
     (
         "SELECT 'abc' GLOB 'a*' AS a",
