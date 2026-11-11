@@ -97,7 +97,7 @@ million operator-rows either way, in 7,258 batches at 8,192 rows and 264,557 at 
 per-batch fixed cost has replaced the per-row one.
 
 At 512 MB and 2 threads, which is nuthatch's default, four of the six views refuse for memory
-without spill (the known shortfall, roadmap and RFC-0047 amendment); the two that run, the ledger
+without spill (the known shortfall, roadmap and the nuthatch RFC-0047 amendment); the two that run, the ledger
 and `lodestar_indexers`, take 2.7 s and 3.4 s against 0.6 s and 0.85 s unbudgeted. On the landed
 tree (2,048 rows, the gathered runs of the next section) they take 1.43 s and 1.95 s, and the 2 GB
 matrix reproduces within noise (transcript, "Final tree").

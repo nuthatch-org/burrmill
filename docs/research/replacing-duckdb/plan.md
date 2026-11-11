@@ -169,7 +169,7 @@ proceeds on C, as a trade, after an RFC-0042 amendment with these numbers. Phase
 
 - a release cycle of real nest traffic with **zero unexplained differences**;
 - p99 within the `/sql` budget (30 s, 2 permits);
-- memory within the RFC-0047 envelope;
+- memory within nuthatch's RFC-0047 envelope;
 - the parser replacement at least as strict as `json_serialize_sql` on the security corpus.
 
 ### Phase 3: cutover and removal

@@ -1,7 +1,10 @@
-//! RFC-0044 slice 1: the go/no-go.
+//! The oracles and harnesses: DuckDB and the umbrella DataFusion beside the engine, for parity,
+//! fuzzing and timings (`engine-views`, `fuzz`, `dialect-parity` and the rest), kept out of the
+//! shipped graph.
 //!
-//! Reproduce nuthatch's #987 result in Burrmill proper - the owned operator at or under DuckDB's
-//! latency on `net_balances`, at exact parity, across a segment sweep. If that does not reproduce,
+//! With no subcommand it is RFC-0044 slice 1's go/no-go, which passed: reproduce nuthatch's #987
+//! result in Burrmill proper - the owned operator at or under DuckDB's latency on `net_balances`, at
+//! exact parity, across a segment sweep. If that does not reproduce,
 //! the thesis is unproven and the honest outcome is to stop here cheaply.
 //!
 //! The discipline is RFC-0004's and it is not decoration:
