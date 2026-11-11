@@ -30,6 +30,8 @@ mod latest;
 mod narrow;
 mod nullsub;
 mod onerow;
+mod params;
+pub use params::Param;
 mod outerorder;
 pub use depth::check_expr_bounds;
 mod builder;
@@ -424,6 +426,19 @@ impl Engine {
     pub fn sql_for_each_metered(
         &self,
         sql: &str,
+        metrics: Option<&mut QueryMetrics>,
+        f: impl FnMut(RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        self.sql_for_each_with_params(sql, &[], metrics, f)
+    }
+
+    /// As [`Engine::sql_for_each_metered`], with `params` bound to `$1`, `$2` and on once the
+    /// statement has been refused or planned as any other is.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn sql_for_each_with_params(
+        &self,
+        sql: &str,
+        params: &[Param],
         mut metrics: Option<&mut QueryMetrics>,
         mut f: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
@@ -431,6 +446,7 @@ impl Engine {
         refuse_hidden_names(sql)?;
         let logical = plan_query(&self.session, sql)?;
         refuse_non_query(sql)?;
+        let logical = params::bind(logical, params)?;
         // The host arms the token and clears it. Clearing it here would run a statement whose
         // cancel arrived before it, or while it was still being planned.
         if self.cancel.is_cancelled() {
@@ -459,7 +475,7 @@ impl Engine {
                         })
                     };
                     self.runtime()
-                        .block_on(self.stream(logical, sql, &mut send, held))
+                        .block_on(self.stream(logical, sql, params, &mut send, held))
                 })
                 .map_err(|e| BurrmillError::Substrate(format!("statement thread: {e}")))?;
             // Refused by `f`: `rx` goes with the loop, the next send fails and the statement ends.
@@ -492,15 +508,27 @@ impl Engine {
     pub async fn sql_async_for_each(
         &self,
         sql: &str,
+        f: impl FnMut(RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        self.sql_async_for_each_with_params(sql, &[], f).await
+    }
+
+    /// As [`Engine::sql_async_for_each`], with `params` bound to `$1`, `$2` and on.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn sql_async_for_each_with_params(
+        &self,
+        sql: &str,
+        params: &[Param],
         mut f: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
         refuse_hidden_names(sql)?;
         let logical = plan_query(&self.session, sql)?;
         refuse_non_query(sql)?;
+        let logical = params::bind(logical, params)?;
         if self.cancel.is_cancelled() {
             return Err(BurrmillError::Cancelled);
         }
-        self.stream(logical, sql, &mut f, None).await
+        self.stream(logical, sql, params, &mut f, None).await
     }
 
     /// Addresses are read as fixed binary while every value in an address column is one. The
@@ -510,6 +538,7 @@ impl Engine {
         &self,
         logical: datafusion_expr::LogicalPlan,
         sql: &str,
+        params: &[Param],
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
         mut metrics: Option<&mut QueryMetrics>,
     ) -> Result<()> {
@@ -533,7 +562,7 @@ impl Engine {
             {
                 log::warn!("{m}: addresses are read as text from now on");
                 // Planned afresh: the plan that refused holds what its shared subqueries ran.
-                let fresh = plan_query(&self.session, sql)?;
+                let fresh = params::bind(plan_query(&self.session, sql)?, params)?;
                 self.stream_once(fresh, f, metrics).await
             }
             r => r,
@@ -688,9 +717,16 @@ impl Engine {
     /// once: a nested-loop join, and a recursive query, which has no static scan count at all.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn parquet_scans(&self, sql: &str) -> Result<u64> {
+        self.parquet_scans_with_params(sql, &[])
+    }
+
+    /// As [`Engine::parquet_scans`], for the statement `params` complete.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn parquet_scans_with_params(&self, sql: &str, params: &[Param]) -> Result<u64> {
         refuse_hidden_names(sql)?;
         let logical = plan_query(&self.session, sql)?;
         refuse_non_query(sql)?;
+        let logical = params::bind(logical, params)?;
         let plan = || {
             self.runtime()
                 .block_on(self.session.create_physical_plan(&logical))
