@@ -91,7 +91,7 @@ await page.waitForFunction(
 );
 
 const narration = await page.locator('#narration').innerText();
-const sql = await page.locator('#sql').innerText();
+const sql = await page.locator('#sql').inputValue();
 
 let failed = false;
 function bad(message) {

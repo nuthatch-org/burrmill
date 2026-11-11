@@ -33,6 +33,9 @@ fixed kind (`cast_failed`, `divide_by_zero`, `overflow`, `too_big`, `stopped`, `
 `Session::failure`. Every statement is first held to table `t` by `inspect::reach_uploads`.
 
 The answer is run, charted and narrated in the tab (`Session::present_bound`); its rows are not sent.
+Its statement can be edited and run again with "Run here", which queries the tab and sends nothing;
+the model's narration is dropped, since it was written for the other statement. "Download CSV" saves
+the rows on the page, with a `'` before any cell that a spreadsheet would read as a formula.
 
 ## The four modes
 
