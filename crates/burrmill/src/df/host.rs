@@ -170,7 +170,6 @@ impl Engine {
                     lowercase: addresses.clone(),
                 },
                 self.threads,
-                self.cancel.clone(),
             )?)
         };
         self.session.register_table(&raw, Arc::clone(&raw_provider));
@@ -242,7 +241,7 @@ impl Engine {
             )
         });
         let sql = format!("SELECT *{dec} FROM (SELECT *{stubs} FROM \"{source}\"){bound}");
-        let logical = plan_query(&self.session, &sql)?;
+        let logical = plan_query(&self.session, &sql, &crate::CancelToken::new())?;
         self.session
             .register_table(name, Arc::new(ViewTable::new(logical, Some(sql))));
         // The view's plan already holds these. Leaving the names registered is how a later

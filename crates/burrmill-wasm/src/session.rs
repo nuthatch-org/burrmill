@@ -61,7 +61,6 @@ pub struct Session {
     engine: Engine,
     batches: Vec<RecordBatch>,
     names: Vec<String>,
-    secrets: Vec<String>,
     report: IngestReport,
     marked: BTreeSet<String>,
     tokens: TokenMap,
@@ -80,13 +79,11 @@ impl Session {
             .iter()
             .map(|f| f.name().clone())
             .collect();
-        let secrets = secrets_of(&batches);
         let engine = Engine::open_empty_within(MEMORY_BYTES).map_err(|e| e.to_string())?;
         let mut session = Self {
             engine,
             batches,
             names,
-            secrets,
             report,
             marked: BTreeSet::new(),
             tokens: TokenMap::default(),
@@ -227,22 +224,24 @@ impl Session {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn aggregate_feedback(&self, sql: &str) -> Result<String, String> {
-        let sized = match measure_sql(sql) {
-            Ok(sql) => sql,
+        let measured = match measure_sql(sql) {
+            Ok(measured) => measured,
             Err(reason) => return Ok(skipped(reason)),
         };
-        Ok(filter_payload(&self.query(&sized).map_err(|f| f.local)?))
+        let dropped = self.query(&measured.dropped).map_err(|f| f.local)?;
+        let answer = self.query(&measured.answer).map_err(|f| f.local)?;
+        Ok(filter_payload(&answer, &dropped))
     }
 
     #[cfg(target_arch = "wasm32")]
     pub async fn aggregate_feedback(&self, sql: &str) -> Result<String, String> {
-        let sized = match measure_sql(sql) {
-            Ok(sql) => sql,
+        let measured = match measure_sql(sql) {
+            Ok(measured) => measured,
             Err(reason) => return Ok(skipped(reason)),
         };
-        Ok(filter_payload(
-            &self.query(&sized).await.map_err(|f| f.local)?,
-        ))
+        let dropped = self.query(&measured.dropped).await.map_err(|f| f.local)?;
+        let answer = self.query(&measured.answer).await.map_err(|f| f.local)?;
+        Ok(filter_payload(&answer, &dropped))
     }
 
     /// Replace the token map. An empty list clears it, so a later schema or
@@ -331,35 +330,43 @@ impl Session {
     fn guard(&self, sql: &str) -> Result<(), Failure> {
         let allowed = BTreeSet::from([TABLE.to_string()]);
         burrmill::inspect::reach_uploads(sql, &allowed).map_err(|e| {
-            let local = self.fail(&e.to_string());
+            let local = e.to_string();
             Failure {
-                feedback: feedback_error(&local),
+                feedback: feedback_error(&self.redact(&local)),
                 local,
+                before_rows: true,
             }
         })
     }
 
-    fn fail(&self, err: &str) -> String {
-        redact(err, &self.secrets, &self.names)
+    fn redact(&self, err: &str) -> String {
+        redact(err, &self.tokens, &self.names)
     }
 
     /// A statement that did not plan read no row, so its message can go. One that failed while
     /// running can quote a cell however it is redacted, so only its kind goes.
     fn failure(&self, e: &burrmill::BurrmillError) -> Failure {
         use burrmill::BurrmillError as E;
-        let local = self.fail(&e.to_string());
-        let feedback = match e {
-            E::Parse(_) | E::Plan(_) | E::NotAllowed(_) | E::NoSegments(_) => {
-                feedback_error(&local)
-            }
-            _ => json!({
+        let local = e.to_string();
+        let before_rows = matches!(
+            e,
+            E::Parse(_) | E::Plan(_) | E::NotAllowed(_) | E::NoSegments(_)
+        );
+        let feedback = if before_rows {
+            feedback_error(&self.redact(&local))
+        } else {
+            json!({
                 "error": "the statement planned and then failed while reading rows",
                 "kind": runtime_kind(&e.to_string()),
                 "note": "the message is not sent, since it can quote a cell",
             })
-            .to_string(),
+            .to_string()
         };
-        Failure { local, feedback }
+        Failure {
+            local,
+            feedback,
+            before_rows,
+        }
     }
 
     fn pack(&self, batches: Vec<RecordBatch>) -> QueryOut {
@@ -411,6 +418,8 @@ impl Session {
 pub struct Failure {
     pub local: String,
     pub feedback: String,
+    /// Raised before any row was read, so whether it happens is decided by the schema alone.
+    pub before_rows: bool,
 }
 
 /// A fixed word chosen from the message, so the message itself stays here.
@@ -531,22 +540,6 @@ fn rename_batch(batch: &RecordBatch, names: &[String]) -> Result<RecordBatch, St
         .collect();
     RecordBatch::try_new(Arc::new(Schema::new(fields)), batch.columns().to_vec())
         .map_err(|e| e.to_string())
-}
-
-fn secrets_of(batches: &[RecordBatch]) -> Vec<String> {
-    let mut set = BTreeSet::new();
-    for batch in batches {
-        for col in batch.columns() {
-            for r in 0..batch.num_rows() {
-                if let Some(s) = cell_string(col, r)
-                    && s.len() >= 4
-                {
-                    set.insert(s);
-                }
-            }
-        }
-    }
-    set.into_iter().collect()
 }
 
 fn sign_label(batches: &[RecordBatch], idx: usize) -> Option<&'static str> {
@@ -758,6 +751,28 @@ posted,merchant,amount
             "{}",
             unplanned.feedback
         );
+    }
+
+    #[test]
+    fn only_a_failure_before_any_row_is_read_counts_as_one() {
+        let s = session();
+        for sql in [
+            "SELECT nosuch FROM t",
+            "SELECT nosuch(amount) FROM t",
+            "SELEC 1",
+            "SELECT * FROM other",
+            "SELECT 'a' - amount FROM t",
+        ] {
+            let failed = s.query(sql).unwrap_err();
+            assert!(failed.before_rows, "{sql}: {}", failed.local);
+        }
+        for sql in [
+            "SELECT CAST(merchant AS INTEGER) FROM t",
+            "SELECT CASE WHEN amount < -50 THEN CAST(merchant AS INT) END FROM t",
+        ] {
+            let failed = s.query(sql).unwrap_err();
+            assert!(!failed.before_rows, "{sql}: {}", failed.local);
+        }
     }
 
     #[test]

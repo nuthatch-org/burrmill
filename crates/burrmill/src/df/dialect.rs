@@ -157,8 +157,14 @@ impl sqlparser::dialect::Dialect for Duck {
             sqlparser::tokenizer::Token::Word(w)
                 if matches!(w.keyword, Keyword::PIVOT | Keyword::UNPIVOT) =>
             {
+                let instead = match w.keyword {
+                    Keyword::PIVOT => {
+                        "one aggregate per value, with FILTER (WHERE ...) or CASE, under GROUP BY"
+                    }
+                    _ => "one SELECT per column, joined by UNION ALL",
+                };
                 Some(Err(sqlparser::parser::ParserError::ParserError(format!(
-                    "{} is not supported here",
+                    "{} is not supported here; write {instead}",
                     w.value.to_ascii_uppercase()
                 ))))
             }
@@ -201,7 +207,7 @@ impl sqlparser::dialect::Dialect for Duck {
             }
             sqlparser::tokenizer::Token::Word(w) if w.value.eq_ignore_ascii_case("glob") => {
                 return Some(Err(sqlparser::parser::ParserError::ParserError(
-                    "GLOB is not supported here".into(),
+                    "GLOB is not supported here; LIKE is, with % for * and _ for ?".into(),
                 )));
             }
             _ => {}
@@ -1313,16 +1319,25 @@ fn minutes_only(s: &str) -> bool {
         && b[7] == b'-'
 }
 
-/// DuckDB functions with no counterpart here, refused by name rather than as unknown.
+/// DuckDB functions with no counterpart here, refused by name with what to write instead.
 fn unsupported_function(f: &sq::Function) -> Option<String> {
     let [sq::ObjectNamePart::Identifier(name)] = f.name.0.as_slice() else {
         return None;
     };
-    matches!(
-        name.value.to_ascii_lowercase().as_str(),
-        "approx_count_distinct" | "list_aggregate" | "array_aggregate" | "strptime" | "columns"
-    )
-    .then(|| format!("{} is not supported here", name.value))
+    let instead = match name.value.to_ascii_lowercase().as_str() {
+        "approx_count_distinct" => Some("COUNT(DISTINCT ...) gives the exact count"),
+        "list_aggregate" | "array_aggregate" => {
+            Some("aggregate in a subquery, as (SELECT sum(v) FROM (SELECT unnest(...) AS v))")
+        }
+        "strptime" => Some("for ISO 8601 text, CAST(... AS TIMESTAMP)"),
+        "try_strptime" => Some("for ISO 8601 text, TRY_CAST(... AS TIMESTAMP)"),
+        "columns" => Some("name the columns, or use * EXCLUDE (...)"),
+        _ => return None,
+    };
+    Some(match instead {
+        Some(instead) => format!("{} is not supported here; {instead}", name.value),
+        None => format!("{} is not supported here", name.value),
+    })
 }
 
 /// DuckDB's `if(c, a, b)`, which is `CASE WHEN c THEN a ELSE b END`.
@@ -1396,7 +1411,7 @@ fn like_pattern(
             Some('\\') => return Ok(()),
             Some(c) => {
                 return Err(format!(
-                    "LIKE ... ESCAPE '{c}' over a pattern that is not a literal is not supported here"
+                    "LIKE ... ESCAPE '{c}' over a pattern that is not a literal is not supported here; ESCAPE '\\' is"
                 ));
             }
         }
@@ -1453,6 +1468,12 @@ fn retype(t: &mut SqlType) -> Option<String> {
         SqlType::UBigInt => SqlType::BigIntUnsigned(None),
         SqlType::UTinyInt => SqlType::TinyIntUnsigned(None),
         SqlType::USmallInt => SqlType::SmallIntUnsigned(None),
+        // DuckDB's TIMESTAMP is microseconds; DataFusion's, unqualified, is nanoseconds.
+        SqlType::Timestamp(
+            None,
+            tz @ (sq::TimezoneInfo::None | sq::TimezoneInfo::WithoutTimeZone),
+        ) => SqlType::Timestamp(Some(6), *tz),
+        SqlType::Datetime(None) => SqlType::Timestamp(Some(6), sq::TimezoneInfo::None),
         // `UINTEGER` and DuckDB's other unsigned spellings reach here as custom type names.
         SqlType::Custom(name, args) if args.is_empty() => {
             match name.to_string().to_ascii_uppercase().as_str() {
@@ -1993,6 +2014,7 @@ fn duck_decimal(e: &Expr, schema: &DFSchema, inputs: &[&LogicalPlan]) -> bool {
 }
 
 /// Whether output column `i` of `p` is a DuckDB DECIMAL, by [`duck_decimal`].
+#[recursive::recursive]
 fn decimal_output(p: &LogicalPlan, i: usize) -> bool {
     let produced = |e: Option<&Expr>, input: &LogicalPlan| {
         e.is_some_and(|e| duck_decimal(e, input.schema(), &[input]))

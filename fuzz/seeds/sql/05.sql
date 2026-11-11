@@ -1,0 +1,1 @@
+SELECT arg_max(who, block_number), string_agg(who, ',' ORDER BY block_number) FROM t

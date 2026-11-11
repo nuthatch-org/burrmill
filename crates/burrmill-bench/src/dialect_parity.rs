@@ -385,13 +385,33 @@ const CORPUS: &[&str] = &[
     "FROM label",
     "SELECT block_number FROM transfer ORDER BY 1 LIMIT 1.5",
     "SELECT block_number FROM transfer ORDER BY 1 LIMIT 0.4",
+    // `list_sum` is `sum` over the elements: HUGEINT for integers, DECIMAL(38,s) for decimals.
+    "SELECT list_sum([1, 2, 3]) AS a, list_sum([1.5, 2.25]) AS b, list_sum([1.5::DOUBLE, 2]) AS c, list_sum([]) AS d, list_sum(NULL) AS e, list_sum([NULL, 1]) AS f, list_sum([NULL::INT]) AS g",
+    "SELECT \"from\", list_sum(list(block_number)) AS s, list_sum(list(CAST(value AS HUGEINT))) AS v FROM transfer GROUP BY 1 ORDER BY 1",
+    "SELECT list_sum([1, 2]) * 2 AS a, list_sum([7, 2]) // 2 AS b",
+    "SELECT list_min([3, 1, NULL, 2]) AS a, list_max([3, 1, 2]) AS b, list_min([]) AS c, list_min(['b', 'a']) AS d, list_min(NULL) AS e",
+    "SELECT \"from\", list_min(list(block_number)) AS lo, list_max(list(log_index)) AS hi FROM transfer GROUP BY 1 ORDER BY 1",
     // DuckDB answers these; burrmill refuses each by name (#20).
     "SELECT approx_count_distinct(block_number) AS n FROM transfer",
     "SELECT list_aggregate([1, 2, 3], 'sum') AS a",
     "SELECT strptime('2024-01-02 03:04:05', '%Y-%m-%d %H:%M:%S') AS a",
+    "SELECT try_strptime('2024-01-02', '%Y-%m-%d') AS a",
     "SELECT COLUMNS('a') FROM (SELECT 1 AS a, 2 AS b) t",
     "SELECT 'abc' GLOB 'a*' AS a",
     "PIVOT (SELECT 1 AS a, 'x' AS k) ON k USING sum(a)",
+    // What each refusal above names instead (#173).
+    "SELECT COUNT(DISTINCT block_number) AS n FROM transfer",
+    "SELECT (SELECT sum(v) FROM (SELECT unnest([1, 2, 3]) AS v)) AS a",
+    "SELECT * EXCLUDE (b) FROM (SELECT 1 AS a, 2 AS b) t",
+    "SELECT 'abc' LIKE 'a_c%' AS a",
+    r"SELECT s LIKE p ESCAPE '\' AS m FROM (VALUES ('a%', 'a\%'), ('ab', 'a\%')) t(s, p)",
+    "SELECT sum(a) FILTER (WHERE k = 'x') AS x FROM (SELECT 1 AS a, 'x' AS k) t",
+    "SELECT 'a' AS k, a AS v FROM (SELECT 1 AS a, 2 AS b) t UNION ALL SELECT 'b', b FROM (SELECT 1 AS a, 2 AS b) t ORDER BY 1",
+    // What strptime and try_strptime name for ISO 8601 text: DuckDB's TIMESTAMP, in microseconds.
+    "SELECT CAST('2024-01-02 03:04:05' AS TIMESTAMP) AS a",
+    "SELECT CAST('2024-01-02 03:04:05.123456789' AS TIMESTAMP) AS a, TRY_CAST('2024-01-02 03:04:05.1234567' AS TIMESTAMP) AS b, TRY_CAST('x' AS TIMESTAMP) AS c, '2024-01-02T03:04:05'::TIMESTAMP AS d, CAST('2024-01-02' AS DATETIME) AS e",
+    "SELECT CAST(CAST('2024-01-02 03:04:05.5' AS TIMESTAMP) AS VARCHAR) AS a, date_trunc('hour', CAST('2024-01-02 03:04:05' AS TIMESTAMP)) AS b, CAST('2024-01-02 03:04:05' AS TIMESTAMP) + INTERVAL 1 DAY AS c, CAST('2024-01-02' AS TIMESTAMP) < TIMESTAMP '2024-01-03' AS d",
+    "SELECT CAST(to_timestamp(block_timestamp) AS TIMESTAMP) AS t, CAST(CAST(to_timestamp(block_timestamp) AS VARCHAR) AS TIMESTAMP) AS u FROM transfer ORDER BY 1 LIMIT 2",
     "SELECT * FROM unnest([1, 2]) t(x)",
     "SELECT * FROM range(DATE '2024-01-01', DATE '2024-01-03', INTERVAL 1 DAY) t(d)",
     "SELECT * FROM (SELECT 3 AS n) s, range(s.n) t(x)",
@@ -444,6 +464,10 @@ const KNOWN: &[(&str, &str)] = &[
     (
         "SELECT strptime('2024-01-02 03:04:05', '%Y-%m-%d %H:%M:%S') AS a",
         "refused by name: DuckDB's format codes are not chrono's",
+    ),
+    (
+        "SELECT try_strptime('2024-01-02', '%Y-%m-%d') AS a",
+        "refused by name, as strptime is",
     ),
     (
         "SELECT COLUMNS('a') FROM (SELECT 1 AS a, 2 AS b) t",

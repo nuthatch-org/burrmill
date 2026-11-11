@@ -93,6 +93,37 @@ fn first_and_last_are_duckdbs_aggregates() {
     assert_eq!(rows, vec![serde_json::json!({"a": null, "b": 3, "c": 4})]);
 }
 
+/// `list_sum` is DuckDB's `sum` over the elements, exact for integers and decimals and refused
+/// past 38 digits; `list_min` exists, and both extremes take a NULL list.
+#[test]
+fn list_sum_min_and_max_are_duckdbs() {
+    let engine = Engine::open_empty().unwrap();
+    let got = engine
+        .sql(
+            "SELECT list_sum([1, 2, 3]) AS a, list_sum([1.5, 2.25]) AS b, \
+             list_sum([9007199254740993, 1]) AS c, list_sum([NULL, 1]) AS d, list_sum([]) AS e, \
+             list_min([3, 1, NULL, 2]) AS f, list_min(NULL) AS g, list_max(NULL) AS h",
+        )
+        .unwrap();
+    let rows: Vec<_> = got
+        .iter()
+        .flat_map(|b| burrmill::df::encode::rows(b).unwrap())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![serde_json::json!({
+            "a": "6", "b": "3.75", "c": "9007199254740994", "d": "1", "e": null,
+            "f": 1, "g": null, "h": null,
+        })]
+    );
+    let past = format!(
+        "SELECT list_sum([CAST('{0}' AS HUGEINT), CAST('{0}' AS HUGEINT)]) AS a",
+        "9".repeat(38)
+    );
+    let err = engine.sql(&past).unwrap_err().to_string();
+    assert!(err.contains("list_sum does not fit"), "{err}");
+}
+
 /// DuckDB's `BIGNUM`, as the network nest's views write it: token amounts cast from text, added,
 /// negated and summed, exactly, and read back as text. It is `DECIMAL(38,0)` here, the nest's
 /// 38-digit line, so a value past it refuses rather than being guessed at.
@@ -497,6 +528,7 @@ fn duckdb_answers_still_refused_say_so_by_name() {
             "SELECT strptime('2024-01-02 03:04:05', '%Y-%m-%d %H:%M:%S') a",
             "strptime",
         ),
+        ("SELECT try_strptime('x', '%Y') a", "try_strptime"),
         (
             "SELECT COLUMNS('a') FROM (SELECT 1 AS a, 2 AS b) t",
             "COLUMNS",
@@ -526,6 +558,119 @@ fn duckdb_answers_still_refused_say_so_by_name() {
             first.contains(name)
                 && (first.contains("not supported") || first.contains("Unsupported")),
             "{sql}: {e}"
+        );
+    }
+}
+
+/// #173: a refusal with a supported equivalent names it, and the equivalent answers.
+#[test]
+fn refusals_name_what_to_write_instead() {
+    let engine = Engine::open_empty().unwrap();
+    for (refused, hint, instead, want) in [
+        (
+            "SELECT approx_count_distinct(x) a FROM range(100) t(x)",
+            "COUNT(DISTINCT ...)",
+            "SELECT COUNT(DISTINCT x) a FROM range(100) t(x)",
+            serde_json::json!({"a": 100}),
+        ),
+        (
+            "SELECT list_aggregate([1, 2, 3], 'sum') a",
+            "sum(v) FROM (SELECT unnest(...) AS v)",
+            "SELECT (SELECT sum(v) FROM (SELECT unnest([1, 2, 3]) AS v)) a",
+            serde_json::json!({"a": "6"}),
+        ),
+        (
+            "SELECT array_aggregate([1, 2, 3], 'max') a",
+            "(SELECT sum(v) FROM (SELECT unnest(...) AS v))",
+            "SELECT (SELECT max(v) FROM (SELECT unnest([1, 2, 3]) AS v)) a",
+            serde_json::json!({"a": 3}),
+        ),
+        (
+            "SELECT COLUMNS('a') FROM (SELECT 1 AS a, 2 AS b) t",
+            "* EXCLUDE (...)",
+            "SELECT * EXCLUDE (b) FROM (SELECT 1 AS a, 2 AS b) t",
+            serde_json::json!({"a": 1}),
+        ),
+        (
+            "SELECT 'abc' GLOB 'a?c*' a",
+            "LIKE is, with % for * and _ for ?",
+            "SELECT 'abc' LIKE 'a_c%' a",
+            serde_json::json!({"a": true}),
+        ),
+        (
+            "PIVOT (SELECT 1 AS a, 'x' AS k) ON k USING sum(a)",
+            "FILTER (WHERE ...) or CASE, under GROUP BY",
+            "SELECT sum(a) FILTER (WHERE k = 'x') AS x FROM (SELECT 1 AS a, 'x' AS k) t",
+            serde_json::json!({"x": "1"}),
+        ),
+        (
+            "UNPIVOT (SELECT 1 AS a) ON a INTO NAME k VALUE v",
+            "UNION ALL",
+            "SELECT 'a' AS k, a AS v FROM (SELECT 1 AS a) t",
+            serde_json::json!({"k": "a", "v": 1}),
+        ),
+        (
+            "SELECT strptime('2024-01-02 03:04:05', '%Y-%m-%d %H:%M:%S') a",
+            "CAST(... AS TIMESTAMP)",
+            "SELECT CAST(CAST('2024-01-02 03:04:05' AS TIMESTAMP) AS VARCHAR) a",
+            serde_json::json!({"a": "2024-01-02 03:04:05"}),
+        ),
+        (
+            "SELECT try_strptime('x', '%Y') a",
+            "TRY_CAST(... AS TIMESTAMP)",
+            "SELECT TRY_CAST('x' AS TIMESTAMP) a",
+            serde_json::json!({"a": null}),
+        ),
+        (
+            "SELECT s LIKE p ESCAPE '$' AS m FROM (VALUES ('a%', 'a$%')) t(s, p)",
+            r"ESCAPE '\' is",
+            r"SELECT s LIKE p ESCAPE '\' AS m FROM (VALUES ('a%', 'a\%')) t(s, p)",
+            serde_json::json!({"m": true}),
+        ),
+    ] {
+        let e = engine.sql(refused).expect_err(refused).to_string();
+        let first = e.lines().next().unwrap_or_default();
+        assert!(
+            first.contains("is not supported here") && first.contains(hint),
+            "{refused}: {e}"
+        );
+        assert_eq!(one_row(&engine, instead), vec![want], "{instead}");
+    }
+}
+
+/// DuckDB's TIMESTAMP, and DATETIME with it, is microseconds: a finer fraction is cut off, as
+/// DuckDB cuts it, and the column is microseconds for nuthatch's encoder.
+#[test]
+fn a_cast_to_timestamp_is_microseconds() {
+    use arrow::array::AsArray;
+    use arrow::datatypes::{DataType, TimeUnit, TimestampMicrosecondType};
+    let engine = Engine::open_empty().unwrap();
+    let got = engine
+        .sql(
+            "SELECT CAST('2024-01-02 03:04:05.123456789' AS TIMESTAMP) a, \
+             TRY_CAST('2024-01-02 03:04:05.1234567' AS TIMESTAMP) b, \
+             '2024-01-02 03:04:05.123456'::TIMESTAMP c, CAST('2024-01-02' AS DATETIME) d",
+        )
+        .unwrap();
+    let b = &got[0];
+    for (i, want) in [
+        1704164645123456,
+        1704164645123456,
+        1704164645123456,
+        1704153600000000,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            b.column(i).data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, None)
+        );
+        assert_eq!(
+            b.column(i)
+                .as_primitive::<TimestampMicrosecondType>()
+                .value(0),
+            want
         );
     }
 }

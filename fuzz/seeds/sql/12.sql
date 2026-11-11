@@ -1,0 +1,1 @@
+SELECT CASE WHEN who LIKE 'a%' THEN 'x' ELSE NULL END, IF(block_number > 1, 1, 0), levenshtein(who, 'ab') FROM t

@@ -371,6 +371,27 @@ fn explain_is_refused_when_the_host_says_so() {
     );
 }
 
+/// A statement past the length limit is refused before it is parsed, and an error quoting an
+/// input quotes a few KiB of it.
+#[test]
+fn long_statements_and_long_error_text_are_cut() {
+    let (_tmp, engine) = nest_with_transfer();
+    let long = format!("SELECT 1 AS one -- {}", "x".repeat(1 << 20));
+    match engine.sql(&long) {
+        Err(BurrmillError::NotAllowed(m)) => assert!(m.contains("longer than"), "{m}"),
+        other => panic!("{:?}", other.map(|_| ())),
+    }
+    engine.set_sql_limit(2 << 20);
+    assert_eq!(engine.sql(&long).unwrap()[0].num_rows(), 1);
+
+    let err = engine
+        .sql("SELECT json_extract(repeat('{', 100000), '$.a') AS j")
+        .unwrap_err()
+        .to_string();
+    assert!(err.len() < 5 << 10, "{} bytes", err.len());
+    assert!(err.contains("bytes cut"), "{err}");
+}
+
 #[test]
 fn a_small_table_is_not_fanned_out() {
     let (_tmp, engine) = nest_with_transfer();

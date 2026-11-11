@@ -153,13 +153,25 @@ pub fn build(
 }
 
 fn is_header(rows: &[Row], locale: Locale) -> bool {
-    // One row is data. A first row of names above anything else is a header, including when
-    // the rows under it are names too (`city,person` / `Sofia,Ivan`).
+    // Names over a column that is not text. Text over text (`Ivan,Petrov` / `Maria,Ivanova`)
+    // cannot be told from data, and a value taken as a name would leave in the schema.
     if rows.len() < 2 {
         return false;
     }
     let first = &rows[0];
-    first.iter().any(|c| !c.is_empty()) && first.iter().all(|c| c.is_empty() || is_name(c, locale))
+    if !first.iter().all(|c| c.is_empty() || is_name(c, locale)) {
+        return false;
+    }
+    first.iter().enumerate().any(|(i, cell)| {
+        if cell.is_empty() {
+            return false;
+        }
+        let kinds: Vec<Kind> = rows[1..]
+            .iter()
+            .map(|row| row.get(i).map_or(Kind::Empty, |c| classify(c, locale)))
+            .collect();
+        !matches!(choose(&kinds).0, InferredType::Text)
+    })
 }
 
 fn is_name(cell: &str, locale: Locale) -> bool {

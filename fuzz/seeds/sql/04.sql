@@ -1,0 +1,1 @@
+WITH g AS (SELECT who, sum(total) AS s FROM t GROUP BY who) SELECT * FROM g a JOIN g b USING (who)

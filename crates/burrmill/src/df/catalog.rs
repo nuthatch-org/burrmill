@@ -216,6 +216,7 @@ impl ParquetFileReaderFactory for Unmetered {
 /// The counter a plan's segment scan or owned fold reads into, taken before it runs: holding the
 /// plan itself through the statement would keep every segment's DataFusion metrics alive (#86).
 /// An owned fold's counter is flagged: it reads exactly what its footers select, so it counts as both.
+#[recursive::recursive]
 pub(super) fn sealed_counters(plan: &Arc<dyn ExecutionPlan>, out: &mut Vec<(Count, bool)>) {
     let fold = plan.name() == "OwnedSignedFoldExec";
     for m in plan.metrics().iter().flat_map(|s| s.iter()) {
@@ -386,17 +387,11 @@ pub struct SegmentTable {
     files: Vec<PartitionedFile>,
     groups: usize,
     url: ObjectStoreUrl,
-    /// The engine's token; every scan of this table stops at it.
-    cancel: crate::CancelToken,
     lowercase: HashSet<String>,
 }
 
 impl SegmentTable {
-    pub fn new(
-        table: &NestTable,
-        groups: usize,
-        cancel: crate::CancelToken,
-    ) -> crate::Result<Self> {
+    pub fn new(table: &NestTable, groups: usize) -> crate::Result<Self> {
         // A table's segments share one or two directories; canonicalising each file walked every
         // component of its path per request (nuthatch#2669).
         let mut parents: HashMap<PathBuf, PathBuf> = HashMap::new();
@@ -422,7 +417,6 @@ impl SegmentTable {
             } else {
                 ObjectStoreUrl::local_filesystem()
             },
-            cancel,
             lowercase: table.lowercase.iter().cloned().collect(),
         })
     }
@@ -507,7 +501,6 @@ impl TableProvider for SegmentTable {
             .build();
         Ok(super::cancel::CancelExec::wrap_scan(
             DataSourceExec::from_data_source(cfg),
-            self.cancel.clone(),
         ))
     }
 }

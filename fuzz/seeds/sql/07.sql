@@ -1,0 +1,1 @@
+SELECT [x * 2 FOR x IN [1, 2, 3]], struct_pack(a := 1, b := 'x'), list_value(1, 2)[1]

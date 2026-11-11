@@ -1,0 +1,1 @@
+SELECT row_number() OVER (PARTITION BY lower(who) ORDER BY block_number DESC) AS r FROM t QUALIFY r = 1

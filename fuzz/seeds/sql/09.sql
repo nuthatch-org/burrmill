@@ -1,0 +1,1 @@
+SELECT max(amount) FILTER (WHERE block_number > 1), median(block_number) FROM t

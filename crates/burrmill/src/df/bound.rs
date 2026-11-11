@@ -975,6 +975,7 @@ impl ScalarUDFImpl for Repeated {
 
 /// `e` with `||` and every scalar function bounded, and, where `spread` says the value is repeated
 /// per row, a long literal built as a charged column.
+#[recursive::recursive]
 fn bound_expr(e: Expr, spread: bool, limits: &Arc<Limits>) -> Result<Transformed<Expr>> {
     let recurse = |e: Expr, spread: bool| bound_expr(e, spread, limits);
     let t = match e {

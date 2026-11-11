@@ -1,0 +1,1 @@
+SELECT block_number // 2 AS h, CAST(total AS HUGEINT) * 3 FROM t

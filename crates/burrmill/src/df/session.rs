@@ -214,8 +214,14 @@ impl MiniSession {
             let f = match f.name() {
                 "array_prepend" => super::lists::ElementAndList::udf(f, true),
                 "array_append" => super::lists::ElementAndList::udf(f, false),
+                "array_sum" => super::lists::ListSum::udf(f),
+                "array_min" | "array_max" => super::lists::ListExtreme::udf(f),
                 _ => f,
             };
+            // DataFusion names `array_max` `list_max` too, and `array_min` only so.
+            if f.name() == "array_min" {
+                scalar.insert("list_min".into(), Arc::clone(&f));
+            }
             for a in f.aliases() {
                 scalar.insert(a.clone(), Arc::clone(&f));
             }
@@ -356,6 +362,9 @@ impl MiniSession {
                 )
                 .chain([Arc::new(super::bound::BoundValues(Arc::clone(&limits)))
                     as Arc<dyn AnalyzerRule + Send + Sync>])
+                .map(|r| {
+                    Arc::new(super::cancel::Stoppable(r)) as Arc<dyn AnalyzerRule + Send + Sync>
+                })
                 .collect(),
             ),
             // Without `eliminate_group_by_constant`: it recomputes a key that is a function of
@@ -372,6 +381,10 @@ impl MiniSession {
                             as Arc<dyn datafusion_optimizer::OptimizerRule + Send + Sync>,
                         Arc::new(super::sharing::PruneShared),
                     ])
+                    .map(|r| {
+                        Arc::new(super::cancel::Stoppable(r))
+                            as Arc<dyn datafusion_optimizer::OptimizerRule + Send + Sync>
+                    })
                     .collect(),
             ),
             // Last, so it sees the join filter after projection pushdown has made its operands columns.
@@ -413,7 +426,7 @@ impl MiniSession {
                     as Arc<dyn PhysicalOptimizerRule + Send + Sync>
             }))
             .chain([
-                Arc::new(super::cancel::Cancellable(cancel))
+                Arc::new(super::cancel::Cancellable)
                     as Arc<dyn PhysicalOptimizerRule + Send + Sync>,
                 Arc::new(super::sharing::PublishShared),
             ])
@@ -422,6 +435,10 @@ impl MiniSession {
                 Arc::new(super::sequential::Sequential)
                     as Arc<dyn PhysicalOptimizerRule + Send + Sync>
             }))
+            .map(|r| {
+                Arc::new(super::cancel::Stoppable(r))
+                    as Arc<dyn PhysicalOptimizerRule + Send + Sync>
+            })
             .collect(),
             execution_props: ExecutionProps::new(),
             table_options: TableOptions::new(),

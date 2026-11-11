@@ -6,14 +6,17 @@ const QUESTIONS = [
   'Year-over-year change',
 ];
 
-// RFC-0047's stated default. Whether k should differ, or be per column, is open.
+const DEFAULT_MODEL = 'claude-sonnet-4-5';
+
+// For the prompt and the blurb. The filter is AGGREGATE_K in crates/burrmill-wasm/src/aggregates.rs.
 const AGGREGATE_K = 10;
 
-// A label check only. The RFC says this is not a compliance claim.
+// A label check only, and a warning: it does not stop a send (docs/browser.md).
 const IDENTIFIER_LABELS = new Set(['email', 'phone', 'iban', 'ssn', 'patient', 'hiv', 'id']);
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const FILLS = ['#c45c26', '#3d5a6c', '#8a6232', '#5c6b45'];
+// Each at least 3:1 on the chart's #12100e.
+const FILLS = ['#d46a30', '#6a8ca3', '#a77a42', '#7d8f5e'];
 
 if (window.trustedTypes && window.trustedTypes.createPolicy) {
   window.trustedTypes.createPolicy('default', {
@@ -128,7 +131,10 @@ function describeMode() {
   } else if (mode === 'local-model') {
     blurb.textContent = 'Rows go to 127.0.0.1. Nothing leaves this machine.';
   } else {
-    blurb.textContent = 'The schema leaves this browser. The rows stay.';
+    blurb.textContent =
+      'The schema leaves this browser. The rows stay. A statement that does not plan goes back ' +
+      'for another try; one that finds no rows or fails while reading them stays on this page. ' +
+      'What the model can still learn is that its statement planned, which the schema decides.';
   }
   document.getElementById('port-label').hidden = mode !== 'local-model';
 }
@@ -305,11 +311,66 @@ function mag(raw) {
   return Number.isFinite(n) ? Math.abs(n) : 0;
 }
 
+function cellText(display, r, idx) {
+  const raw = idx >= 0 && display[r] ? display[r][idx] : '';
+  return raw == null ? '' : String(raw);
+}
+
+// The name a screen reader gives the chart, and the values it reads under it.
+function describe(svg, chart, columns, display, limit) {
+  const title = svgEl('title');
+  title.id = 'chart-title';
+  const series = chart.y.join(', ');
+  title.textContent =
+    chart.kind === 'number'
+      ? series
+      : chart.kind.replace('_', ' ') + ' chart of ' + series + (chart.x ? ' by ' + chart.x : '');
+  const desc = svgEl('desc');
+  desc.id = 'chart-desc';
+  const xIdx = colIndex(columns, chart.x);
+  const yIdx = chart.y.map((name) => colIndex(columns, name));
+  const lines = [];
+  for (let r = 0; r < limit; r++) {
+    const values = chart.y.map((name, i) => name + ' ' + cellText(display, r, yIdx[i]));
+    lines.push((xIdx >= 0 ? cellText(display, r, xIdx) + ': ' : '') + values.join(', '));
+  }
+  desc.textContent = lines.join('; ');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-labelledby', 'chart-title chart-desc');
+  svg.appendChild(title);
+  svg.appendChild(desc);
+}
+
+function legend(svg, names) {
+  const group = svgEl('g');
+  group.setAttribute('class', 'legend');
+  let x = 20;
+  names.forEach((name, series) => {
+    const swatch = svgEl('rect');
+    swatch.setAttribute('x', String(x));
+    swatch.setAttribute('y', '8');
+    swatch.setAttribute('width', '10');
+    swatch.setAttribute('height', '10');
+    swatch.setAttribute('fill', FILLS[series % FILLS.length]);
+    group.appendChild(swatch);
+    const text = svgEl('text');
+    text.setAttribute('x', String(x + 14));
+    text.setAttribute('y', '17');
+    text.setAttribute('fill', '#b7ab9a');
+    text.setAttribute('font-size', '11');
+    text.textContent = name;
+    group.appendChild(text);
+    x += 30 + name.length * 7;
+  });
+  svg.appendChild(group);
+}
+
 function draw(host, chart, columns, rows, display) {
   host.replaceChildren();
   if (!chart || chart.kind === 'table') return;
   const svg = svgEl('svg');
   svg.setAttribute('viewBox', '0 0 640 280');
+  describe(svg, chart, columns, display, chart.kind === 'number' ? 1 : Math.min(rows.length, 24));
   if (chart.kind === 'number') {
     const idx = colIndex(columns, chart.y[0]);
     const text = svgEl('text');
@@ -348,6 +409,7 @@ function draw(host, chart, columns, rows, display) {
     line.setAttribute('fill', 'none');
     line.setAttribute('stroke', FILLS[0]);
     line.setAttribute('stroke-width', '2');
+    line.dataset.series = chart.y[0];
     svg.appendChild(line);
   } else {
     for (let r = 0; r < limit; r++) {
@@ -360,6 +422,7 @@ function draw(host, chart, columns, rows, display) {
         rect.setAttribute('width', String(Math.max(slot - 4, 1)));
         rect.setAttribute('height', String(h));
         rect.setAttribute('fill', FILLS[series % FILLS.length]);
+        rect.dataset.series = chart.y[series];
         svg.appendChild(rect);
         stacked += h;
       });
@@ -372,10 +435,10 @@ function draw(host, chart, columns, rows, display) {
     label.setAttribute('text-anchor', 'middle');
     label.setAttribute('fill', '#b7ab9a');
     label.setAttribute('font-size', '10');
-    const raw = xIdx >= 0 && display[r] ? display[r][xIdx] : '';
-    label.textContent = raw == null ? '' : String(raw).slice(0, 12);
+    label.textContent = cellText(display, r, xIdx).slice(0, 12);
     svg.appendChild(label);
   }
+  legend(svg, chart.kind === 'line' ? chart.y.slice(0, 1) : chart.y);
   host.appendChild(svg);
 }
 
@@ -396,11 +459,19 @@ async function localChart(sql, chart, narration) {
   return shown.narration || '';
 }
 
+// What is on the page, for the CSV and for running the statement again here.
+let shownAnswer = null;
+let shownChart = null;
+
 function render(shown, sql, answer) {
+  shownAnswer = answer;
+  shownChart = shown.chart;
   document.getElementById('answer').hidden = false;
   document.getElementById('narration').textContent = shown.narration || '';
   document.getElementById('narration-error').textContent = shown.narration_error || '';
-  document.getElementById('sql').textContent = sql;
+  const editor = document.getElementById('sql');
+  editor.defaultValue = sql;
+  editor.value = sql;
   draw(
     document.getElementById('chart'),
     shown.chart,
@@ -410,6 +481,62 @@ function render(shown, sql, answer) {
   );
   renderTable(document.getElementById('table'), answer.columns, shown.display);
   if (answer.truncated) status('Result truncated at 5000 rows.');
+}
+
+// A spreadsheet runs a cell that starts like a formula, and the model wrote the statement.
+function csvCell(cell) {
+  if (cell == null) return '';
+  let text = String(cell);
+  if (/^[=+@\t\r]/.test(text) || (text.startsWith('-') && !Number.isFinite(Number(text)))) {
+    text = "'" + text;
+  }
+  return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+}
+
+function toCsv(answer) {
+  const lines = [answer.columns.map((column) => csvCell(column.name)).join(',')];
+  for (const row of answer.rows) lines.push(row.map(csvCell).join(','));
+  return lines.join('\r\n') + '\r\n';
+}
+
+function exportCsv() {
+  if (!shownAnswer) return;
+  const url = URL.createObjectURL(new Blob([toCsv(shownAnswer)], { type: 'text/csv' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'burrmill-result.csv';
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+// The edited statement runs in the tab only. Its narration was written for the model's
+// statement, so it is not carried over.
+async function runHere() {
+  const sql = document.getElementById('sql').value.trim();
+  if (!sql || !shownChart) return;
+  const button = document.getElementById('run-here');
+  button.disabled = true;
+  try {
+    const queried = await call('query', { sql });
+    if (queried.error) {
+      status(queried.error);
+      return;
+    }
+    const locale = separators();
+    const shown = await call('present', {
+      answer: queried.answer,
+      chart: shownChart,
+      narration: '',
+      group: locale.group,
+      decimal: locale.decimal,
+    });
+    render(shown, sql, queried.answer);
+    status(queried.answer.rows.length ? 'Ran here. Nothing was sent.' : 'No rows. Nothing was sent.');
+  } catch (err) {
+    status(err.message || String(err));
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function identifierHits(text) {
@@ -462,6 +589,7 @@ function showColumns(columns, proposals) {
     input.type = 'text';
     input.value = column.name;
     input.dataset.name = column.name;
+    input.setAttribute('aria-label', 'Name for column ' + column.name);
     input.addEventListener('input', warnNames);
     row.appendChild(input);
     const field = { input, sign: null, date: null, identifier: null };
@@ -702,7 +830,7 @@ async function ask() {
         truncated: dumped.answer.truncated,
       });
     }
-    const model = document.getElementById('model').value.trim() || 'claude-sonnet-4-5';
+    const model = document.getElementById('model').value.trim() || DEFAULT_MODEL;
     const locale = separators();
     const url = modelUrl(mode, port);
     let feedback = '';
@@ -739,6 +867,12 @@ async function ask() {
         continue;
       }
       const queried = await call('query', { sql: reply.sql });
+      // Whether a statement reads rows and then fails, or finds none, is about the data. In
+      // schema mode only a failure the schema decides goes back.
+      if (queried.error && mode === 'schema' && !queried.before_rows) {
+        status(queried.error);
+        return;
+      }
       if (queried.error) {
         feedback = queried.feedback;
         status(queried.error);
@@ -756,7 +890,7 @@ async function ask() {
         status(tokenStatus(feedback));
         continue;
       }
-      if (queried.answer.rows.length === 0 && attempt < 3) {
+      if (queried.answer.rows.length === 0 && attempt < 3 && mode !== 'schema') {
         feedback = queried.feedback;
         status('No rows. Asking again.');
         continue;
@@ -769,7 +903,7 @@ async function ask() {
         decimal: locale.decimal,
       });
       render(shown, reply.sql, queried.answer);
-      status('');
+      status(queried.answer.rows.length ? '' : 'No rows.');
       return;
     }
     status('No answer after 4 attempts.');
@@ -835,6 +969,11 @@ document.getElementById('ask').addEventListener('click', () => {
   ask();
 });
 document.getElementById('mode').addEventListener('change', describeMode);
+document.getElementById('export').addEventListener('click', exportCsv);
+document.getElementById('run-here').addEventListener('click', () => {
+  runHere();
+});
+document.getElementById('model').value = DEFAULT_MODEL;
 
 function bindOffline() {
   if (!('serviceWorker' in navigator)) return;

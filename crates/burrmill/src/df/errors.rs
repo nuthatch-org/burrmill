@@ -39,7 +39,7 @@ pub(super) fn typed(e: &DataFusionError, text: &str) -> Option<BurrmillError> {
     let mut at: Option<&(dyn std::error::Error + 'static)> = Some(e);
     while let Some(cur) = at {
         if let Some(o) = cur.downcast_ref::<Overflow>() {
-            return Some(BurrmillError::Overflow(o.0.clone()));
+            return Some(BurrmillError::Overflow(super::clipped(o.0.clone())));
         }
         let df = cur.downcast_ref::<DataFusionError>().or_else(|| {
             cur.downcast_ref::<std::sync::Arc<DataFusionError>>()
@@ -168,7 +168,7 @@ pub fn duckdb_phrase(msg: &str) -> Option<String> {
     if msg.contains("ParserError(") {
         if let Some(why) = after(msg, "ParserError(\"")
             .and_then(|r| r.split('"').next())
-            .filter(|w| w.ends_with("is not supported here"))
+            .filter(|w| w.contains(" is not supported here"))
         {
             return Some(format!("Parser Error: {why}"));
         }

@@ -58,7 +58,7 @@ Owning execution means owning the bugs, and nineteen hand-written refusals are n
 
 | # | Work | Done when |
 |---|---|---|
-| 2.1 | ~~Allowlist-constrained query generator~~ **· DONE, and it found things** | Two oracles: a non-optimising reference in `tests/generated_folds.rs` that runs on every `cargo test` and survives DuckDB's removal, and `burrmill-bench gen` against DuckDB itself. **3,000 cases: 2,684 answers agreed exactly, 308 both refused, 8 order-dependent.** Mutation-checked — a `wrapping_add` and a dropped row are both caught with reproducible seeds. Still owed: nightly CI |
+| 2.1 | ~~Allowlist-constrained query generator~~ **· DONE, and it found things** | Two oracles: a non-optimising reference in `tests/generated_folds.rs` that runs on every `cargo test` and survives DuckDB's removal, and `burrmill-bench gen` against DuckDB itself. **3,000 cases: 2,684 answers agreed exactly, 308 both refused, 8 order-dependent.** Mutation-checked — a `wrapping_add` and a dropped row are both caught with reproducible seeds. Runs nightly at 3,000 cases in `.github/workflows/fuzz.yml`, beside the cargo-fuzz targets |
 | ~~2.1a~~ | ~~Decide the `TRY_CAST` divergence~~ **· DECIDED: refuse, do not guess** | 8 of 20 edge literals differed. Whitespace is fixed (` 7` is seven, and we were dropping the row). DuckDB also takes `1e18`, `7.0`, `1_000` and **rounds `7.9` to 8**; adopting silent rounding into an engine whose first claim is exactness needs a decision. `burrmill-bench cast` prints the table |
 | ~~2.1b~~ | ~~Decide whether refusal should be order-independent~~ **· DECIDED AND DONE: yes** | Refusal fires when an intermediate partial sum leaves `i128`, not when the answer does: `MAX, +1, -1` sums to exactly `MAX` and is declined. DuckDB does it too, in both directions. Fixing it means accumulating wider than `i128`, which costs 16 bytes per group — against a memory gate already being missed. `tests/generated_folds.rs` pins today's behaviour so a fix inverts a test deliberately |
 | ~~2.2~~ | ~~Overflow reached by generation~~ | **DONE.** 86 of 180 generated cases in the library test reach the refusal path, against a benchmark fixture that topped out at 1e20 and could never have reached it at all |
@@ -188,8 +188,7 @@ in the plan.
 
 ## Stage 7 · the engine in a browser tab · **BUILT, PAGE NOT YET SAFE TO HAND A STRANGER**
 
-The browser crates cite an RFC-0047 that is not in this repository (#182); its numbering collides
-with nuthatch's RFC-0047, the memory envelope stage 6 cites.
+What the browser crates and the page do today is in `docs/browser.md`.
 
 | # | Work | Done when |
 |---|---|---|

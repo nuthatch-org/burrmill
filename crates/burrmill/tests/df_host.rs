@@ -231,6 +231,75 @@ fn a_cancel_stops_a_recursive_cte() {
     );
 }
 
+/// One statement's token stops that statement alone, and its neighbour's deadline stops the
+/// neighbour as `Timeout`. The engine answers the next one with no reset.
+#[test]
+fn a_statement_stops_at_its_own_token_and_deadline() {
+    use std::time::{Duration, Instant};
+    const RUNAWAY: &str =
+        "SELECT count(*) AS n FROM range(1000000) a, range(1000000) b WHERE a.range + b.range = -1";
+    let engine = Engine::open_empty().unwrap();
+    let started = Instant::now();
+    // Each also has the other's stop, late, so a statement that misses its own ends as the wrong
+    // variant rather than never.
+    let mine = burrmill::Stop {
+        deadline: Some(started + Duration::from_secs(20)),
+        ..Default::default()
+    };
+    let neighbour = burrmill::Stop {
+        deadline: Some(started + Duration::from_millis(1500)),
+        ..Default::default()
+    };
+    let (mine_r, mine_took, theirs_r, theirs_took) = std::thread::scope(|s| {
+        let theirs = s.spawn(|| {
+            let r = engine.sql_for_each_stoppable(RUNAWAY, &[], &neighbour, None, |_| Ok(()));
+            (r, started.elapsed())
+        });
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let (token, late) = (mine.cancel.clone(), neighbour.cancel.clone());
+        s.spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            token.cancel();
+            if finished.recv_timeout(Duration::from_secs(20)).is_err() {
+                late.cancel();
+            }
+        });
+        let r = engine.sql_for_each_stoppable(RUNAWAY, &[], &mine, None, |_| Ok(()));
+        let took = started.elapsed();
+        let (theirs_r, theirs_took) = theirs.join().unwrap();
+        let _ = done.send(());
+        (r, took, theirs_r, theirs_took)
+    });
+    assert!(
+        matches!(mine_r, Err(burrmill::BurrmillError::Cancelled)),
+        "{mine_r:?}"
+    );
+    assert!(mine_took < Duration::from_millis(1400), "{mine_took:?}");
+    assert!(
+        matches!(theirs_r, Err(burrmill::BurrmillError::Timeout)),
+        "{theirs_r:?}"
+    );
+    assert!(
+        theirs_took >= Duration::from_millis(1500) && theirs_took < Duration::from_secs(5),
+        "{theirs_took:?}"
+    );
+    assert_eq!(rows(&engine, "SELECT 1 AS one"), vec![json!({"one": 1})]);
+}
+
+/// A chain of joins under the relation bound still takes seconds to optimize, and a cancel then
+/// stops it between planning rules rather than after the plan has run.
+#[test]
+fn a_cancel_stops_a_statement_still_planning() {
+    let mut chain = String::from("SELECT count(*) AS n FROM range(1) t0");
+    for i in 1..200 {
+        chain.push_str(&format!(
+            " JOIN range(1) t{i} ON t{i}.range = t{}.range",
+            i - 1
+        ));
+    }
+    stops_on_cancel(&chain);
+}
+
 #[test]
 fn a_cancel_stops_a_join_of_ranges() {
     stops_on_cancel(
