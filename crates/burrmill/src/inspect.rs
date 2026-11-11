@@ -123,6 +123,38 @@ pub(crate) fn hidden_table(name: &str) -> bool {
     lower.ends_with("__raw") || lower.ends_with("__hot") || lower.ends_with("__union")
 }
 
+/// The first `__raw`, `__hot` or `__union` any statement in `sql` names, `EXPLAIN` included.
+/// Separate from [`reach`], which stops at its first fault: a quoted CTE name ahead of a hidden
+/// one was that fault, and the hidden name was never looked at (#189).
+#[cfg(feature = "datafusion")]
+pub(crate) fn hidden_name(sql: &str) -> Option<String> {
+    struct Find(Option<String>);
+    impl Visitor for Find {
+        type Break = ();
+
+        fn pre_visit_table_factor(&mut self, t: &TableFactor) -> ControlFlow<()> {
+            if let TableFactor::Table { name, .. } = t
+                && let Some(table) = parts(name).last()
+                && hidden_table(table)
+            {
+                self.0 = Some(table.clone());
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let expanded = crate::listcomp::before_parse(sql);
+    let stmts = Parser::parse_sql(&DuckDbDialect {}, &expanded).ok()?;
+    let mut find = Find(None);
+    for stmt in &stmts {
+        let _ = crate::walk::walk(stmt, &mut find);
+        if find.0.is_some() {
+            break;
+        }
+    }
+    find.0
+}
+
 /// The tables `sql` reaches, or why it is refused.
 pub fn reach(sql: &str) -> Result<Reach> {
     // The same rewrite `Engine` parses with, so a comprehension does not hide the tables in it.

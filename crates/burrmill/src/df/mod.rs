@@ -962,6 +962,12 @@ fn leading_keyword(sql: &str) -> &str {
 /// `__raw`, `__hot` and `__union` are refused when the walk can see them. A statement it cannot
 /// parse is left to the engine parser, which accepts more of DuckDB than the walk does (#10).
 fn refuse_hidden_names(sql: &str) -> Result<()> {
+    if let Some(table) = crate::inspect::hidden_name(sql) {
+        return Err(BurrmillError::NotAllowed(format!(
+            "`{table}` is not a table this surface serves - the SQL surface serves this nest's \
+             tables and views only"
+        )));
+    }
     match crate::inspect::reach(sql) {
         Err(BurrmillError::NotAllowed(why))
             if why.contains("is not a table this surface serves") =>
