@@ -511,17 +511,9 @@ impl Engine {
             .enter_cancellable(&self.cancel)
             .ok_or(BurrmillError::Cancelled)?;
         let started = std::time::Instant::now();
-        if tokio::runtime::Handle::try_current().is_err() {
-            let r =
-                self.runtime()
-                    .block_on(self.stream(logical, sql, &mut f, metrics.as_deref_mut()));
-            if let Some(m) = metrics {
-                m.exec_nanos += started.elapsed().as_nanos() as u64;
-            }
-            return r;
-        }
-        // A host's runtime drives this thread and tokio will not block it, so the statement runs on
-        // a thread of its own; its batches come back here, and `f` stays on the caller's thread.
+        // The statement runs on a thread of its own, its batches come back here, and `f` stays on
+        // the caller's. A host runtime will not be blocked; and without one, physical planning and
+        // execution ran on the caller's stack, which a 1 MiB thread could not hold in debug (#168).
         let held = metrics.as_deref_mut();
         let r = std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -529,7 +521,12 @@ impl Engine {
                 .name("burrmill-statement".into())
                 .stack_size(PLAN_STACK_BYTES)
                 .spawn_scoped(s, move || {
-                    let mut send = |b| tx.send(b).map_err(|_| BurrmillError::Cancelled);
+                    // Not `Cancelled`: the caller's `f` refused, and what was read still counts.
+                    let mut send = |b| {
+                        tx.send(b).map_err(|_| {
+                            BurrmillError::Substrate("the caller stopped reading".into())
+                        })
+                    };
                     self.runtime()
                         .block_on(self.stream(logical, sql, &mut send, held))
                 })

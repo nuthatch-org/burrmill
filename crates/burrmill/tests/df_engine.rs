@@ -559,12 +559,13 @@ fn sql_the_parser_rejects_is_not_reported_as_too_deep() {
 
 #[test]
 fn planning_does_not_use_the_caller_stack() {
-    // Executing this sum takes about a mebibyte. The planner thread is asserted by name.
+    // Planning and running this sum took more than a mebibyte of the caller's stack in debug,
+    // until the statement got a thread of its own (#168). The caller now only receives batches.
     let engine = Engine::open_empty().unwrap();
     let sql = chain(48);
     let handle = std::thread::Builder::new()
         .name("small-stack".into())
-        .stack_size(1024 * 1024)
+        .stack_size(256 * 1024)
         .spawn(move || value_of(engine, &sql))
         .unwrap();
     assert_eq!(handle.join().unwrap(), r#"[{"n":48}]"#);
