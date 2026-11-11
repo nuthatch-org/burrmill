@@ -702,7 +702,13 @@ fn to_batch(
             for i in range.clone() {
                 match super::addresses::decode(key(i)) {
                     Some(a) => b.append_value(a)?,
-                    None => b.append_null(),
+                    None => {
+                        return Err(DataFusionError::Execution(format!(
+                            "{}{:?}",
+                            super::addresses::NOT_AN_ADDRESS,
+                            key(i)
+                        )));
+                    }
                 }
             }
             Arc::new(b.finish())

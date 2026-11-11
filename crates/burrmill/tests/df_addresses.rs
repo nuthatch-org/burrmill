@@ -149,18 +149,18 @@ fn an_address_is_served_as_the_text_the_host_wrote() {
 }
 
 #[test]
-fn a_literal_of_either_case_compares_as_an_address() {
+fn a_literal_in_lower_case_compares_as_an_address() {
     let (_t, e) = engine();
-    let upper = addr(2).to_uppercase().replace("0X", "0x");
-    for lit in [addr(2), upper] {
-        assert_eq!(
-            col(
-                &e,
-                &format!("SELECT block_number FROM t WHERE who = '{lit}' ORDER BY 1")
-            ),
-            vec![json!(2), json!(6)]
-        );
-    }
+    assert_eq!(
+        col(
+            &e,
+            &format!(
+                "SELECT block_number FROM t WHERE who = '{}' ORDER BY 1",
+                addr(2)
+            )
+        ),
+        vec![json!(2), json!(6)]
+    );
     assert_eq!(
         col(
             &e,
@@ -557,4 +557,91 @@ fn a_caller_cannot_turn_the_lever_off() {
         .map(|r| r.to_string())
         .collect::<String>();
     assert!(plan.contains("address_bytes"), "{plan}");
+}
+
+/// `0xab..` checksummed, `0xAb..`, as a host other than nuthatch might write it.
+fn mixed() -> String {
+    format!("0x{}", "Ab".repeat(20))
+}
+
+/// Blocks 1 to 3, each its own segment: `addr(1)`, `mixed()`, `addr(2)`.
+fn checksummed() -> (tempfile::TempDir, Engine) {
+    let tmp = tempfile::tempdir().unwrap();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("block_number", DataType::UInt64, false),
+        Field::new("who", DataType::Utf8, true),
+    ]));
+    let files = [(1, addr(1)), (2, mixed()), (3, addr(2))]
+        .into_iter()
+        .map(|(n, who)| {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(UInt64Array::from(vec![n])) as ArrayRef,
+                    Arc::new(StringArray::from(vec![who])),
+                ],
+            )
+            .unwrap();
+            let path = tmp.path().join(format!("t-{n:064x}.parquet"));
+            let f = std::fs::File::create(&path).unwrap();
+            let mut w = parquet::arrow::ArrowWriter::try_new(f, schema.clone(), None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+            let len = std::fs::metadata(&path).unwrap().len();
+            (path, len)
+        })
+        .collect();
+    let mut e = Engine::open_empty_budgeted(burrmill::Budget {
+        memory_bytes: 64 << 20,
+        threads: 2,
+        spill: None,
+    })
+    .unwrap();
+    let declared = vec![
+        ("block_number".to_string(), "u64".to_string()),
+        ("who".to_string(), "address".to_string()),
+    ];
+    e.register_facts("t", &declared, files, &[], (None, None))
+        .unwrap();
+    (tmp, e)
+}
+
+/// #150: checksummed hex is not an address, so a statement answers as it would over text, whether
+/// the value is decoded, compared as text above the scan, or in a segment the scan could prune.
+/// Each statement gets a fresh engine, since the first refusal reads text from then on.
+#[test]
+fn checksummed_hex_answers_as_text() {
+    let (m, lower) = (mixed(), mixed().to_lowercase());
+    for (sql, want) in [
+        (
+            format!("SELECT block_number FROM t WHERE who = '{m}'"),
+            vec![json!(2)],
+        ),
+        (
+            format!("SELECT block_number FROM t WHERE who <> '{m}' ORDER BY 1"),
+            vec![json!(1), json!(3)],
+        ),
+        (
+            format!(
+                "SELECT block_number FROM t WHERE who IN ('{m}', '{}') ORDER BY 1",
+                addr(2)
+            ),
+            vec![json!(2), json!(3)],
+        ),
+        (
+            format!("SELECT count(*) FROM t WHERE who = '{lower}'"),
+            vec![json!(0)],
+        ),
+        (
+            format!("SELECT block_number FROM t WHERE who <> '{lower}' ORDER BY 1"),
+            vec![json!(1), json!(2), json!(3)],
+        ),
+        (
+            format!("SELECT who FROM t WHERE who <> '{lower}' ORDER BY block_number"),
+            vec![json!(addr(1)), json!(m), json!(addr(2))],
+        ),
+    ] {
+        let (_t, e) = checksummed();
+        assert_eq!(col(&e, &sql), want, "{sql}");
+    }
 }
