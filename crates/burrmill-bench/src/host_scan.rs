@@ -15,6 +15,7 @@ use std::time::Instant;
 use crate::df_views::load_nest;
 
 type Declared = Vec<(String, String)>;
+type Files = Vec<(PathBuf, u64)>;
 
 fn declared(root: &Path) -> anyhow::Result<std::collections::HashMap<String, Declared>> {
     let doc: serde_json::Value =
@@ -76,7 +77,7 @@ impl Phase {
 }
 
 struct Host {
-    tables: Vec<(String, Declared, Vec<(PathBuf, u64)>)>,
+    tables: Vec<(String, Declared, Files)>,
     views: Vec<(String, String)>,
     budget: burrmill::Budget,
 }
