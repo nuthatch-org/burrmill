@@ -35,21 +35,39 @@ use crate::segment::{Morsel, SealedSegments};
 /// operator picks its own yield points, so the delay between asking to stop and stopping is bounded
 /// by one morsel.
 #[derive(Debug, Clone, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
+pub struct CancelToken {
+    flag: Arc<AtomicBool>,
+    parents: Arc<[CancelToken]>,
+    deadline: Option<Instant>,
+}
 
 impl CancelToken {
     pub fn new() -> Self {
         Self::default()
     }
+    /// A token cancelled by its own `cancel`, by any of `parents`', or once `deadline` passes.
+    pub fn under(parents: &[&CancelToken], deadline: Option<Instant>) -> Self {
+        Self {
+            flag: Arc::default(),
+            parents: parents.iter().map(|&p| p.clone()).collect(),
+            deadline,
+        }
+    }
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.flag.store(true, Ordering::Relaxed);
     }
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.flag.load(Ordering::Relaxed)
+            || self.timed_out()
+            || self.parents.iter().any(CancelToken::is_cancelled)
+    }
+    /// Whether this token's own deadline has passed.
+    pub fn timed_out(&self) -> bool {
+        self.deadline.is_some_and(|d| Instant::now() >= d)
     }
     /// Arm again, for a token that outlives one statement (`Engine::cancel_token`).
     pub fn reset(&self) {
-        self.0.store(false, Ordering::Relaxed);
+        self.flag.store(false, Ordering::Relaxed);
     }
 }
 

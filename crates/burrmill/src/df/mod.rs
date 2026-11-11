@@ -147,6 +147,15 @@ pub struct QueryMetrics {
     pub scan_cpu_nanos: u64,
 }
 
+/// What may stop one statement besides the engine's own token.
+#[derive(Debug, Clone, Default)]
+pub struct Stop {
+    /// Cancels this statement and no other.
+    pub cancel: crate::CancelToken,
+    /// Past it the statement is refused as `Timeout`, wherever it has got to.
+    pub deadline: Option<std::time::Instant>,
+}
+
 /// Concrete engine: SQL in, RecordBatches out. Generics stay inside this crate.
 pub struct Engine {
     /// Taken only by `Drop`. A tab has no runtime; its event loop drives `sql_async`.
@@ -159,8 +168,8 @@ pub struct Engine {
     /// clients sharing one runtime starved one of them outright (roadmap 6.8).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     gate: crate::gate::Gate,
-    /// Set from another thread to stop the statement in flight at its next batch; armed again when
-    /// the next statement starts, as DuckDB's interrupt handle behaves.
+    /// Stops every statement on the engine, in flight or still to come, until the host resets it.
+    /// Each statement runs under a token of its own beneath this one.
     cancel: crate::CancelToken,
     /// Inside a host transaction: what each name it has touched was bound to before it.
     txn: Option<HashMap<String, Option<Arc<dyn datafusion_expr::TableSource>>>>,
@@ -321,7 +330,7 @@ impl Engine {
             let provider: Arc<dyn TableProvider> = if t.files.is_empty() {
                 Arc::new(MemTable::try_new(t.schema.clone(), vec![vec![]]).map_err(df_err)?)
             } else {
-                Arc::new(SegmentTable::new(t, groups, cancel.clone())?)
+                Arc::new(SegmentTable::new(t, groups)?)
             };
             if t.wide.is_empty() {
                 session.note_addresses(&t.name, t.lowercase.iter().cloned());
@@ -428,8 +437,9 @@ impl Engine {
         Ok(out)
     }
 
-    /// A handle that stops the statement in flight, from any thread, at its next batch boundary.
-    /// It stays armed until the host calls [`crate::CancelToken::reset`].
+    /// A handle that stops every statement on the engine, from any thread, at its next batch
+    /// boundary, and refuses each later one until the host calls [`crate::CancelToken::reset`].
+    /// To stop one statement alone, run it with [`Engine::sql_for_each_stoppable`].
     /// A DataFusion join does not yield inside itself (apache/datafusion#19358), so the delay is
     /// bounded by one operator's work, not by one batch; the caller's deadline still stands.
     pub fn cancel_token(&self) -> crate::CancelToken {
@@ -493,6 +503,40 @@ impl Engine {
     pub fn sql_for_each_metered(
         &self,
         sql: &str,
+        metrics: Option<&mut QueryMetrics>,
+        f: impl FnMut(RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        self.sql_for_each_stoppable(sql, &Stop::default(), metrics, f)
+    }
+
+    /// As [`Engine::sql_for_each_metered`], stopped by `stop` as well as by the engine's token:
+    /// `Cancelled` when its token or the engine's is cancelled, `Timeout` once its deadline passes.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn sql_for_each_stoppable(
+        &self,
+        sql: &str,
+        stop: &Stop,
+        metrics: Option<&mut QueryMetrics>,
+        f: impl FnMut(RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        let token = crate::CancelToken::under(&[&self.cancel, &stop.cancel], stop.deadline);
+        match self.run_statement(sql, &token, metrics, f) {
+            Err(BurrmillError::Cancelled)
+                if token.timed_out()
+                    && !self.cancel.is_cancelled()
+                    && !stop.cancel.is_cancelled() =>
+            {
+                Err(BurrmillError::Timeout)
+            }
+            r => r,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_statement(
+        &self,
+        sql: &str,
+        token: &crate::CancelToken,
         mut metrics: Option<&mut QueryMetrics>,
         mut f: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
@@ -500,15 +544,15 @@ impl Engine {
         refuse_hidden_names(sql)?;
         let logical = plan_query(&self.session, sql)?;
         refuse_non_query(sql)?;
-        // The host arms the token and clears it. Clearing it here would run a statement whose
-        // cancel arrived before it, or while it was still being planned.
-        if self.cancel.is_cancelled() {
+        // The host arms the engine's token and clears it. Clearing it here would run a statement
+        // whose cancel arrived before it, or while it was still being planned.
+        if token.is_cancelled() {
             return Err(BurrmillError::Cancelled);
         }
-        // The engine's own token, so a cancel also frees a statement queued behind slow ones.
+        // A cancel also frees a statement queued behind slow ones.
         let _pass = self
             .gate
-            .enter_cancellable(&self.cancel)
+            .enter_cancellable(token)
             .ok_or(BurrmillError::Cancelled)?;
         let started = std::time::Instant::now();
         // The statement runs on a thread of its own, its batches come back here, and `f` stays on
@@ -528,7 +572,7 @@ impl Engine {
                         })
                     };
                     self.runtime()
-                        .block_on(self.stream(logical, sql, &mut send, held))
+                        .block_on(self.stream(logical, sql, token, &mut send, held))
                 })
                 .map_err(|e| BurrmillError::Substrate(format!("statement thread: {e}")))?;
             // Refused by `f`: `rx` goes with the loop, the next send fails and the statement ends.
@@ -566,10 +610,11 @@ impl Engine {
         refuse_hidden_names(sql)?;
         let logical = plan_query(&self.session, sql)?;
         refuse_non_query(sql)?;
-        if self.cancel.is_cancelled() {
+        let token = crate::CancelToken::under(&[&self.cancel], None);
+        if token.is_cancelled() {
             return Err(BurrmillError::Cancelled);
         }
-        self.stream(logical, sql, &mut f, None).await
+        self.stream(logical, sql, &token, &mut f, None).await
     }
 
     /// Addresses are read as fixed binary while every value in an address column is one. The
@@ -579,6 +624,7 @@ impl Engine {
         &self,
         logical: datafusion_expr::LogicalPlan,
         sql: &str,
+        token: &crate::CancelToken,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
         mut metrics: Option<&mut QueryMetrics>,
     ) -> Result<()> {
@@ -586,6 +632,7 @@ impl Engine {
         let r = self
             .stream_once(
                 logical,
+                token,
                 &mut |b| {
                     sent += 1;
                     f(b)
@@ -603,7 +650,7 @@ impl Engine {
                 log::warn!("{m}: addresses are read as text from now on");
                 // Planned afresh: the plan that refused holds what its shared subqueries ran.
                 let fresh = plan_query(&self.session, sql)?;
-                self.stream_once(fresh, f, metrics).await
+                self.stream_once(fresh, token, f, metrics).await
             }
             r => r,
         }
@@ -612,6 +659,7 @@ impl Engine {
     async fn stream_once(
         &self,
         logical: datafusion_expr::LogicalPlan,
+        token: &crate::CancelToken,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
         metrics: Option<&mut QueryMetrics>,
     ) -> Result<()> {
@@ -622,10 +670,17 @@ impl Engine {
             .map_err(plan_err)?;
         // A host sees an address as the text it wrote.
         let physical = addresses::rendered(physical, &self.session).map_err(df_err)?;
+        // The plan's operators find the statement's token in the context it runs under.
+        let ctx = Arc::try_unwrap(self.session.task_ctx())
+            .map_err(|_| BurrmillError::Substrate("a task context already shared".into()))?;
+        let config = ctx
+            .session_config()
+            .clone()
+            .with_extension(Arc::new(token.clone()));
+        let ctx = ctx.with_session_config(config);
         let Some(metrics) = metrics else {
-            let stream =
-                sequential::execute_stream(physical, self.session.task_ctx()).map_err(df_err)?;
-            return self.drain(stream, f, &mut 0).await;
+            let stream = sequential::execute_stream(physical, Arc::new(ctx)).map_err(df_err)?;
+            return self.drain(stream, token, f, &mut 0).await;
         };
         // Its own recorder over the engine's pool, so a peak is this statement's and not a neighbour's.
         let pool = Arc::new(datafusion_execution::memory_pool::PeakRecordingPool::new(
@@ -637,11 +692,7 @@ impl Engine {
         .with_memory_pool(Arc::clone(&pool) as _)
         .build_arc()
         .map_err(df_err)?;
-        let ctx = Arc::new(
-            Arc::try_unwrap(self.session.task_ctx())
-                .map_err(|_| BurrmillError::Substrate("a task context already shared".into()))?
-                .with_runtime(runtime),
-        );
+        let ctx = Arc::new(ctx.with_runtime(runtime));
         let selecting = catalog::selected_bytes(
             catalog::selections(&physical, ctx.runtime_env().as_ref()).map_err(df_err)?,
             ctx.runtime_env().cache_manager.get_file_metadata_cache(),
@@ -655,7 +706,7 @@ impl Engine {
         cancel::arm_scan_cpu(&physical, &mut cpu);
         let stream = sequential::execute_stream(physical, ctx).map_err(df_err)?;
         let mut rows = 0u64;
-        let r = self.drain(stream, f, &mut rows).await;
+        let r = self.drain(stream, token, f, &mut rows).await;
         #[cfg(not(target_arch = "wasm32"))]
         let selected = match &r {
             Err(BurrmillError::Cancelled) => Ok(0),
@@ -684,6 +735,7 @@ impl Engine {
     async fn drain(
         &self,
         mut stream: datafusion_execution::SendableRecordBatchStream,
+        token: &crate::CancelToken,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
         rows: &mut u64,
     ) -> Result<()> {
@@ -694,7 +746,7 @@ impl Engine {
             // A tab has no timer to poll it on; there the token is seen at each batch instead.
             #[cfg(not(target_arch = "wasm32"))]
             let mut stopped = std::pin::pin!(async {
-                while !self.cancel.is_cancelled() {
+                while !token.is_cancelled() {
                     tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                 }
             });
@@ -706,13 +758,13 @@ impl Engine {
                     futures::future::Either::Left((None, _)) => break,
                     futures::future::Either::Right(_) => return Err(BurrmillError::Cancelled),
                 };
-                if self.cancel.is_cancelled() {
+                if token.is_cancelled() {
                     return Err(BurrmillError::Cancelled);
                 }
                 let b = match b {
                     Ok(b) => b,
                     // A scan stopped by the token surfaces here as its error; say what it was.
-                    Err(_) if self.cancel.is_cancelled() => return Err(BurrmillError::Cancelled),
+                    Err(_) if token.is_cancelled() => return Err(BurrmillError::Cancelled),
                     Err(e) => return Err(df_err(e)),
                 };
                 *rows += b.num_rows() as u64;
