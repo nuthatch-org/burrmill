@@ -52,7 +52,7 @@
   </label>
   <label><input id="remember" type="checkbox"> Remember the key in this tab</label>
   <label>Model
-    <input id="model" type="text" value="claude-sonnet-4-5">
+    <input id="model" type="text" autocomplete="off">
   </label>
   <label><input id="confirm" type="checkbox" checked> Confirm before sending</label>
   <p id="name-warn" hidden></p>
@@ -71,8 +71,12 @@
   <p id="narration-error"></p>
   <div id="chart"></div>
   <div id="table"></div>
+  <button id="export" type="button">Download CSV</button>
   <h2>SQL</h2>
-  <pre id="sql"></pre>
+  <label>The model's statement, to edit and run here. Running it here sends nothing.
+    <textarea id="sql" rows="4" spellcheck="false"></textarea>
+  </label>
+  <button id="run-here" type="button">Run here</button>
 </section>
 <p id="status" role="status" aria-live="polite"></p>
 </main>

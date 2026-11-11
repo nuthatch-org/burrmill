@@ -46,7 +46,7 @@ button:disabled { opacity: 0.45; cursor: default; }
 #questions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.6rem; }
 #questions button { background: #3d5a6c; color: #f3ecdf; }
 
-#log, #sql {
+#log {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   background: #12100e;
@@ -56,7 +56,9 @@ button:disabled { opacity: 0.45; cursor: default; }
 
 table { border-collapse: collapse; width: 100%; }
 th, td { border-bottom: 1px solid #3a332c; text-align: left; padding: 0.25rem 0.5rem; vertical-align: top; }
-.column { display: flex; gap: 0.6rem; align-items: center; margin: 0.3rem 0; }
-.column input[type="text"] { width: 16rem; margin: 0; }
+.column { display: flex; flex-wrap: wrap; gap: 0.3rem 0.6rem; align-items: center; margin: 0.3rem 0; }
+.column input[type="text"] { width: 16rem; max-width: 100%; margin: 0; }
+#preview, #table { overflow-x: auto; }
+input[type="file"] { max-width: 100%; }
 svg { width: 100%; height: auto; background: #12100e; }
 #status, #stored, #name-warn { color: #d7a15f; }

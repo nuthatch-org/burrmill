@@ -141,7 +141,7 @@ const narration = await page.evaluate(async () => {
 if (narration !== 'The total is -100.00.') bad('narration: ' + narration);
 const chart = await page.locator('#chart').innerText();
 if (!chart.includes('-100.00')) bad('chart: ' + chart);
-const sql = await page.locator('#sql').innerText();
+const sql = await page.locator('#sql').inputValue();
 if (!sql.toLowerCase().includes('sum(amount)')) bad('sql: ' + sql);
 if ((await page.locator('#chart svg').count()) !== 1) bad('chart did not draw');
 

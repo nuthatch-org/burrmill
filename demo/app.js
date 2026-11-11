@@ -6,6 +6,8 @@ const QUESTIONS = [
   'Year-over-year change',
 ];
 
+const DEFAULT_MODEL = 'claude-sonnet-4-5';
+
 // RFC-0047's stated default. Whether k should differ, or be per column, is open.
 const AGGREGATE_K = 10;
 
@@ -454,11 +456,19 @@ async function localChart(sql, chart, narration) {
   return shown.narration || '';
 }
 
+// What is on the page, for the CSV and for running the statement again here.
+let shownAnswer = null;
+let shownChart = null;
+
 function render(shown, sql, answer) {
+  shownAnswer = answer;
+  shownChart = shown.chart;
   document.getElementById('answer').hidden = false;
   document.getElementById('narration').textContent = shown.narration || '';
   document.getElementById('narration-error').textContent = shown.narration_error || '';
-  document.getElementById('sql').textContent = sql;
+  const editor = document.getElementById('sql');
+  editor.defaultValue = sql;
+  editor.value = sql;
   draw(
     document.getElementById('chart'),
     shown.chart,
@@ -468,6 +478,62 @@ function render(shown, sql, answer) {
   );
   renderTable(document.getElementById('table'), answer.columns, shown.display);
   if (answer.truncated) status('Result truncated at 5000 rows.');
+}
+
+// A spreadsheet runs a cell that starts like a formula, and the model wrote the statement.
+function csvCell(cell) {
+  if (cell == null) return '';
+  let text = String(cell);
+  if (/^[=+@\t\r]/.test(text) || (text.startsWith('-') && !Number.isFinite(Number(text)))) {
+    text = "'" + text;
+  }
+  return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+}
+
+function toCsv(answer) {
+  const lines = [answer.columns.map((column) => csvCell(column.name)).join(',')];
+  for (const row of answer.rows) lines.push(row.map(csvCell).join(','));
+  return lines.join('\r\n') + '\r\n';
+}
+
+function exportCsv() {
+  if (!shownAnswer) return;
+  const url = URL.createObjectURL(new Blob([toCsv(shownAnswer)], { type: 'text/csv' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'burrmill-result.csv';
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+// The edited statement runs in the tab only. Its narration was written for the model's
+// statement, so it is not carried over.
+async function runHere() {
+  const sql = document.getElementById('sql').value.trim();
+  if (!sql || !shownChart) return;
+  const button = document.getElementById('run-here');
+  button.disabled = true;
+  try {
+    const queried = await call('query', { sql });
+    if (queried.error) {
+      status(queried.error);
+      return;
+    }
+    const locale = separators();
+    const shown = await call('present', {
+      answer: queried.answer,
+      chart: shownChart,
+      narration: '',
+      group: locale.group,
+      decimal: locale.decimal,
+    });
+    render(shown, sql, queried.answer);
+    status(queried.answer.rows.length ? 'Ran here. Nothing was sent.' : 'No rows. Nothing was sent.');
+  } catch (err) {
+    status(err.message || String(err));
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function identifierHits(text) {
@@ -761,7 +827,7 @@ async function ask() {
         truncated: dumped.answer.truncated,
       });
     }
-    const model = document.getElementById('model').value.trim() || 'claude-sonnet-4-5';
+    const model = document.getElementById('model').value.trim() || DEFAULT_MODEL;
     const locale = separators();
     const url = modelUrl(mode, port);
     let feedback = '';
@@ -894,6 +960,11 @@ document.getElementById('ask').addEventListener('click', () => {
   ask();
 });
 document.getElementById('mode').addEventListener('change', describeMode);
+document.getElementById('export').addEventListener('click', exportCsv);
+document.getElementById('run-here').addEventListener('click', () => {
+  runHere();
+});
+document.getElementById('model').value = DEFAULT_MODEL;
 
 function bindOffline() {
   if (!('serviceWorker' in navigator)) return;

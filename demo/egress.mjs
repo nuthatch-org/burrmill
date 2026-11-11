@@ -88,7 +88,7 @@ await page.waitForFunction(
 );
 
 const narration = await page.locator('#narration').innerText();
-const sql = await page.locator('#sql').innerText();
+const sql = await page.locator('#sql').inputValue();
 const log = await page.locator('#log').innerText();
 const stored = await page.evaluate(() => ({
   local: window.localStorage.getItem('burrmill-key'),
