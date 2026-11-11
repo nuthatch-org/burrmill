@@ -528,6 +528,7 @@ fn duckdb_answers_still_refused_say_so_by_name() {
             "SELECT strptime('2024-01-02 03:04:05', '%Y-%m-%d %H:%M:%S') a",
             "strptime",
         ),
+        ("SELECT try_strptime('x', '%Y') a", "try_strptime"),
         (
             "SELECT COLUMNS('a') FROM (SELECT 1 AS a, 2 AS b) t",
             "COLUMNS",
@@ -609,6 +610,18 @@ fn refusals_name_what_to_write_instead() {
             serde_json::json!({"k": "a", "v": 1}),
         ),
         (
+            "SELECT strptime('2024-01-02 03:04:05', '%Y-%m-%d %H:%M:%S') a",
+            "CAST(... AS TIMESTAMP)",
+            "SELECT CAST(CAST('2024-01-02 03:04:05' AS TIMESTAMP) AS VARCHAR) a",
+            serde_json::json!({"a": "2024-01-02 03:04:05"}),
+        ),
+        (
+            "SELECT try_strptime('x', '%Y') a",
+            "TRY_CAST(... AS TIMESTAMP)",
+            "SELECT TRY_CAST('x' AS TIMESTAMP) a",
+            serde_json::json!({"a": null}),
+        ),
+        (
             "SELECT s LIKE p ESCAPE '$' AS m FROM (VALUES ('a%', 'a$%')) t(s, p)",
             r"ESCAPE '\' is",
             r"SELECT s LIKE p ESCAPE '\' AS m FROM (VALUES ('a%', 'a\%')) t(s, p)",
@@ -622,6 +635,43 @@ fn refusals_name_what_to_write_instead() {
             "{refused}: {e}"
         );
         assert_eq!(one_row(&engine, instead), vec![want], "{instead}");
+    }
+}
+
+/// DuckDB's TIMESTAMP, and DATETIME with it, is microseconds: a finer fraction is cut off, as
+/// DuckDB cuts it, and the column is microseconds for nuthatch's encoder.
+#[test]
+fn a_cast_to_timestamp_is_microseconds() {
+    use arrow::array::AsArray;
+    use arrow::datatypes::{DataType, TimeUnit, TimestampMicrosecondType};
+    let engine = Engine::open_empty().unwrap();
+    let got = engine
+        .sql(
+            "SELECT CAST('2024-01-02 03:04:05.123456789' AS TIMESTAMP) a, \
+             TRY_CAST('2024-01-02 03:04:05.1234567' AS TIMESTAMP) b, \
+             '2024-01-02 03:04:05.123456'::TIMESTAMP c, CAST('2024-01-02' AS DATETIME) d",
+        )
+        .unwrap();
+    let b = &got[0];
+    for (i, want) in [
+        1704164645123456,
+        1704164645123456,
+        1704164645123456,
+        1704153600000000,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            b.column(i).data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, None)
+        );
+        assert_eq!(
+            b.column(i)
+                .as_primitive::<TimestampMicrosecondType>()
+                .value(0),
+            want
+        );
     }
 }
 
