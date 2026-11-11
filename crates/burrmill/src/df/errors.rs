@@ -5,6 +5,54 @@
 //! same and nothing the engine said is lost. Checked class by class against DuckDB by
 //! `burrmill-bench error-parity`.
 
+use datafusion_common::DataFusionError;
+
+use crate::BurrmillError;
+
+/// Exact arithmetic that left its type, carried through DataFusion as `External` so it reaches the
+/// host as `Overflow` and not as a substrate failure, whatever context the planner wraps it in.
+#[derive(Debug)]
+pub(super) struct Overflow(String);
+
+impl std::fmt::Display for Overflow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Overflow {}
+
+pub(super) fn overflow(m: impl Into<String>) -> DataFusionError {
+    DataFusionError::External(Box::new(Overflow(m.into())))
+}
+
+/// An Arrow kernel's overflow as `overflow`; anything else as it was.
+pub(super) fn arithmetic(e: arrow::error::ArrowError) -> DataFusionError {
+    match e {
+        arrow::error::ArrowError::ArithmeticOverflow(m) => overflow(m),
+        e => e.into(),
+    }
+}
+
+/// The variant a marker or a refusal under `e` names, wherever in its chain it sits.
+pub(super) fn typed(e: &DataFusionError, text: &str) -> Option<BurrmillError> {
+    let mut at: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(cur) = at {
+        if let Some(o) = cur.downcast_ref::<Overflow>() {
+            return Some(BurrmillError::Overflow(o.0.clone()));
+        }
+        let df = cur.downcast_ref::<DataFusionError>().or_else(|| {
+            cur.downcast_ref::<std::sync::Arc<DataFusionError>>()
+                .map(|a| a.as_ref())
+        });
+        if let Some(DataFusionError::ResourcesExhausted(_)) = df {
+            return Some(BurrmillError::LimitExceeded(text.to_string()));
+        }
+        at = cur.source();
+    }
+    None
+}
+
 /// DuckDB's name for an Arrow type as DataFusion prints it.
 pub(super) fn duck_type(t: &str) -> String {
     let t = t.trim();

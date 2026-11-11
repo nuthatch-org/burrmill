@@ -11,6 +11,7 @@ use std::fmt;
 /// 2026); DuckDB errors on `HUGEINT` overflow but is not watertight everywhere. Refusing is a
 /// guarantee neither of them offers, so it gets a variant of its own rather than a footnote.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BurrmillError {
     /// The query is outside the admitted subset. Enforced against the parsed shape, never by
     /// string-matching SQL - a denylist over text is the failure mode that gave DuckDB
@@ -27,7 +28,8 @@ pub enum BurrmillError {
     /// The hot tip and the sealed cold segments disagree about the boundary - COR-1. A seam bug can
     /// double-count or drop rows, so it refuses rather than answering.
     Seam(String),
-    /// The result exceeded `max_rows` or `max_bytes`.
+    /// The result exceeded `max_rows` or `max_bytes`, or the statement its memory budget or the
+    /// value limit.
     LimitExceeded(String),
     /// The statement does not plan: a name it cannot resolve, a type it cannot reconcile, a shape
     /// a rule refuses. Raised before any page is read, as DuckDB's binder errors are, so a host can

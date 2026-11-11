@@ -4,7 +4,7 @@
 //! (`read_csv`, `getenv`, `glob`, the `duckdb_*` catalogue). This lists what DataFusion's
 //! registry, as the engine builds it, puts in reach, and fails if anything of that kind appears.
 
-use burrmill::Engine;
+use burrmill::{BurrmillError, Engine};
 
 #[test]
 fn nothing_registered_reaches_outside_the_query() {
@@ -266,7 +266,6 @@ fn information_schema_follows_the_views() {
 /// errors are: nuthatch's integrity sweep reads damaged data into the second and only the second.
 #[test]
 fn a_statement_that_does_not_plan_is_a_plan_error() {
-    use burrmill::BurrmillError;
     let mut engine = Engine::open_empty().unwrap();
     engine.register_view("t", "SELECT 1 AS x").unwrap();
     for sql in [
@@ -595,8 +594,9 @@ fn built_values_answer_as_before_under_their_bound() {
     e.set_value_limit(1 << 10);
     let err = e
         .sql("SELECT repeat(x, 2000) AS s FROM (VALUES ('a')) t(x)")
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
+    assert!(matches!(err, BurrmillError::LimitExceeded(_)), "{err:?}");
+    let err = err.to_string();
     assert!(
         err.contains("repeat would build a value of 2000 bytes, past the limit of 1024 bytes"),
         "{err}"

@@ -1,8 +1,8 @@
 //! `burrmill-ingest`: untrusted CSV in, Arrow out, under counted budgets.
 //!
-//! RFC-0047 slice 1. The engine is not a dependency. Parquet, JSON and the wasm package are
-//! later slices. The report describes the file and does not contain cell values; [`Table::preview`]
-//! is how a local UI reads rows.
+//! RFC-0047 slice 1. The engine is not a dependency; `burrmill-wasm` joins the two for the browser
+//! tab. CSV is the only input (#147). The report describes the file and does not contain cell
+//! values; [`Table::preview`] is how a local UI reads rows.
 
 mod budget;
 mod csv;
