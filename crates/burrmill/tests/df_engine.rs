@@ -822,19 +822,22 @@ fn a_statement_over_too_many_relations_is_refused_before_planning() {
         value_of(engine, &format!("SELECT count(*) AS n FROM {}", from(50))),
         r#"[{"n":1}]"#
     );
-    let joins = (1..300)
-        .map(|i| format!(" JOIN range(1) t{i} ON t0.value = t{i}.value"))
+    // The bound itself, by the walk alone: 128 relations plan for seconds unoptimized.
+    let at_the_bound = format!("SELECT count(*) FROM {}", from(128));
+    assert!(burrmill::df::check_expr_bounds(&at_the_bound).is_ok());
+    let joins = (1..129)
+        .map(|i| format!(" JOIN range(1) t{i} ON t0.range = t{i}.range"))
         .collect::<String>();
-    // 1,200 relations planned for 28 s and could not be cancelled.
+    // One relation over: a chain of 256 joins planned for 14 s and could not be cancelled.
     for sql in [
-        format!("SELECT count(*) FROM {}", from(300)),
+        format!("SELECT count(*) FROM {}", from(129)),
         format!("SELECT count(*) FROM range(1) t0{joins}"),
-        format!("EXPLAIN SELECT count(*) FROM {}", from(300)),
+        format!("EXPLAIN SELECT count(*) FROM {}", from(129)),
     ] {
         let started = std::time::Instant::now();
         let err = Engine::open_empty().unwrap().sql(&sql).unwrap_err();
         assert!(matches!(err, BurrmillError::NotAllowed(_)), "{err}");
-        assert!(err.to_string().contains("more than 256"), "{err}");
+        assert!(err.to_string().contains("more than 128"), "{err}");
         assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
     }
 }
