@@ -51,6 +51,8 @@ pub(super) struct CancelExec {
     filter: Option<Slot>,
     /// A segment scan's thread-CPU meter, off until a metered statement arms it.
     cpu: Option<ScanCpu>,
+    /// A segment scan's reservations, which its reader factory charges as each segment opens.
+    opened: Option<Arc<super::catalog::Opened>>,
 }
 
 /// A plan is made for one statement, so the first token set is the only one.
@@ -76,15 +78,20 @@ impl CancelExec {
             inner,
             filter,
             cpu: None,
+            opened: None,
         })
     }
 
     /// A segment scan, whose decoding [`arm_scan_cpu`] can time.
-    pub(super) fn wrap_scan(inner: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+    pub(super) fn wrap_scan(
+        inner: Arc<dyn ExecutionPlan>,
+        opened: Arc<super::catalog::Opened>,
+    ) -> Arc<dyn ExecutionPlan> {
         Arc::new(Self {
             inner,
             filter: None,
             cpu: Some(ScanCpu::default()),
+            opened: Some(opened),
         })
     }
 }
@@ -135,6 +142,7 @@ impl ExecutionPlan for CancelExec {
             inner: children.pop().expect("one child"),
             filter: self.filter.clone(),
             cpu: self.cpu.clone(),
+            opened: self.opened.clone(),
         }))
     }
     // Passes a top-k's dynamic filter through, which would otherwise stop here short of the scan.
@@ -173,12 +181,14 @@ impl ExecutionPlan for CancelExec {
         if let Some(slot) = &self.filter {
             let _ = slot.set(token.clone());
         }
-        // Charged whether or not it fits, so the operators that can spill make room for it.
-        let bytes = super::catalog::bookkeeping(&self.inner, partition);
-        let held = (bytes > 0).then(|| {
-            let r = MemoryConsumer::new(format!("SegmentScan[{partition}]"))
-                .register(ctx.memory_pool());
-            r.grow(bytes);
+        let held = self.opened.as_ref().map(|opened| {
+            let r = Arc::new(
+                MemoryConsumer::new(format!("SegmentScan[{partition}]"))
+                    .register(ctx.memory_pool()),
+            );
+            // Charged whether or not it fits, so the operators that can spill make room for it.
+            r.grow(super::catalog::listed(&self.inner, partition));
+            opened.running(partition, &r);
             r
         });
         let mut stream = self.inner.execute(partition, ctx)?;
@@ -373,7 +383,9 @@ thread_local! {
     static PLANNING: std::cell::RefCell<Option<CancelToken>> = const { std::cell::RefCell::new(None) };
 }
 
-/// `f`, with every planning rule it runs stopping once `token` is cancelled.
+/// `f`, with every planning rule it runs stopping once `token` is cancelled. Not for a tab: its
+/// one thread plans in a single stretch nothing else can cancel, and its statement is a future.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn planning<T>(token: &CancelToken, f: impl FnOnce() -> T) -> T {
     struct Restore(Option<CancelToken>);
     impl Drop for Restore {

@@ -1,5 +1,6 @@
 //! burrmill#86: what a scan holds for each segment it opens is charged to the pool, so a statement's
-//! heap less what the pool holds stays small however many segments it reads. The live heap is
+//! heap less what the pool holds stays small however many segments it reads. burrmill#156: it is
+//! charged as the segment opens, not for the whole table before the first row. The live heap is
 //! counted by this binary's allocator, so the file holds one test.
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -135,4 +136,36 @@ fn a_scan_holds_its_segments_bookkeeping_inside_the_pool() {
         outside < OUTSIDE,
         "{outside} bytes outside the pool during a scan of {SEGMENTS} segments (pool held {held_then})"
     );
+
+    // burrmill#156: the charge follows the segments opened. A batch per segment here, so the pool
+    // is read while the scan is part-way through the table. A text column puts `CompactViews`
+    // between the scan and its wrapper, which once left such a scan charged nothing.
+    let mut held = Vec::new();
+    e.sql_for_each("SELECT block_number, who FROM t", |_| {
+        let live = LIVE
+            .load(Ordering::Relaxed)
+            .saturating_sub(base)
+            .saturating_sub(e.footer_cache_bytes());
+        // The plan lists every segment before it opens one, and that is held from the start.
+        if held.is_empty() {
+            assert!(live.saturating_sub(e.memory_reserved()) < OUTSIDE / 2);
+        }
+        held.push(e.memory_reserved());
+        Ok(())
+    })
+    .unwrap();
+    let whole = *held.last().unwrap();
+    assert!(whole > SEGMENTS as usize * 5_632, "{whole}");
+    assert!(
+        held[0] * 3 < whole,
+        "the first batch came with {} of {whole} already held",
+        held[0]
+    );
+    // Two scans of the table: the build side is read and dropped before the probe side has opened
+    // much, so the statement never holds for both whole.
+    e.take_memory_peak();
+    e.sql("SELECT count(*) FROM t a JOIN t b ON a.block_number = b.block_number")
+        .unwrap();
+    let peak = e.take_memory_peak();
+    assert!(peak < whole + whole / 2, "{peak} against {whole} a scan");
 }
