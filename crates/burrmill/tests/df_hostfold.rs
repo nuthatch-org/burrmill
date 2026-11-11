@@ -206,6 +206,31 @@ fn a_fold_reads_the_registration_its_plan_scans() {
     assert_eq!(kept.unwrap(), before);
 }
 
+/// The fold reads every value strictly, as it does over an opened nest (`df_fold`'s
+/// `refusals_carry_over`): where DataFusion's `TRY_CAST` drops a row that will not cast, or its
+/// `CAST` reads `1e3`, a folded statement refuses. A registration brings that to a host's tables.
+#[test]
+fn a_folded_registered_table_refuses_a_value_datafusion_reads_or_drops() {
+    for (value, bad) in [
+        (TRY_CAST, "12abc"),
+        (TRY_CAST, "9999999999999999999999999999999999999999"),
+        (CAST, "1e3"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let rows: [Transfer; 2] = [(1, "0xa", "0xb", "10"), (2, "0xb", "0xc", bad)];
+        let files = vec![segment(tmp.path(), 1, &rows, false)];
+        let mut e = Engine::open_empty().unwrap();
+        e.register_facts("transfer", &declared(), files, &[], (None, None))
+            .unwrap();
+        let sql = fold("transfer", value, "");
+        assert!(folded(&e, &sql), "{value} over {bad}");
+        let refused = answer(&e, &sql).unwrap_err();
+        assert!(refused.contains("will not cast"), "{refused}");
+        let unfolded = answer(&e, &fold("transfer", value, "WHERE 1 = 1")).unwrap();
+        assert!(unfolded.contains(&json!({"addr": "0xa", "net": "-10"})));
+    }
+}
+
 /// splitmix64, as `generated_folds` draws its cases.
 struct Rng(u64);
 
