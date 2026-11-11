@@ -82,18 +82,18 @@ datafusion-catalog = { version = "=55.0.0", default-features = false, optional =
 datafusion-common = { version = "=55.2.0", default-features = false, features = ["recursive_protection"], optional = true }
 datafusion-datasource = { version = "=55.0.0", default-features = false, optional = true }
 datafusion-datasource-parquet = { version = "=55.0.0", default-features = false, optional = true }
-datafusion-execution = { version = "=55.0.0", default-features = false, optional = true }
+datafusion-execution = { version = "=55.2.0", default-features = false, optional = true }
 datafusion-expr = { version = "=55.2.0", default-features = false, features = ["recursive_protection"], optional = true }
-datafusion-functions = { version = "=55.0.0", default-features = false, features = ["datetime_expressions", "encoding_expressions", "math_expressions", "regex_expressions", "string_expressions", "unicode_expressions"], optional = true }
-datafusion-functions-aggregate = { version = "=55.0.0", default-features = false, optional = true }
-datafusion-functions-nested = { version = "=55.0.0", default-features = false, optional = true }
-datafusion-functions-window = { version = "=55.0.0", default-features = false, optional = true }
-datafusion-optimizer = { version = "=55.0.0", default-features = false, features = ["recursive_protection"], optional = true }
+datafusion-functions = { version = "=55.2.0", default-features = false, features = ["datetime_expressions", "encoding_expressions", "math_expressions", "regex_expressions", "string_expressions", "unicode_expressions"], optional = true }
+datafusion-functions-aggregate = { version = "=55.2.0", default-features = false, optional = true }
+datafusion-functions-nested = { version = "=55.2.0", default-features = false, optional = true }
+datafusion-functions-window = { version = "=55.2.0", default-features = false, optional = true }
+datafusion-optimizer = { version = "=55.2.0", default-features = false, features = ["recursive_protection"], optional = true }
 datafusion-physical-expr = { version = "=55.2.0", default-features = false, features = ["recursive_protection"], optional = true }
 datafusion-physical-optimizer = { version = "=55.0.0", default-features = false, features = ["recursive_protection"], optional = true }
-datafusion-physical-plan = { version = "=55.0.0", default-features = false, optional = true }
-datafusion-session = { version = "=55.0.0", default-features = false, optional = true }
-datafusion-sql = { version = "=55.0.0", default-features = false, features = ["recursive_protection", "unicode_expressions"], optional = true }
+datafusion-physical-plan = { version = "=55.2.0", default-features = false, optional = true }
+datafusion-session = { version = "=55.2.0", default-features = false, optional = true }
+datafusion-sql = { version = "=55.2.0", default-features = false, features = ["recursive_protection", "unicode_expressions"], optional = true }
 
 # A tab has one thread and its own event loop: no tokio runtime there, and uuid (DataFusion's) draws
 # its randomness from the browser.
