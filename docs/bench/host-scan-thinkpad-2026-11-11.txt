@@ -430,3 +430,26 @@ REBIND	wall_ms=12.5	cpu_ms=13	segments=14913
 REBIND	wall_ms=12.2	cpu_ms=12	segments=14913
 REBIND	wall_ms=19.7	cpu_ms=13	segments=14913
 PASS	wall_ms=4474.7	cpu_ms=5792	third/rebound	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+
+And at 8,192 MB, ROUNDS=3, where the cache may hold 1 GiB: the footers take 341 MB, and a warm
+count is a quarter of a cold one.
+
+== base qos, BUDGET_MB=8192
+# 2026-11-11T12:40:22Z load=108.27 98.93 94.26 variant=base nest=qos BUDGET_MB=8192 STATEMENT_ROUNDS=0 ROUNDS=3
+NEST	tables=6	segments=14913	views=23	statements=9	budget_mb=8192	threads=4
+OPEN	first	wall_ms=1789.7	cpu_ms=1716	bind_footer_reads=14913
+PASS	wall_ms=4649.4	cpu_ms=5520	first/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+PASS	wall_ms=1052.8	cpu_ms=2425	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+PASS	wall_ms=1033.3	cpu_ms=2350	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+OPEN	second	wall_ms=237.9	cpu_ms=222	bind_footer_reads=0
+PASS	wall_ms=4194.1	cpu_ms=5645	second/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+PASS	wall_ms=1251.8	cpu_ms=2070	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+PASS	wall_ms=1101.4	cpu_ms=2360	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+OPEN	third	wall_ms=290.5	cpu_ms=220	bind_footer_reads=0
+PASS	wall_ms=4626.3	cpu_ms=7024	third/metered-counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+PASS	wall_ms=1246.7	cpu_ms=2638	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+PASS	wall_ms=1191.8	cpu_ms=2597	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+REBIND	wall_ms=194.4	cpu_ms=183	segments=14913
+REBIND	wall_ms=178.9	cpu_ms=167	segments=14913
+REBIND	wall_ms=206.4	cpu_ms=197	segments=14913
+PASS	wall_ms=1045.5	cpu_ms=2375	third/rebound	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547

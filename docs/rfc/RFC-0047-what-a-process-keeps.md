@@ -56,7 +56,8 @@ where it used to refuse the bind.
 The QoS row does not move, and its warm count is no faster than its cold one. Its 14,913 footers
 fill the cache at the nest's 704 MB budget (an 88 MB limit) and at 2 GB (256 MB) alike, so every
 pass over the nest reads every footer again, in one engine or in several. A shared cache changes
-nothing while the footers do not fit it.
+nothing while the footers do not fit it. They take 341 MB: given an 8 GB budget, whose eighth holds
+them, a warm count of the nest is 1,053 ms against 4,194 cold.
 
 On the allocations gate copy a rebind still costs 189 ms for 83 tables, where QoS's six cost 13:
 what is left goes with the number of tables and not of segments. `register_facts` plans the
