@@ -75,6 +75,7 @@ mod tests {
             &["email".to_string()],
             &std::collections::BTreeSet::from(["email".to_string()]),
             table.batches(),
+            crate::pseudonym::row_order,
         )
     }
 

@@ -18,6 +18,9 @@ const forbidden = [
   '+359 888 100002',
 ];
 
+// Token numbers are dealt at random, so the reply names whichever token row one got.
+const rowOne = [forbidden[0], forbidden[2], forbidden[4]];
+
 const port = process.argv[2] || '18753';
 const cached =
   process.env.HOME +
@@ -52,7 +55,7 @@ await page.route('https://api.anthropic.com/**', async (route) => {
   const reply = {
     sql: 'SELECT merchant, email, iban, phone, sum(amount) AS total FROM t GROUP BY merchant, email, iban, phone',
     chart: { kind: 'table' },
-    narration: 'Person CUSTOMER_1.',
+    narration: 'Person ' + (/KEPT_MERCHANT.{0,40}?(CUSTOMER_\d+)/.exec(body) || [])[1] + '.',
   };
   await route.fulfill({
     status: 200,
@@ -74,10 +77,10 @@ await page.locator('#question').fill('Who is each merchant?');
 await page.locator('#confirm').uncheck();
 await page.locator('#ask').click();
 await page.waitForFunction(
-  () =>
+  (words) =>
     !document.getElementById('answer').hidden &&
-    (document.getElementById('narration').textContent || '').includes('canary.one@example.com'),
-  null,
+    words.some((word) => (document.getElementById('narration').textContent || '').includes(word)),
+  rowOne,
   { timeout: 120000 },
 );
 
@@ -104,14 +107,16 @@ if (!blurb.includes('tokens')) bad('blurb: ' + blurb);
 if (stored.local) bad('key landed in localStorage');
 if (stored.session) bad('key landed in sessionStorage');
 if (hosts.length) bad('unexpected hosts ' + hosts.join(' '));
-if (!narration.includes('canary.one@example.com')) bad('narration: ' + narration);
+if (!rowOne.some((word) => narration.includes(word))) {
+  bad('narration: ' + narration);
+}
 const first = bodies[0] || '';
-if (first.includes('CUSTOMER_1')) bad('first request already had a token');
+if (/CUSTOMER_\d/.test(first)) bad('first request already had a token');
 for (const word of forbidden) {
   if (first.includes(word)) bad('first request contains ' + word);
 }
 const second = bodies[1] || '';
-if (!second.includes('CUSTOMER_1')) bad('token missing from the second request');
+if (!/CUSTOMER_\d/.test(second)) bad('token missing from the second request');
 if (!second.includes('KEPT_MERCHANT') || !second.includes('OTHER_MERCHANT')) {
   bad('merchant missing from the second request');
 }

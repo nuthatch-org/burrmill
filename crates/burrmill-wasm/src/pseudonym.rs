@@ -151,12 +151,17 @@ pub fn proposals(
     out
 }
 
-/// Row order, then the table's column order. The same value keeps one token,
-/// including across columns, so a later query still names that entity.
-/// Checkbox order is not this order.
-pub fn assign(names: &[String], marked: &BTreeSet<String>, batches: &[RecordBatch]) -> TokenMap {
+/// The same value keeps one token, including across columns, so a later query
+/// still names that entity. `order` deals the numbers: row order would tell the
+/// model where a value sits in the file, and be the same at every bind.
+pub fn assign(
+    names: &[String],
+    marked: &BTreeSet<String>,
+    batches: &[RecordBatch],
+    order: fn(&mut [u64]),
+) -> TokenMap {
     let mut map = TokenMap::default();
-    let mut n = 0u64;
+    let mut values = Vec::new();
     for batch in batches {
         for r in 0..batch.num_rows() {
             for (i, name) in names.iter().enumerate() {
@@ -169,10 +174,16 @@ pub fn assign(names: &[String], marked: &BTreeSet<String>, batches: &[RecordBatc
                 if value.is_empty() || map.forward.contains_key(&value) {
                     continue;
                 }
-                n += 1;
-                map.insert(value, format!("CUSTOMER_{n}"));
+                map.forward.insert(value.clone(), String::new());
+                values.push(value);
             }
         }
+    }
+    let mut numbers: Vec<u64> = (1..=values.len() as u64).collect();
+    order(&mut numbers);
+    map.forward.clear();
+    for (value, n) in values.into_iter().zip(numbers) {
+        map.insert(value, format!("CUSTOMER_{n}"));
     }
     let mut lengths: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
     for value in map.forward.keys().filter(|value| value.len() >= 4) {
@@ -189,6 +200,23 @@ pub fn assign(names: &[String], marked: &BTreeSet<String>, batches: &[RecordBatc
     map.lengths = lengths.into_iter().collect();
     map
 }
+
+/// A Fisher-Yates shuffle from the platform's generator. If that fails the
+/// numbers stay in row order, which hides values as before.
+pub fn shuffled(numbers: &mut [u64]) {
+    let mut bytes = vec![0u8; numbers.len() * 8];
+    if getrandom::fill(&mut bytes).is_err() {
+        return;
+    }
+    for (i, chunk) in (1..numbers.len()).zip(bytes.chunks_exact(8)).rev() {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(chunk);
+        numbers.swap(i, (u64::from_le_bytes(word) % (i as u64 + 1)) as usize);
+    }
+}
+
+#[cfg(test)]
+pub fn row_order(_: &mut [u64]) {}
 
 pub fn projection_allows(sql: &str, marked: &BTreeSet<String>) -> Result<(), &'static str> {
     let mut statements = Parser::parse_sql(&DuckDbDialect {}, sql).map_err(|_| NOT_ONE)?;
@@ -860,6 +888,41 @@ canary.one@example.com,DE89370400440532013000,+359 888 100002,2
     }
 
     #[test]
+    fn token_numbers_do_not_follow_row_order() {
+        let csv: String = std::iter::once("email,n\n".to_string())
+            .chain((0..40).map(|i| format!("canary.{i}@example.com,{i}\n")))
+            .collect();
+        let table =
+            burrmill_ingest::ingest_bytes(csv.as_bytes(), FormatHint::Sniff, &Budget::untrusted())
+                .unwrap();
+        let mut s = Session::open(table).unwrap();
+        s.order = shuffled;
+        s.bind(&["email".into()]);
+        let payload = s
+            .pseudonym_feedback("SELECT email FROM t ORDER BY n")
+            .unwrap();
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        let numbers: Vec<u64> = value["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let token = row["email"].as_str().unwrap();
+                token.strip_prefix("CUSTOMER_").unwrap().parse().unwrap()
+            })
+            .collect();
+        let mut sorted = numbers.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (1..=40).collect::<Vec<u64>>());
+        assert_ne!(numbers, sorted, "tokens came out in row order");
+        s.bind(&["email".into()]);
+        let again = s
+            .pseudonym_feedback("SELECT email FROM t ORDER BY n")
+            .unwrap();
+        assert_ne!(payload, again, "a second bind dealt the same numbers");
+    }
+
+    #[test]
     fn a_grouped_read_sends_tokens_not_values() {
         let s = bound();
         let sql = "SELECT merchant, email, iban, phone, sum(amount) AS total FROM t GROUP BY merchant, email, iban, phone";
@@ -924,7 +987,12 @@ prefix-canary.one@example.com-suffix,canary.one@example.com,1
         let array: arrow::array::ArrayRef = Arc::new(arrow::array::StringArray::from(column));
         let batch = RecordBatch::try_from_iter([("email", array)]).unwrap();
         let names = vec!["email".to_string()];
-        assign(&names, &BTreeSet::from(["email".to_string()]), &[batch])
+        assign(
+            &names,
+            &BTreeSet::from(["email".to_string()]),
+            &[batch],
+            row_order,
+        )
     }
 
     #[test]
