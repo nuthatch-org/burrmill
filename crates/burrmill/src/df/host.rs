@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, Weak};
 
 use arrow::array::{ArrayRef, StringViewArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -22,7 +22,7 @@ use datafusion_expr::LogicalPlanBuilder;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
 use serde_json::Value;
 
-use super::catalog::{NestTable, SegmentTable, view_schema};
+use super::catalog::{Listed, NestTable, SegmentTable, view_schema};
 use super::{Engine, df_err, plan_query};
 use crate::error::Result;
 use crate::limits::Limits;
@@ -84,10 +84,12 @@ impl Engine {
         window: (Option<u64>, Option<u64>),
     ) -> Result<()> {
         self.refuse_replacing_a_table(name)?;
-        // Every footer, as DuckDB's `read_parquet` binds them all, so a file that is not Parquet
-        // refuses the definition here and a host can define the table from what remains.
-        let schemas = footer_schemas(&files)?;
-        self.define_facts(name, declared, files, schemas, hot, window, false)
+        let listed = if files.is_empty() {
+            None
+        } else {
+            Some(listed(files)?)
+        };
+        self.define_facts(name, declared, listed, hot, window, false)
     }
 
     /// As [`Engine::register_facts`], over segments in the engine's store
@@ -124,7 +126,12 @@ impl Engine {
             .map(|(k, l)| (PathBuf::from(k), l))
             .collect();
         let schemas = distinct(files.iter().map(|f| Arc::clone(&self.bound_segments[f])));
-        self.define_facts(name, declared, files, schemas, hot, window, true)
+        let listed = if files.is_empty() {
+            None
+        } else {
+            Some(Arc::new(Listed::new(files, schemas, true)?))
+        };
+        self.define_facts(name, declared, listed, hot, window, true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -132,15 +139,14 @@ impl Engine {
         &mut self,
         name: &str,
         declared: &[(String, String)],
-        files: Vec<(PathBuf, u64)>,
-        // Each distinct segment schema, in the order the files first carry it.
-        schemas: Vec<SchemaRef>,
+        // The table's segments, unless it has none.
+        listed: Option<Arc<Listed>>,
         hot: &[Value],
         window: (Option<u64>, Option<u64>),
         keyed: bool,
     ) -> Result<()> {
         let raw = format!("{name}__raw");
-        let raw_schema: SchemaRef = if files.is_empty() {
+        let raw_schema: SchemaRef = if listed.is_none() {
             Arc::new(Schema::new(
                 declared
                     .iter()
@@ -150,7 +156,8 @@ impl Engine {
         } else {
             // Every segment's columns by name, as DuckDB's `union_by_name`: a column the ABI gained
             // is in the later segments only, and the first one's schema would read it as NULL.
-            let schemas: Vec<Schema> = schemas.iter().map(|s| s.as_ref().clone()).collect();
+            let schemas = listed.iter().flat_map(|l| &l.schemas);
+            let schemas: Vec<Schema> = schemas.map(|s| s.as_ref().clone()).collect();
             Arc::new(Schema::try_merge(widen_integers(schemas)).map_err(|e| {
                 crate::BurrmillError::Substrate(format!("the segments of {name} disagree: {e}"))
             })?)
@@ -161,20 +168,20 @@ impl Engine {
             .map(|(c, _)| c.clone())
             .collect();
         self.session.note_addresses(&raw, addresses.iter().cloned());
-        let raw_provider: Arc<dyn TableProvider> = if files.is_empty() {
-            Arc::new(MemTable::try_new(raw_schema.clone(), vec![vec![]]).map_err(df_err)?)
-        } else {
-            Arc::new(SegmentTable::new(
+        let raw_provider: Arc<dyn TableProvider> = match listed {
+            None => Arc::new(MemTable::try_new(raw_schema.clone(), vec![vec![]]).map_err(df_err)?),
+            Some(listed) => Arc::new(SegmentTable::over(
                 &NestTable {
                     name: raw.clone(),
                     schema: raw_schema.clone(),
-                    files,
+                    files: Vec::new(),
                     wide: Vec::new(),
                     keyed,
                     lowercase: addresses.clone(),
                 },
+                listed,
                 self.threads,
-            )?)
+            )?),
         };
         self.session.register_table(&raw, Arc::clone(&raw_provider));
 
@@ -456,6 +463,51 @@ fn footer_schemas(files: &[(PathBuf, u64)]) -> Result<Vec<SchemaRef>> {
         f.by_file.extend(read);
     }
     Ok(distinct(each.into_iter()))
+}
+
+/// The lists some engine in the process still has a table bound to, by first file. Nuthatch binds
+/// every table again before each statement and at each seal; while the file set is the same, so
+/// are the list a scan reads and the schemas of its footers, and neither is built again (#153).
+/// Each is held by the tables bound to it, so this map keeps nothing alive.
+static LISTS: LazyLock<Mutex<HashMap<PathBuf, Vec<Weak<Listed>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(super) static LISTS_BUILT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `files` as a scan reads them, shared with whichever table is already bound to the same files.
+/// A file removed since that table was bound refuses its scan, not this bind.
+fn listed(files: Vec<(PathBuf, u64)>) -> Result<Arc<Listed>> {
+    let same = |l: &Listed| {
+        l.files.len() == files.len()
+            && l.files
+                .iter()
+                .zip(&files)
+                .all(|(a, b)| a.1 == b.1 && a.0.as_os_str() == b.0.as_os_str())
+    };
+    let lists = || LISTS.lock().unwrap_or_else(|p| p.into_inner());
+    // Compared outside the lock: a list is as long as its table has segments.
+    let live: Vec<Arc<Listed>> = lists()
+        .get(&files[0].0)
+        .into_iter()
+        .flatten()
+        .filter_map(Weak::upgrade)
+        .collect();
+    if let Some(l) = live.into_iter().find(|l| same(l)) {
+        return Ok(l);
+    }
+    // Every footer, as DuckDB's `read_parquet` binds them all, so a file that is not Parquet
+    // refuses the definition here and a host can define the table from what remains.
+    let schemas = footer_schemas(&files)?;
+    let first = files[0].0.clone();
+    let l = Arc::new(Listed::new(files, schemas, false)?);
+    LISTS_BUILT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut lists = lists();
+    lists.retain(|_, ls| {
+        ls.retain(|w| w.strong_count() > 0);
+        !ls.is_empty()
+    });
+    lists.entry(first).or_default().push(Arc::downgrade(&l));
+    Ok(l)
 }
 
 /// One column at two integer widths across segments takes the type DuckDB's `union_by_name` gives

@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+static ALLOCS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub struct Counting;
 
@@ -13,6 +14,7 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         let p = unsafe { System.alloc(l) };
         if !p.is_null() {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
             let now = LIVE.fetch_add(l.size(), Ordering::Relaxed) + l.size();
             PEAK.fetch_max(now, Ordering::Relaxed);
         }
@@ -34,6 +36,11 @@ unsafe impl GlobalAlloc for Counting {
         }
         q
     }
+}
+
+/// Calls to `alloc` so far; a `realloc` is not counted.
+pub fn allocs() -> u64 {
+    ALLOCS.load(Ordering::Relaxed)
 }
 
 pub fn peak_mb() -> usize {

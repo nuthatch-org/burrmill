@@ -91,7 +91,7 @@ pub struct Budget {
 }
 
 /// A memory pool several engines draw on, so one budget bounds their statements together rather
-/// than each of them (nuthatch #1792). Every engine still keeps its own footer cache outside it.
+/// than each of them (nuthatch #1792). The footer caches stay outside it.
 #[derive(Debug, Clone)]
 pub struct SharedPool(Arc<dyn datafusion_execution::memory_pool::MemoryPool>);
 
@@ -112,6 +112,13 @@ impl SharedPool {
 #[doc(hidden)]
 pub fn selection_passes() -> u64 {
     catalog::SELECTIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// File lists built in this process, for a test that binding a table to the files it already has
+/// builds none.
+#[doc(hidden)]
+pub fn file_lists_built() -> u64 {
+    host::LISTS_BUILT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Local segment footers read in this process, for a test that a second engine reads none again.
@@ -439,8 +446,9 @@ impl Engine {
         Ok(())
     }
 
-    /// Bytes of Parquet footers the engine keeps between statements, outside the pool: at most an
-    /// eighth of a budget, which the pool was sized without.
+    /// Bytes of Parquet footers kept between statements, outside the pool: the engine's own for a
+    /// store's segments and the process's for local ones, which every engine reads. Each is held
+    /// to an eighth of a budget, which the pool was sized without.
     pub fn footer_cache_bytes(&self) -> usize {
         self.session.footer_bytes()
     }
@@ -714,7 +722,6 @@ impl Engine {
         let ctx = Arc::new(ctx.with_runtime(runtime));
         let selecting = catalog::selected_bytes(
             catalog::selections(&physical, ctx.runtime_env().as_ref()).map_err(df_err)?,
-            ctx.runtime_env().cache_manager.get_file_metadata_cache(),
         );
         // Beside the statement rather than before it: a footer pass over every segment is not free.
         #[cfg(not(target_arch = "wasm32"))]

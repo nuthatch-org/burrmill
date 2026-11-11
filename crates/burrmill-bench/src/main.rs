@@ -30,6 +30,7 @@ mod error_parity;
 mod fixture;
 mod fuzz;
 mod generate;
+mod host_scan;
 mod oracles;
 mod reach_parity;
 mod scan_parity;
@@ -171,6 +172,14 @@ async fn run() -> anyhow::Result<()> {
                 .nth(2)
                 .ok_or_else(|| anyhow::anyhow!("usage: engine-sql <nest> <file>..."))?,
             &std::env::args().skip(3).collect::<Vec<_>>(),
+        ),
+        Some("host-scan") => host_scan::run(
+            &std::env::args()
+                .nth(2)
+                .ok_or_else(|| anyhow::anyhow!("usage: host-scan <nest> <queries.tsv>"))?,
+            &std::env::args()
+                .nth(3)
+                .ok_or_else(|| anyhow::anyhow!("usage: host-scan <nest> <queries.tsv>"))?,
         ),
         Some("serve-views") => serve::run_views(
             &std::env::args()
