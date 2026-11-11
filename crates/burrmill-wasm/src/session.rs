@@ -163,11 +163,15 @@ impl Session {
         let mut date_obj = serde_json::Map::new();
         for (i, name) in self.names.iter().enumerate() {
             let col = &self.report.columns[i];
-            columns.push(json!({
+            let mut column = json!({
                 "name": name,
                 "type": col.inferred.name(),
                 "nulls": col.nulls,
-            }));
+            });
+            if let Some(note) = col.note {
+                column["note"] = json!(note);
+            }
+            columns.push(column);
             if sign_on.contains(name.as_str())
                 && let Some(label) = sign_label(&self.batches, i)
             {

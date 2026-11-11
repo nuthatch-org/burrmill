@@ -9,7 +9,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
-use crate::csv::Parsed;
+use crate::csv::{Parsed, Row};
 use crate::report::{ColumnReport, InferredType, IngestReport, Issue, RowIssue, TYPE_CONFIDENCE};
 use crate::sniff::{Dialect, Locale};
 
@@ -31,17 +31,12 @@ pub fn build(
 ) -> (Vec<RecordBatch>, IngestReport) {
     let width = parsed.rows.iter().map(|r| r.len()).max().unwrap_or(0);
     let header = is_header(&parsed.rows, dialect.locale);
-    let data: &[Vec<String>] = if header {
+    let data: &[Row] = if header {
         &parsed.rows[1..]
     } else {
         &parsed.rows
     };
-    let names = column_names(
-        header
-            .then(|| parsed.rows.first().map(|r| r.as_slice()))
-            .flatten(),
-        width,
-    );
+    let names = column_names(header.then(|| parsed.rows.first()).flatten(), width);
 
     let mut report = IngestReport {
         dialect,
@@ -68,8 +63,23 @@ pub fn build(
         });
     }
 
+    let votes: Vec<Votes> = (0..width).map(|i| column_votes(data, i)).collect();
+    let point: usize = votes.iter().map(|v| v.point).sum();
+    let comma: usize = votes.iter().map(|v| v.comma).sum();
+    let file_locale = match point.cmp(&comma) {
+        std::cmp::Ordering::Greater => Some(Locale::Point),
+        std::cmp::Ordering::Less => Some(Locale::Comma),
+        std::cmp::Ordering::Equal => None,
+    };
+    if let Some(locale) = file_locale {
+        report.dialect.locale = locale;
+    }
+
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(width);
     for (col_idx, name) in names.iter().enumerate() {
+        let column_locale = votes[col_idx].locale(file_locale, report.dialect.locale);
+        let locale = column_locale.unwrap_or(report.dialect.locale);
+        let mut zero_led = false;
         let mut kinds = Vec::with_capacity(data.len());
         let mut nulls = 0u64;
         for (row_idx, row) in data.iter().enumerate() {
@@ -88,14 +98,29 @@ pub fn build(
                 }
                 continue;
             }
-            let kind = classify(&row[col_idx], report.dialect.locale);
+            let kind = classify(&row[col_idx], locale);
+            zero_led |=
+                matches!(kind, Kind::Int(_) | Kind::Decimal { .. }) && leading_zero(&row[col_idx]);
             if matches!(kind, Kind::Empty) {
                 nulls += 1;
             }
             kinds.push(kind);
         }
-        let (inferred, matched) = choose(&kinds);
         let non_empty = data.len() as u64 - nulls;
+        let (mut inferred, mut matched) = choose(&kinds);
+        let mut note = None;
+        let numeric = matches!(
+            inferred,
+            InferredType::Integer | InferredType::Decimal { .. }
+        );
+        if numeric && zero_led {
+            note = Some(NOTE_LEADING_ZERO);
+        } else if numeric && column_locale.is_none() {
+            note = Some(NOTE_AMBIGUOUS_MARK);
+        }
+        if note.is_some() {
+            (inferred, matched) = (InferredType::Text, non_empty);
+        }
         let array = materialise(data, col_idx, &kinds, &inferred, &mut report, name);
         report.columns.push(ColumnReport {
             name: name.clone(),
@@ -103,6 +128,7 @@ pub fn build(
             nulls,
             non_empty,
             matched,
+            note,
         });
         columns.push(array);
         let _ = col_idx;
@@ -126,7 +152,7 @@ pub fn build(
     (batches, report)
 }
 
-fn is_header(rows: &[Vec<String>], locale: Locale) -> bool {
+fn is_header(rows: &[Row], locale: Locale) -> bool {
     // One row is data. A first row of names above anything else is a header, including when
     // the rows under it are names too (`city,person` / `Sofia,Ivan`).
     if rows.len() < 2 {
@@ -143,13 +169,10 @@ fn is_name(cell: &str, locale: Locale) -> bool {
     )
 }
 
-fn column_names(header: Option<&[String]>, width: usize) -> Vec<String> {
+fn column_names(header: Option<&Row>, width: usize) -> Vec<String> {
     let mut names = Vec::with_capacity(width);
     for i in 0..width {
-        let raw = header
-            .and_then(|h| h.get(i))
-            .map(|s| s.as_str())
-            .unwrap_or("");
+        let raw = header.and_then(|h| h.get(i)).unwrap_or("");
         let mut name = if raw.is_empty() {
             format!("column_{}", i + 1)
         } else {
@@ -254,7 +277,7 @@ fn rescale(unscaled: i128, from: u8, to: u8) -> Option<i128> {
 }
 
 fn materialise(
-    data: &[Vec<String>],
+    data: &[Row],
     col_idx: usize,
     kinds: &[Kind],
     inferred: &InferredType,
@@ -349,9 +372,14 @@ fn materialise(
             Arc::new(b.finish())
         }
         InferredType::Text => {
-            let mut b = StringBuilder::with_capacity(kinds.len(), kinds.len() * 8);
+            let bytes = data
+                .iter()
+                .filter_map(|row| row.get(col_idx))
+                .map(str::len)
+                .sum();
+            let mut b = StringBuilder::with_capacity(kinds.len(), bytes);
             for row in data {
-                match row.get(col_idx).map(|s| s.as_str()).unwrap_or("") {
+                match row.get(col_idx).unwrap_or("") {
                     "" => b.append_null(),
                     cell => b.append_value(cell),
                 }
@@ -420,9 +448,9 @@ fn parse_date(cell: &str) -> Option<i32> {
     let m: i32 = parts.next()?.parse().ok()?;
     let y: i32 = parts.next()?.parse().ok()?;
     if parts.next().is_some()
-        || !(1..=31).contains(&d)
         || !(1..=12).contains(&m)
         || !(1..=9999).contains(&y)
+        || !(1..=days_in_month(y, m)).contains(&d)
     {
         return None;
     }
@@ -443,42 +471,129 @@ fn parse_iso_date(cell: &str) -> Option<i32> {
     let y: i32 = cell[0..4].parse().ok()?;
     let m: i32 = cell[5..7].parse().ok()?;
     let d: i32 = cell[8..10].parse().ok()?;
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    if !(1..=12).contains(&m) || !(1..=days_in_month(y, m)).contains(&d) {
         return None;
     }
     Some(days_from_civil(y, m, d))
 }
 
+fn days_in_month(y: i32, m: i32) -> i32 {
+    match m {
+        2 if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
 fn parse_timestamp(cell: &str) -> Option<i64> {
     let (date, time) = cell.split_once(['T', ' '])?;
-    if time.len() < 8 {
+    if time.len() < 8 || !time.is_ascii() {
         return None;
     }
     let days = parse_iso_date(date)?;
-    let h: i64 = time[0..2].parse().ok()?;
-    let min: i64 = time[3..5].parse().ok()?;
-    let s: i64 = time[6..8].parse().ok()?;
-    if time.as_bytes().get(2) != Some(&b':') || time.as_bytes().get(5) != Some(&b':') {
+    if time.as_bytes()[2] != b':' || time.as_bytes()[5] != b':' {
         return None;
     }
+    let h: i64 = digits(&time[0..2])?;
+    let min: i64 = digits(&time[3..5])?;
+    let s: i64 = digits(&time[6..8])?;
     if h > 23 || min > 59 || s > 60 {
         return None;
     }
     let mut micros = (days as i64) * 86_400 * 1_000_000 + (h * 3600 + min * 60 + s) * 1_000_000;
-    if time.as_bytes().get(8) == Some(&b'.') {
-        let frac: String = time[9..]
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .take(6)
-            .collect();
-        if !frac.is_empty() {
-            let padded = format!("{frac:0<6}");
-            if let Ok(extra) = padded.parse::<i64>() {
-                micros += extra;
+    let mut rest = &time[8..];
+    if let Some(after) = rest.strip_prefix('.') {
+        let len = after.bytes().take_while(u8::is_ascii_digit).count();
+        if len == 0 {
+            return None;
+        }
+        let kept = &after[..len.min(6)];
+        micros += digits::<i64>(&format!("{kept:0<6}"))?;
+        rest = &after[len..];
+    }
+    // An offset is applied, so the value is UTC. Anything else after the seconds is not a time.
+    let offset = match rest.as_bytes() {
+        [] | [b'Z'] => 0,
+        [sign @ (b'+' | b'-'), ..] => {
+            let body = &rest[1..];
+            let (oh, om) = match body.len() {
+                2 => (body, "00"),
+                4 => (&body[0..2], &body[2..4]),
+                5 if body.as_bytes()[2] == b':' => (&body[0..2], &body[3..5]),
+                _ => return None,
+            };
+            let (oh, om): (i64, i64) = (digits(oh)?, digits(om)?);
+            if oh > 23 || om > 59 {
+                return None;
             }
+            let secs = oh * 3600 + om * 60;
+            if *sign == b'+' { secs } else { -secs }
+        }
+        _ => return None,
+    };
+    Some(micros - offset * 1_000_000)
+}
+
+fn digits<T: std::str::FromStr>(text: &str) -> Option<T> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+const NOTE_LEADING_ZERO: &str = "kept as text: a value has a leading zero";
+const NOTE_AMBIGUOUS_MARK: &str = "kept as text: every number reads both as 1.234 and as 1,234, and nothing in the file says which";
+
+#[derive(Default)]
+struct Votes {
+    point: usize,
+    comma: usize,
+    ambiguous: usize,
+}
+
+impl Votes {
+    /// `None` when the column's numbers could be read either way and the file cannot say which.
+    fn locale(&self, file: Option<Locale>, sniffed: Locale) -> Option<Locale> {
+        match self.point.cmp(&self.comma) {
+            std::cmp::Ordering::Greater => Some(Locale::Point),
+            std::cmp::Ordering::Less => Some(Locale::Comma),
+            std::cmp::Ordering::Equal if self.point > 0 => Some(file.unwrap_or(sniffed)),
+            std::cmp::Ordering::Equal if self.ambiguous > 0 => file,
+            std::cmp::Ordering::Equal => Some(file.unwrap_or(sniffed)),
         }
     }
-    Some(micros)
+}
+
+/// A cell votes only for a mark it can be read under alone: `1,5` and `1.234,56` say comma,
+/// `1.234` and `1,234` say nothing, and `items 1,2,3` is not a number at all.
+fn column_votes(data: &[Row], col_idx: usize) -> Votes {
+    let mut votes = Votes::default();
+    for row in data {
+        let Some(cell) = row.get(col_idx).map(|c| c.trim()) else {
+            continue;
+        };
+        if !cell.contains(['.', ',']) {
+            continue;
+        }
+        match (
+            parse_number(cell, Locale::Point).is_some(),
+            parse_number(cell, Locale::Comma).is_some(),
+        ) {
+            (true, true) => votes.ambiguous += 1,
+            (true, false) => votes.point += 1,
+            (false, true) => votes.comma += 1,
+            (false, false) => {}
+        }
+    }
+    votes
+}
+
+/// `007` and `-0123`, not `0` or `0.5`.
+fn leading_zero(cell: &str) -> bool {
+    let cell = cell.trim();
+    let unsigned = cell.strip_prefix(['-', '+']).unwrap_or(cell).as_bytes();
+    unsigned.len() > 1 && unsigned[0] == b'0' && unsigned[1].is_ascii_digit()
 }
 
 fn parse_number(cell: &str, locale: Locale) -> Option<Kind> {

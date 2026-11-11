@@ -6,8 +6,10 @@
 # Profile: wasm-size. opt-level z, lto, one codegen unit, panic abort, symbols stripped.
 # Artifact: target/wasm32-unknown-unknown/wasm-size/ingest-wasm.wasm
 #
-# uncompressed    471710
-# gzip -9         127593
+# uncompressed    477311
+# gzip -9         128661
+#
+# Re-measured 2026-11-11 on arrow 59.3.2. The wasm-opt figure below was not re-run.
 #
 # wasm-opt -Oz is not in CI. Run locally it was 412796 bytes, gzip -9 123193.
 # The module imports four wasm-bindgen symbols (describe, throw, externref grow

@@ -559,12 +559,13 @@ fn sql_the_parser_rejects_is_not_reported_as_too_deep() {
 
 #[test]
 fn planning_does_not_use_the_caller_stack() {
-    // Executing this sum takes about a mebibyte. The planner thread is asserted by name.
+    // Planning and running this sum took more than a mebibyte of the caller's stack in debug,
+    // until the statement got a thread of its own (#168). The caller now only receives batches.
     let engine = Engine::open_empty().unwrap();
     let sql = chain(48);
     let handle = std::thread::Builder::new()
         .name("small-stack".into())
-        .stack_size(1024 * 1024)
+        .stack_size(256 * 1024)
         .spawn(move || value_of(engine, &sql))
         .unwrap();
     assert_eq!(handle.join().unwrap(), r#"[{"n":48}]"#);
@@ -796,4 +797,21 @@ fn a_statement_over_too_many_relations_is_refused_before_planning() {
         assert!(err.to_string().contains("more than 256"), "{err}");
         assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
     }
+}
+
+#[test]
+fn levenshtein_answers_short_strings_and_refuses_a_long_pair_at_once() {
+    let engine = Engine::open_empty().unwrap();
+    assert_eq!(
+        value_of(engine, "SELECT levenshtein('kitten', 'sitting') AS n"),
+        r#"[{"n":3}]"#
+    );
+    // A hundred thousand bytes a side was 7 s past its cancel, and twelve minutes at a million.
+    let engine = Engine::open_empty().unwrap();
+    let started = std::time::Instant::now();
+    let err = engine
+        .sql("SELECT levenshtein(repeat('a', 100000), repeat('b', 100000)) AS n")
+        .unwrap_err();
+    assert!(err.to_string().contains("levenshtein over"), "{err}");
+    assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
 }

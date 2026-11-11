@@ -6,11 +6,13 @@
 # The engine objects are compiled by Homebrew clang 23.1.3. Apple clang has no
 # wasm32 target, so the script points CC_wasm32_unknown_unknown at the LLVM one.
 # Profile: wasm-size. opt-level z, lto, one codegen unit, panic abort, symbols stripped.
+# Re-measured 2026-11-11 on arrow 59.3.2, zstd-sys 2.1.2, zstd 0.13.4. The wasm-opt figure
+# below is from the earlier build and was not re-run.
 #
 # ingest + operator
 # Artifact: target/wasm32-unknown-unknown/wasm-size/ingest-operator.wasm
-# uncompressed    1895101
-# gzip -9          557700
+# uncompressed    1872808
+# gzip -9          549394
 #
 # wasm-opt -Oz is not in CI. Run locally it was 1673607 bytes, gzip -9 546683.
 # The module imports the same four wasm-bindgen symbols as the ingest probe.
@@ -22,13 +24,13 @@
 #
 # full Engine
 # Artifact: target/wasm32-unknown-unknown/wasm-size/engine-wasm.wasm
-# uncompressed   28469653
-# gzip -9         7411636
+# uncompressed   28507907
+# gzip -9         7381688
 #
 # ingest + Engine, the single download
 # Artifact: target/wasm32-unknown-unknown/wasm-size/ingest-engine.wasm
-# uncompressed   28495604
-# gzip -9         7425144
+# uncompressed   28534588
+# gzip -9         7391542
 #
 # 8 MiB is 8388608. Both engine figures are under it. wasm-opt was not run.
 #

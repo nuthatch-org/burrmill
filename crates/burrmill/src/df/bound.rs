@@ -613,6 +613,35 @@ fn need(name: &str, args: &[ColumnarValue], number_rows: usize, limit: usize) ->
     Ok(n)
 }
 
+/// `levenshtein` is a length times a length per row, all of it inside one poll, where no cancel
+/// reaches. These bound one call to about a second.
+const EDIT_STEPS_PAIR: u128 = 100_000_000;
+const EDIT_STEPS_CALL: u128 = 1_000_000_000;
+
+fn edit_steps(args: &[ColumnarValue], number_rows: usize) -> Result<()> {
+    let [a, b] = args else {
+        return Ok(());
+    };
+    let rows = if args.iter().any(|x| matches!(x, ColumnarValue::Array(_))) {
+        number_rows
+    } else {
+        1
+    };
+    let mut total: u128 = 0;
+    for i in 0..rows {
+        let (la, lb) = (bytes(a, i), bytes(b, i));
+        let pair = la.saturating_mul(lb);
+        total = total.saturating_add(pair);
+        if pair > EDIT_STEPS_PAIR || total > EDIT_STEPS_CALL {
+            return Err(DataFusionError::Execution(format!(
+                "levenshtein over {la} and {lb} bytes is {pair} steps; at most \
+                 {EDIT_STEPS_PAIR} a pair and {EDIT_STEPS_CALL} a batch are computed"
+            )));
+        }
+    }
+    Ok(())
+}
+
 thread_local! {
     static PLANNING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
@@ -724,6 +753,9 @@ impl ScalarUDFImpl for Bounded {
         self.imp().is_strict()
     }
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        if self.name() == "levenshtein" {
+            edit_steps(&args.args, args.number_rows)?;
+        }
         if !builds(args.return_field.data_type()) {
             return self.inner.invoke_with_args(args);
         }

@@ -505,19 +505,15 @@ impl Engine {
         if self.cancel.is_cancelled() {
             return Err(BurrmillError::Cancelled);
         }
-        let _pass = self.gate.enter();
+        // The engine's own token, so a cancel also frees a statement queued behind slow ones.
+        let _pass = self
+            .gate
+            .enter_cancellable(&self.cancel)
+            .ok_or(BurrmillError::Cancelled)?;
         let started = std::time::Instant::now();
-        if tokio::runtime::Handle::try_current().is_err() {
-            let r =
-                self.runtime()
-                    .block_on(self.stream(logical, sql, &mut f, metrics.as_deref_mut()));
-            if let Some(m) = metrics {
-                m.exec_nanos += started.elapsed().as_nanos() as u64;
-            }
-            return r;
-        }
-        // A host's runtime drives this thread and tokio will not block it, so the statement runs on
-        // a thread of its own; its batches come back here, and `f` stays on the caller's thread.
+        // The statement runs on a thread of its own, its batches come back here, and `f` stays on
+        // the caller's. A host runtime will not be blocked; and without one, physical planning and
+        // execution ran on the caller's stack, which a 1 MiB thread could not hold in debug (#168).
         let held = metrics.as_deref_mut();
         let r = std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -525,7 +521,12 @@ impl Engine {
                 .name("burrmill-statement".into())
                 .stack_size(PLAN_STACK_BYTES)
                 .spawn_scoped(s, move || {
-                    let mut send = |b| tx.send(b).map_err(|_| BurrmillError::Cancelled);
+                    // Not `Cancelled`: the caller's `f` refused, and what was read still counts.
+                    let mut send = |b| {
+                        tx.send(b).map_err(|_| {
+                            BurrmillError::Substrate("the caller stopped reading".into())
+                        })
+                    };
                     self.runtime()
                         .block_on(self.stream(logical, sql, &mut send, held))
                 })
@@ -596,6 +597,7 @@ impl Engine {
             Err(BurrmillError::Substrate(ref m))
                 if sent == 0
                     && m.contains(addresses::NOT_AN_ADDRESS)
+                    && self.session.address_refused()
                     && self.session.addresses_off() =>
             {
                 log::warn!("{m}: addresses are read as text from now on");
@@ -958,6 +960,12 @@ fn leading_keyword(sql: &str) -> &str {
 /// `__raw`, `__hot` and `__union` are refused when the walk can see them. A statement it cannot
 /// parse is left to the engine parser, which accepts more of DuckDB than the walk does (#10).
 fn refuse_hidden_names(sql: &str) -> Result<()> {
+    if let Some(table) = crate::inspect::hidden_name(sql) {
+        return Err(BurrmillError::NotAllowed(format!(
+            "`{table}` is not a table this surface serves - the SQL surface serves this nest's \
+             tables and views only"
+        )));
+    }
     match crate::inspect::reach(sql) {
         Err(BurrmillError::NotAllowed(why))
             if why.contains("is not a table this surface serves") =>
