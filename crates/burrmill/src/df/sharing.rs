@@ -975,9 +975,12 @@ impl ExtensionPlanner for SharedPlanner {
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
         if let Some(n) = node.as_any().downcast_ref::<SharedRef>() {
             let schema: SchemaRef = Arc::new(n.schema.as_arrow().clone());
+            // Partitioned here: a round-robin repartition above would buffer for a reader that
+            // waits, without a bound, what the other reader drains past it.
+            let partitions = session.config().target_partitions().max(1);
             let properties = Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(Arc::clone(&schema)),
-                Partitioning::UnknownPartitioning(1),
+                Partitioning::UnknownPartitioning(partitions),
                 EmissionType::Final,
                 Boundedness::Bounded,
             ));
@@ -1193,9 +1196,10 @@ impl ExecutionPlan for SharedExec {
     }
     fn execute(
         &self,
-        _partition: usize,
+        partition: usize,
         ctx: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
+        let partitions = self.properties.partitioning.partition_count();
         let state = Arc::clone(&self.state);
         let stream = futures::stream::once(async move {
             let plan = state
@@ -1226,10 +1230,23 @@ impl ExecutionPlan for SharedExec {
             let rows: SendableRecordBatchStream = match held.as_ref() {
                 Held::Batches { batches, .. } => Box::pin(RecordBatchStreamAdapter::new(
                     plan.schema(),
-                    futures::stream::iter(batches.clone().into_iter().map(Ok)),
+                    futures::stream::iter(
+                        batches
+                            .iter()
+                            .skip(partition)
+                            .step_by(partitions)
+                            .cloned()
+                            .map(Ok)
+                            .collect::<Vec<_>>(),
+                    ),
                 )),
                 // A `RepartitionExec` runs once per partition, and `hold` already ran this one.
-                Held::TooBig => execute_stream(reset_plan_states(plan)?, ctx)?,
+                // One partition reads the run whole, through a bounded coalesce.
+                Held::TooBig if partition == 0 => execute_stream(reset_plan_states(plan)?, ctx)?,
+                Held::TooBig => Box::pin(RecordBatchStreamAdapter::new(
+                    plan.schema(),
+                    futures::stream::empty(),
+                )),
             };
             Ok::<_, DataFusionError>(rows)
         })
