@@ -179,7 +179,7 @@ jobs:
         working-directory: demo
         run: |
           npm ci
-          npx playwright install --with-deps chromium
+          npx playwright install chromium
       - name: browser tests
         working-directory: demo
         run: |
