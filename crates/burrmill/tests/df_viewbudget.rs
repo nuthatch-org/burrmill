@@ -116,7 +116,9 @@ fn within(operator: &str, marker: &str, body: &str) {
 
 /// As [`within`], with `who` and `amount` cast to `types.0` in one run and `types.1` in the other.
 fn within_as(operator: &str, marker: &str, types: (&str, &str), body: &str) {
-    let e = engine();
+    // A top-k holds its batch only while its partition runs, so over several partitions the peak
+    // counts how many ran at once, which is the scheduler's doing (#201).
+    let e = engine_threads(BUDGET, if marker == "TopK" { 1 } else { 8 }, None);
     let cte = |t: &str| {
         format!(
             "WITH s AS (SELECT block_number, arrow_cast(who, '{t}') AS who, \

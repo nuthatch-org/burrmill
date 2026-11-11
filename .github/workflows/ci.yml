@@ -25,6 +25,10 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all --check
+      # fuzz/ has its own lock and only the nightly job builds it: a pin bumped here that the
+      # lock there does not follow would otherwise first fail at night.
+      - name: fuzz lock resolves
+        run: cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
 
   # The library both ways: the default graph is pure Rust and must build on its own, and
   # `datafusion` is what nuthatch embeds.
@@ -98,7 +102,9 @@ jobs:
       - name: test and clippy
         run: |
           cargo clippy --locked -p burrmill-ingest --all-targets -- -D warnings
+          cargo clippy --locked -p burrmill-ingest --all-targets --features json,parquet -- -D warnings
           cargo test --locked -p burrmill-ingest
+          cargo test --locked -p burrmill-ingest --features json,parquet
       - name: wasm graph and gzip size
         run: docs/bench/ingest-wasm.sh
 
@@ -121,7 +127,10 @@ jobs:
         run: |
           cargo clippy --locked -p burrmill-wasm --all-targets -- -D warnings
           cargo test --locked -p burrmill-wasm
+      # Warnings refuse: what only wasm32 leaves unused is seen by no clippy step above.
       - name: build for wasm32
+        env:
+          RUSTFLAGS: -D warnings
         run: cargo build --locked -p burrmill-wasm --target wasm32-unknown-unknown
       # The demo downloads ingest and the engine as one module.
       - name: engine gzip under 8 MiB

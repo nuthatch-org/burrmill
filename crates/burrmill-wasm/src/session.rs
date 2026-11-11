@@ -64,6 +64,7 @@ pub struct Session {
     report: IngestReport,
     marked: BTreeSet<String>,
     tokens: TokenMap,
+    pub(crate) order: fn(&mut [u64]),
 }
 
 impl Session {
@@ -87,6 +88,10 @@ impl Session {
             report,
             marked: BTreeSet::new(),
             tokens: TokenMap::default(),
+            #[cfg(not(test))]
+            order: pseudonym::shuffled,
+            #[cfg(test)]
+            order: pseudonym::row_order,
         };
         session.reregister()?;
         Ok(session)
@@ -253,7 +258,7 @@ impl Session {
             .filter(|name| identifiers.iter().any(|id| id == *name))
             .cloned()
             .collect();
-        self.tokens = pseudonym::assign(&self.names, &self.marked, &self.batches);
+        self.tokens = pseudonym::assign(&self.names, &self.marked, &self.batches, self.order);
     }
 
     pub fn proposals(&self) -> Vec<pseudonym::Proposal> {
@@ -637,6 +642,11 @@ fn date_bounds(batches: &[RecordBatch], idx: usize) -> Option<(String, String)> 
 }
 
 fn dialect_label(report: &IngestReport) -> String {
+    match report.format {
+        burrmill_ingest::Format::Parquet => return "parquet".to_string(),
+        burrmill_ingest::Format::Json => return "json".to_string(),
+        burrmill_ingest::Format::Csv => {}
+    }
     let d = &report.dialect;
     format!(
         "delim={} quote={} encoding={} locale={} header={}",

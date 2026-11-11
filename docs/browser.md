@@ -1,12 +1,16 @@
 # The browser tab
 
-What the demo page and `burrmill-wasm` do today, read from the code. A CSV file is read and queried
-inside the tab; a model is asked for SQL, and only what is listed below goes to it. The page does the
-HTTP (`demo/app.js`); the crates do none.
+What the demo page and `burrmill-wasm` do today, read from the code. A CSV, JSON or Parquet file
+is read and queried inside the tab; a model is asked for SQL, and only what is listed below goes to
+it. The page does the HTTP (`demo/app.js`); the crates do none.
 
 ## Pieces
 
-- `crates/burrmill-ingest`: untrusted CSV to Arrow under a budget. It does not depend on the engine.
+- `crates/burrmill-ingest`: untrusted CSV, Parquet with its `parquet` feature and JSON with `json`,
+  to Arrow under a budget. It does not depend on the engine. JSON is an array of objects or objects
+  one after another; a key is a column name, so it is part of the schema and leaves with it, and a
+  nested value stays in its cell as text. A Parquet file with a list or map column is refused,
+  since nothing in the file bounds what one decodes to; a struct of plain fields is read as text.
 - `crates/burrmill-wasm`: the JS package. Ingest, the engine (`Engine::open_empty_within`, one table
   `t`), the card, the checks on each mode's feedback and on the model's answer (`src/session.rs`,
   `src/aggregates.rs`, `src/pseudonym.rs`, `src/redact.rs`, `src/model.rs`, `src/chart.rs`).
@@ -19,8 +23,9 @@ HTTP (`demo/app.js`); the crates do none.
 
 Each request to the model (`promptText` and `requestBody` in `demo/app.js`) carries:
 
-- the card (`Session::card`): table name, row count, CSV dialect, each column's name, inferred
-  type, null count and note, and ingest issues as row number, column and reason. No cell value.
+- the card (`Session::card`): table name, row count, CSV dialect (`parquet` or `json` for those
+  files), each column's name, inferred type, null count and note, and ingest issues as row number,
+  column and reason. No cell value.
   For a column the user ticks as a sign, one word for its sign; for one ticked as a date, its
   minimum and maximum;
 - the grammar (`Session::grammar`): the admitted statement kinds and every function name;
@@ -70,7 +75,8 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
 - Rows handed to the page from one query: 5,000 (`RESULT_ROWS`).
 - The page: a file over 200 MB is refused before it is read (`MAX_FILE_BYTES`); a request asks for
   at most 2,048 tokens; four attempts per question; the outbound log keeps eight requests, each
-  shown to 64 KB.
+  shown to 64 KB; aggregates mode takes 20 asks per page load (`AGGREGATE_ASKS`), counted on the
+  page, which bounds differencing across asks without preventing it.
 - The gzip of ingest plus the engine for wasm32 must be at most 8 MiB (`tab-wasm` in
   `.github/workflows/ci.yml`).
 
@@ -79,8 +85,17 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
 From `demo/index.html` and `demo/app.js`:
 
 - A Content Security Policy: `connect-src` is the page's origin, `https://api.anthropic.com` and
-  `http://127.0.0.1:*`; scripts from the origin only, with wasm compilation allowed; no objects, base or form targets.
-- A Trusted Types policy that refuses HTML and script, and script URLs except same-origin `.wasm`.
+  `http://127.0.0.1:*`; scripts from the origin only, with wasm compilation allowed; no objects, base or form targets;
+  Trusted Types required for script sinks. The meta tag carries what a meta tag can; `demo/_headers`
+  is the same policy as headers, adding `frame-ancestors 'none'` and covering `worker.js`, for a host
+  that reads that file (`headers.mjs` serves it). The page should have an origin of its own, since
+  OPFS and Cache Storage are shared across one.
+- A Trusted Types policy that refuses HTML and script, and script URLs except same-origin `.wasm`,
+  `worker.js` and `sw.js`.
+- The service worker answers and caches only the files in its `SHELL` list.
+- The first local-model ask adds a second policy holding `connect-src` to the origin and
+  `http://127.0.0.1:*`, so the document cannot reach `api.anthropic.com` until it is reloaded, and
+  an ask in another mode after it is refused.
 - Requests with `redirect: 'error'` and `credentials: 'omit'`.
 - The key stays in the tab, and in `sessionStorage` only if "Remember the key in this tab" is ticked.
 - "Confirm before sending" is on by default; each request is shown in the log and waits for Send or

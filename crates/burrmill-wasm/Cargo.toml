@@ -13,11 +13,12 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 burrmill = { path = "../burrmill", features = ["datafusion"] }
-burrmill-ingest = { path = "../burrmill-ingest" }
+burrmill-ingest = { path = "../burrmill-ingest", features = ["json", "parquet"] }
 arrow = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlparser = { workspace = true, features = ["visitor"] }
+getrandom = "0.3"
 
 # datafusion-common turns on arrow-ipc's zstd. The default zstd-sys build then
 # compiles huf_decompress_amd64.S, which is not a wasm32 object. `no_asm` keeps

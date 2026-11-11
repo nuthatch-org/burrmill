@@ -1,0 +1,3 @@
+{"id": 1, "amount": 12.50, "note": "CANARY_VALUE_991", "tags": ["a", "b"]}
+{"id": 2, "amount": -3.05, "note": "second \"quoted\" é", "extra": null}
+{"id": 3, "note": "=HYPERLINK(\"http://x\")", "tags": {"k": [1, {"deep": true}]}}

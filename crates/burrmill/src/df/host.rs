@@ -72,6 +72,10 @@ impl Engine {
     /// present and NULL where no input carries it, `_dec` and `_overflow` beside each `word16` or
     /// `word32` column, and only rows with `after < block_number <= through` when a bound is given.
     /// Replaces an earlier `name`.
+    ///
+    /// Declaring a column `address` is the host's promise that it holds `0x` and forty lower-case
+    /// hex digits: `lower(c)` over it is read as `c`, so those filters prune. Other text in the
+    /// column still answers, as text, except under `lower`, which then compares it unlowered.
     pub fn register_facts(
         &mut self,
         name: &str,

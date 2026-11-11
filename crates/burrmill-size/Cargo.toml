@@ -22,7 +22,14 @@ zstd-sys = { version = "2.1.2", optional = true, default-features = false, featu
 # Off by default, so a workspace test does not build the probes.
 link-wasm = []
 # The full Engine. Off for the operator measurement, or the two graphs unify.
-engine = ["link-wasm", "burrmill/datafusion", "dep:serde_json", "dep:zstd-sys"]
+engine = [
+    "link-wasm",
+    "burrmill/datafusion",
+    "burrmill-ingest/json",
+    "burrmill-ingest/parquet",
+    "dep:serde_json",
+    "dep:zstd-sys",
+]
 
 [[bin]]
 name = "ingest-operator"

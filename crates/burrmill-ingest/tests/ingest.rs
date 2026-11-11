@@ -116,7 +116,10 @@ fn every_corpus_file_finishes_without_leaking() {
             let msg = err.to_string();
             assert!(!msg.contains("CANARY_VALUE_991"), "{name}: {msg}");
             assert!(
-                matches!(err, IngestError::Unsupported { .. }),
+                matches!(
+                    err,
+                    IngestError::Unsupported { .. } | IngestError::Invalid { .. }
+                ),
                 "{name}: {err}"
             );
         } else {
@@ -137,7 +140,13 @@ fn parquet_zip_and_gzip_are_refused_before_parse() {
     ];
     for (name, format) in cases {
         let err = ingest_bytes(&corpus(name), FormatHint::Sniff, &Budget::untrusted()).unwrap_err();
-        assert_eq!(err, IngestError::Unsupported { format }, "{name}");
+        // Magic and nothing after it: opened with the feature, and not a readable file.
+        let want = if format == "parquet" && cfg!(feature = "parquet") {
+            IngestError::Invalid { format }
+        } else {
+            IngestError::Unsupported { format }
+        };
+        assert_eq!(err, want, "{name}");
     }
     // A caller who already knows it is CSV gets text, not a container open.
     let table = ingest_bytes(

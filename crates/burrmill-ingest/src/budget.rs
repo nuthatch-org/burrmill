@@ -9,6 +9,10 @@ pub struct Budget {
     pub max_rows: u64,
     pub max_columns: u64,
     pub max_cell_bytes: u64,
+    /// A JSON object's key, which becomes a column name.
+    pub max_key_bytes: u64,
+    /// Arrays and objects nested inside one JSON value.
+    pub max_depth: u64,
     pub max_memory_bytes: u64,
     pub sniff_bytes: u64,
     /// Off unless set. Ignored on wasm32; a set value there is a [`IngestError::Budget`] on `clock`.
@@ -28,6 +32,8 @@ impl Budget {
             max_rows: 5_000_000,
             max_columns: 1_024,
             max_cell_bytes: 1 << 20,
+            max_key_bytes: 1 << 10,
+            max_depth: 64,
             max_memory_bytes: 512 << 20,
             sniff_bytes: 64 << 10,
             max_millis: None,
@@ -51,6 +57,16 @@ impl Budget {
 
     pub fn max_cell_bytes(mut self, n: u64) -> Self {
         self.max_cell_bytes = n;
+        self
+    }
+
+    pub fn max_key_bytes(mut self, n: u64) -> Self {
+        self.max_key_bytes = n;
+        self
+    }
+
+    pub fn max_depth(mut self, n: u64) -> Self {
+        self.max_depth = n;
         self
     }
 
