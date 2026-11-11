@@ -373,7 +373,9 @@ thread_local! {
     static PLANNING: std::cell::RefCell<Option<CancelToken>> = const { std::cell::RefCell::new(None) };
 }
 
-/// `f`, with every planning rule it runs stopping once `token` is cancelled.
+/// `f`, with every planning rule it runs stopping once `token` is cancelled. Not for a tab: its
+/// one thread plans in a single stretch nothing else can cancel, and its statement is a future.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn planning<T>(token: &CancelToken, f: impl FnOnce() -> T) -> T {
     struct Restore(Option<CancelToken>);
     impl Drop for Restore {
