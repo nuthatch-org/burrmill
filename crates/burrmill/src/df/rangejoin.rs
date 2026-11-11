@@ -435,10 +435,7 @@ impl ExecutionPlan for RangeJoinExec {
         let (bounds, keep) = (self.bounds, self.join_type == JoinType::Right);
         let (projection, schema) = (self.projection.clone(), Arc::clone(&self.schema));
         let chunk = ctx.session_config().batch_size().max(1);
-        let token = ctx
-            .session_config()
-            .get_extension::<crate::CancelToken>()
-            .unwrap_or_default();
+        let token = Arc::new(super::cancel::statement_token(&ctx));
         let mut right = Some(self.right.execute(partition, Arc::clone(&ctx))?);
         let stream = futures::stream::once(async move {
             built

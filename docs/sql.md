@@ -46,6 +46,7 @@ wherever the statement names them.
 | `list`, `array_agg`, `string_agg` with `ORDER BY` | ordered aggregates | corpus |
 | `[x FOR x IN l IF p]`, `lambda x: ...` | list comprehension and lambdas | corpus |
 | `list_reverse_sort`, `split_part` (DuckDB's part 0) | DuckDB's answers | corpus |
+| `list_sum`, `list_min`, `list_max` | `sum`, `min`, `max` over the elements; an exact list sums to HUGEINT or `DECIMAL(38,s)` | corpus |
 | `TRY(x)`, `TRY_CAST` | NULL on failure, where that is certainly DuckDB's answer | corpus |
 | `to_timestamp(n)` | TIMESTAMPTZ, microseconds, UTC | corpus |
 | `date_trunc`, `DATE ± INTERVAL` | TIMESTAMP in microseconds | corpus |

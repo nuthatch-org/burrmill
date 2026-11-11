@@ -385,6 +385,12 @@ const CORPUS: &[&str] = &[
     "FROM label",
     "SELECT block_number FROM transfer ORDER BY 1 LIMIT 1.5",
     "SELECT block_number FROM transfer ORDER BY 1 LIMIT 0.4",
+    // `list_sum` is `sum` over the elements: HUGEINT for integers, DECIMAL(38,s) for decimals.
+    "SELECT list_sum([1, 2, 3]) AS a, list_sum([1.5, 2.25]) AS b, list_sum([1.5::DOUBLE, 2]) AS c, list_sum([]) AS d, list_sum(NULL) AS e, list_sum([NULL, 1]) AS f, list_sum([NULL::INT]) AS g",
+    "SELECT \"from\", list_sum(list(block_number)) AS s, list_sum(list(CAST(value AS HUGEINT))) AS v FROM transfer GROUP BY 1 ORDER BY 1",
+    "SELECT list_sum([1, 2]) * 2 AS a, list_sum([7, 2]) // 2 AS b",
+    "SELECT list_min([3, 1, NULL, 2]) AS a, list_max([3, 1, 2]) AS b, list_min([]) AS c, list_min(['b', 'a']) AS d, list_min(NULL) AS e",
+    "SELECT \"from\", list_min(list(block_number)) AS lo, list_max(list(log_index)) AS hi FROM transfer GROUP BY 1 ORDER BY 1",
     // DuckDB answers these; burrmill refuses each by name (#20).
     "SELECT approx_count_distinct(block_number) AS n FROM transfer",
     "SELECT list_aggregate([1, 2, 3], 'sum') AS a",

@@ -111,5 +111,6 @@ From `demo/index.html` and `demo/app.js`:
 - The page: `demo/egress.mjs` drives the page in Chromium with Playwright and fails if a canary cell
   appears in any request body or in the log, if the key is in a body, or if any host other than
   localhost and `api.anthropic.com` is contacted. `aggregates.mjs`, `pseudonym.mjs`, `local.mjs`,
-  `send.mjs`, `warn.mjs`, `offline.mjs` and `persist.mjs` cover the other modes and controls. These
-  are run by hand; CI does not run them.
+  `send.mjs`, `warn.mjs`, `offline.mjs` and `persist.mjs` cover the other modes and controls, and
+  `a11y.mjs` fails on any axe violation. CI's `demo` job builds the engine with `demo/build.sh` and
+  runs every `demo/*.mjs`.
