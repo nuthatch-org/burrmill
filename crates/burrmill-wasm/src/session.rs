@@ -335,6 +335,7 @@ impl Session {
             Failure {
                 feedback: feedback_error(&local),
                 local,
+                before_rows: true,
             }
         })
     }
@@ -348,18 +349,25 @@ impl Session {
     fn failure(&self, e: &burrmill::BurrmillError) -> Failure {
         use burrmill::BurrmillError as E;
         let local = self.fail(&e.to_string());
-        let feedback = match e {
-            E::Parse(_) | E::Plan(_) | E::NotAllowed(_) | E::NoSegments(_) => {
-                feedback_error(&local)
-            }
-            _ => json!({
+        let before_rows = matches!(
+            e,
+            E::Parse(_) | E::Plan(_) | E::NotAllowed(_) | E::NoSegments(_)
+        );
+        let feedback = if before_rows {
+            feedback_error(&local)
+        } else {
+            json!({
                 "error": "the statement planned and then failed while reading rows",
                 "kind": runtime_kind(&e.to_string()),
                 "note": "the message is not sent, since it can quote a cell",
             })
-            .to_string(),
+            .to_string()
         };
-        Failure { local, feedback }
+        Failure {
+            local,
+            feedback,
+            before_rows,
+        }
     }
 
     fn pack(&self, batches: Vec<RecordBatch>) -> QueryOut {
@@ -411,6 +419,8 @@ impl Session {
 pub struct Failure {
     pub local: String,
     pub feedback: String,
+    /// Raised before any row was read, so whether it happens is decided by the schema alone.
+    pub before_rows: bool,
 }
 
 /// A fixed word chosen from the message, so the message itself stays here.
@@ -758,6 +768,28 @@ posted,merchant,amount
             "{}",
             unplanned.feedback
         );
+    }
+
+    #[test]
+    fn only_a_failure_before_any_row_is_read_counts_as_one() {
+        let s = session();
+        for sql in [
+            "SELECT nosuch FROM t",
+            "SELECT nosuch(amount) FROM t",
+            "SELEC 1",
+            "SELECT * FROM other",
+            "SELECT 'a' - amount FROM t",
+        ] {
+            let failed = s.query(sql).unwrap_err();
+            assert!(failed.before_rows, "{sql}: {}", failed.local);
+        }
+        for sql in [
+            "SELECT CAST(merchant AS INTEGER) FROM t",
+            "SELECT CASE WHEN amount < -50 THEN CAST(merchant AS INT) END FROM t",
+        ] {
+            let failed = s.query(sql).unwrap_err();
+            assert!(!failed.before_rows, "{sql}: {}", failed.local);
+        }
     }
 
     #[test]

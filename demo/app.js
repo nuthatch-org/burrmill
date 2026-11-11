@@ -128,7 +128,10 @@ function describeMode() {
   } else if (mode === 'local-model') {
     blurb.textContent = 'Rows go to 127.0.0.1. Nothing leaves this machine.';
   } else {
-    blurb.textContent = 'The schema leaves this browser. The rows stay.';
+    blurb.textContent =
+      'The schema leaves this browser. The rows stay. A statement that does not plan goes back ' +
+      'for another try; one that finds no rows or fails while reading them stays on this page. ' +
+      'What the model can still learn is that its statement planned, which the schema decides.';
   }
   document.getElementById('port-label').hidden = mode !== 'local-model';
 }
@@ -739,6 +742,12 @@ async function ask() {
         continue;
       }
       const queried = await call('query', { sql: reply.sql });
+      // Whether a statement reads rows and then fails, or finds none, is about the data. In
+      // schema mode only a failure the schema decides goes back.
+      if (queried.error && mode === 'schema' && !queried.before_rows) {
+        status(queried.error);
+        return;
+      }
       if (queried.error) {
         feedback = queried.feedback;
         status(queried.error);
@@ -756,7 +765,7 @@ async function ask() {
         status(tokenStatus(feedback));
         continue;
       }
-      if (queried.answer.rows.length === 0 && attempt < 3) {
+      if (queried.answer.rows.length === 0 && attempt < 3 && mode !== 'schema') {
         feedback = queried.feedback;
         status('No rows. Asking again.');
         continue;
@@ -769,7 +778,7 @@ async function ask() {
         decimal: locale.decimal,
       });
       render(shown, reply.sql, queried.answer);
-      status('');
+      status(queried.answer.rows.length ? '' : 'No rows.');
       return;
     }
     status('No answer after 4 attempts.');

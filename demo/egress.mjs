@@ -55,14 +55,17 @@ page.on('request', (req) => {
   }
 });
 
+const total = {
+  sql: 'SELECT sum(amount) AS total FROM t',
+  chart: { kind: 'number', y: 'total' },
+  narration: 'The total is {r0.total}.',
+};
+// Each ask takes the next reply; once they run out the total answers.
+const replies = [];
 await page.route('https://api.anthropic.com/**', async (route) => {
   const body = route.request().postData() || '';
   bodies.push(body);
-  const reply = {
-    sql: 'SELECT sum(amount) AS total FROM t',
-    chart: { kind: 'number', y: 'total' },
-    narration: 'The total is {r0.total}.',
-  };
+  const reply = replies.shift() || total;
   await route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -89,17 +92,62 @@ await page.waitForFunction(
 
 const narration = await page.locator('#narration').innerText();
 const sql = await page.locator('#sql').innerText();
-const log = await page.locator('#log').innerText();
-const stored = await page.evaluate(() => ({
-  local: window.localStorage.getItem('burrmill-key'),
-  session: window.sessionStorage.getItem('burrmill-key'),
-}));
 
 let failed = false;
 function bad(message) {
   failed = true;
   console.error(message);
 }
+
+// In schema mode only a statement that does not plan earns a second request.
+async function askWith(label, queued, sends) {
+  replies.push(...queued);
+  const before = bodies.length;
+  await page.locator('#ask').click();
+  await page.waitForFunction(() => !document.getElementById('ask').disabled, null, {
+    timeout: 120000,
+  });
+  const got = bodies.length - before;
+  if (got !== sends) bad(label + ': ' + got + ' requests, expected ' + sends);
+  return { status: await page.locator('#status').innerText(), last: bodies[bodies.length - 1] };
+}
+
+const none = await askWith(
+  'zero rows',
+  [
+    {
+      sql: "SELECT merchant FROM t WHERE merchant = 'x@y.com'",
+      chart: { kind: 'table' },
+      narration: 'Here it is.',
+    },
+  ],
+  1,
+);
+if (!none.status.includes('No rows')) bad('zero rows status: ' + none.status);
+const broke = await askWith(
+  'failed while reading',
+  [
+    {
+      sql: 'SELECT CASE WHEN amount < -50 THEN CAST(merchant AS INT) END AS n FROM t',
+      chart: { kind: 'table' },
+      narration: 'Here it is.',
+    },
+  ],
+  1,
+);
+if (!broke.status) bad('a failure while reading rows showed nothing');
+const unplanned = await askWith(
+  'does not plan',
+  [{ sql: 'SELECT nosuch FROM t', chart: { kind: 'table' }, narration: 'Here it is.' }],
+  2,
+);
+if (!unplanned.last || !unplanned.last.includes('nosuch')) bad('the planner error did not go back');
+
+const log = await page.locator('#log').innerText();
+const stored = await page.evaluate(() => ({
+  local: window.localStorage.getItem('burrmill-key'),
+  session: window.sessionStorage.getItem('burrmill-key'),
+}));
 
 if (!narration.includes('-194.50')) bad('narration missing total: ' + narration);
 if (!sql.toLowerCase().includes('sum(amount)')) bad('sql missing: ' + sql);
