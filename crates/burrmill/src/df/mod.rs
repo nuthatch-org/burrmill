@@ -176,6 +176,8 @@ pub struct Engine {
     /// Stops every statement on the engine, in flight or still to come, until the host resets it.
     /// Each statement runs under a token of its own beneath this one.
     cancel: crate::CancelToken,
+    /// Whether `EXPLAIN` answers. Its plan names segment paths and the hidden registrations.
+    explain: std::sync::atomic::AtomicBool,
     /// The longest statement [`Engine::set_sql_limit`] admits.
     sql_limit: std::sync::atomic::AtomicUsize,
     /// Inside a host transaction: what each name it has touched was bound to before it.
@@ -304,6 +306,7 @@ impl Engine {
             threads: threads.max(1),
             gate,
             cancel,
+            explain: std::sync::atomic::AtomicBool::new(true),
             sql_limit: std::sync::atomic::AtomicUsize::new(SQL_LIMIT),
             txn: None,
             bound_segments: Default::default(),
@@ -416,6 +419,26 @@ impl Engine {
         self.session.limits().set_value_limit(bytes);
     }
 
+    /// Whether `EXPLAIN` and `EXPLAIN ANALYZE` answer or are refused. A host serving untrusted SQL
+    /// refuses them: a plan shows the server's segment paths and the `__raw`, `__hot` and `__union`
+    /// registrations the surface otherwise hides.
+    pub fn set_explain(&self, allowed: bool) {
+        self.explain
+            .store(allowed, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn refuse_explain(&self, plan: &datafusion_expr::LogicalPlan) -> Result<()> {
+        use datafusion_expr::LogicalPlan;
+        if matches!(plan, LogicalPlan::Explain(_) | LogicalPlan::Analyze(_))
+            && !self.explain.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(BurrmillError::NotAllowed(
+                "EXPLAIN is not served on this surface".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Bytes of Parquet footers the engine keeps between statements, outside the pool: at most an
     /// eighth of a budget, which the pool was sized without.
     pub fn footer_cache_bytes(&self) -> usize {
@@ -520,6 +543,7 @@ impl Engine {
         refuse_hidden_names(sql)?;
         let logical = plan_query(&self.session, sql, token)?;
         refuse_non_query(sql)?;
+        self.refuse_explain(&logical)?;
         let logical = params::bind(logical, params)?;
         // The host arms the engine's token and clears it. Clearing it here would run a statement
         // whose cancel arrived before it, or while it was still being planned.
@@ -602,6 +626,7 @@ impl Engine {
         let token = crate::CancelToken::under(&[&self.cancel], None);
         let logical = plan_query(&self.session, sql, &token)?;
         refuse_non_query(sql)?;
+        self.refuse_explain(&logical)?;
         let logical = params::bind(logical, params)?;
         if token.is_cancelled() {
             return Err(BurrmillError::Cancelled);
@@ -813,6 +838,7 @@ impl Engine {
         refuse_hidden_names(sql)?;
         let logical = plan_query(&self.session, sql, &self.cancel)?;
         refuse_non_query(sql)?;
+        self.refuse_explain(&logical)?;
         let logical = params::bind(logical, params)?;
         let plan = || {
             cancel::planning(&self.cancel, || {
