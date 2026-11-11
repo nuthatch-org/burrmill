@@ -1,0 +1,455 @@
+host-scan on the ThinkPad, 2026-11-11: what the scan side costs on the path nuthatch drives.
+
+  burrmill-bench host-scan <nest> <queries.tsv>     STATEMENT_ROUNDS=0, ROUNDS=5 (the default)
+
+base is main at 99f0ffb with the probe; all is the same with burrmill#267 (one footer cache for
+local segments), #268 (file lists reused) and #269 (a scan charged as it opens segments). Each
+nest ran base then all, twice, under one lock (c1, c2). 32 cores; the load average is at the head
+of each run and was 64 to 100 throughout, from work that was not ours to stop, so read the pairs
+and not the absolute times.
+
+  alloc  ~/1165-corpus/graph-allocations-nest-next   1,924 segments   2,048 MB, 8 threads
+  gate   ~/release-gate/alloc-nest                   6,753 segments   2,048 MB, 8 threads
+  qos    ~/release-gate/qos-nest                    14,913 segments     704 MB, 4 threads
+
+Three engines in one process. Each counts every table (a count reads nothing of a segment but its
+footer): first/counts/cold is the process's first read of each footer, second/counts/cold is a new
+engine's first pass with the page cache warm, third is the same metered. REBIND is register_facts
+for every table again on the third engine. scan_peak_kb is from a counter patched into cancel.rs
+for this measurement, which the probe as landed does not print; allocs is 0 without
+--features alloc-stats.
+
+Medians, wall ms (cpu ms):
+
+  run           OPEN second                 second/counts/cold          second/counts/warm          third/metered-counts/cold   third/metered-counts/warm   REBIND
+  base alloc c1 276 (185)                   1179 (1122)                 840 (670)                   1298 (1188)                 868 (690)                   222 (154)
+  all alloc c1  214 (138)                   756 (576)                   683 (586)                   649 (606)                   668 (615)                   137 (106)
+  base alloc c2 280 (209)                   1119 (1170)                 802 (655)                   1240 (1276)                 959 (722)                   220 (170)
+  all alloc c2  240 (175)                   859 (701)                   745 (676)                   812 (709)                   757 (698)                   146 (135)
+  base gate c1  283 (221)                   1935 (2532)                 1032 (1113)                 1976 (2803)                 1140 (1259)                 246 (201)
+  all gate c1   286 (157)                   1174 (1126)                 1133 (1173)                 1076 (1219)                 1142 (1237)                 189 (116)
+  base gate c2  381 (232)                   2484 (2629)                 1191 (1218)                 2242 (2825)                 1240 (1259)                 265 (233)
+  all gate c2   221 (176)                   1224 (1225)                 1070 (1212)                 1177 (1291)                 1147 (1206)                 163 (139)
+  base qos c1   200 (169)                   3996 (5584)                 3876 (5578)                 3488 (6371)                 3623 (6521)                 169 (168)
+  all qos c1    66 (28)                     4924 (6287)                 5120 (6280)                 4385 (7286)                 3851 (6738)                 13 (10)
+  base qos c2   318 (206)                   4354 (5761)                 4628 (5740)                 4802 (6561)                 4947 (6968)                 198 (196)
+  all qos c2    42 (29)                     4409 (6240)                 4480 (5875)                 4878 (7432)                 4889 (7131)                 10 (10)
+
+The runs:
+
+== base alloc c1
+# 2026-11-11T11:44:22Z load=76.24 87.70 87.01 variant=base nest=alloc STATEMENT_ROUNDS=0
+NEST	tables=81	segments=1924	views=19	statements=75	budget_mb=2048	threads=8
+OPEN	first	wall_ms=421.3	cpu_ms=319	bind_footer_reads=1924
+PASS	wall_ms=1107.5	cpu_ms=1057	first/counts/cold	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=677.9	cpu_ms=628	first/counts/warm	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=744.7	cpu_ms=630	first/counts/warm	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=712.3	cpu_ms=594	first/counts/warm	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=782.9	cpu_ms=588	first/counts/warm	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+OPEN	second	wall_ms=275.7	cpu_ms=185	bind_footer_reads=0
+PASS	wall_ms=1179.0	cpu_ms=1122	second/counts/cold	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=809.5	cpu_ms=675	second/counts/warm	refused=0	scan_peak_kb=898	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=832.0	cpu_ms=653	second/counts/warm	refused=0	scan_peak_kb=856	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=850.0	cpu_ms=666	second/counts/warm	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=848.2	cpu_ms=679	second/counts/warm	refused=0	scan_peak_kb=898	pool_peak_mb=0	footer_cache_kb=22291
+OPEN	third	wall_ms=308.3	cpu_ms=182	bind_footer_reads=0
+PASS	wall_ms=1297.6	cpu_ms=1188	third/metered-counts/cold	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=889.8	cpu_ms=710	third/metered-counts/warm	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=811.7	cpu_ms=704	third/metered-counts/warm	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=862.7	cpu_ms=675	third/metered-counts/warm	refused=0	scan_peak_kb=898	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=872.3	cpu_ms=674	third/metered-counts/warm	refused=0	scan_peak_kb=898	pool_peak_mb=0	footer_cache_kb=22291
+REBIND	wall_ms=215.1	cpu_ms=156	segments=1924
+REBIND	wall_ms=226.5	cpu_ms=147	segments=1924
+REBIND	wall_ms=195.1	cpu_ms=154	segments=1924
+REBIND	wall_ms=263.2	cpu_ms=159	segments=1924
+REBIND	wall_ms=222.3	cpu_ms=153	segments=1924
+PASS	wall_ms=770.4	cpu_ms=599	third/rebound	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+
+== all alloc c1
+# 2026-11-11T11:44:46Z load=72.12 85.86 86.42 variant=all nest=alloc STATEMENT_ROUNDS=0
+NEST	tables=81	segments=1924	views=19	statements=75	budget_mb=2048	threads=8
+OPEN	first	wall_ms=421.2	cpu_ms=315	bind_footer_reads=1924
+PASS	wall_ms=1004.2	cpu_ms=1039	first/counts/cold	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=699.3	cpu_ms=596	first/counts/warm	refused=0	scan_peak_kb=882	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=651.8	cpu_ms=579	first/counts/warm	refused=0	scan_peak_kb=905	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=676.6	cpu_ms=602	first/counts/warm	refused=0	scan_peak_kb=854	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=687.0	cpu_ms=603	first/counts/warm	refused=0	scan_peak_kb=889	pool_peak_mb=0	footer_cache_kb=22291
+OPEN	second	wall_ms=214.2	cpu_ms=138	bind_footer_reads=0
+PASS	wall_ms=755.7	cpu_ms=576	second/counts/cold	refused=0	scan_peak_kb=880	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=746.0	cpu_ms=567	second/counts/warm	refused=0	scan_peak_kb=857	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=698.3	cpu_ms=585	second/counts/warm	refused=0	scan_peak_kb=851	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=668.6	cpu_ms=594	second/counts/warm	refused=0	scan_peak_kb=875	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=609.7	cpu_ms=588	second/counts/warm	refused=0	scan_peak_kb=880	pool_peak_mb=0	footer_cache_kb=22291
+OPEN	third	wall_ms=205.1	cpu_ms=138	bind_footer_reads=0
+PASS	wall_ms=648.7	cpu_ms=606	third/metered-counts/cold	refused=0	scan_peak_kb=887	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=683.6	cpu_ms=610	third/metered-counts/warm	refused=0	scan_peak_kb=847	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=648.2	cpu_ms=604	third/metered-counts/warm	refused=0	scan_peak_kb=905	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=721.2	cpu_ms=627	third/metered-counts/warm	refused=0	scan_peak_kb=889	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=652.1	cpu_ms=620	third/metered-counts/warm	refused=0	scan_peak_kb=905	pool_peak_mb=0	footer_cache_kb=22291
+REBIND	wall_ms=154.9	cpu_ms=113	segments=1924
+REBIND	wall_ms=128.5	cpu_ms=103	segments=1924
+REBIND	wall_ms=123.1	cpu_ms=103	segments=1924
+REBIND	wall_ms=137.3	cpu_ms=107	segments=1924
+REBIND	wall_ms=142.9	cpu_ms=106	segments=1924
+PASS	wall_ms=531.1	cpu_ms=544	third/rebound	refused=0	scan_peak_kb=880	pool_peak_mb=0	footer_cache_kb=22291
+
+== base alloc c2
+# 2026-11-11T11:48:38Z load=76.67 79.18 83.38 variant=base nest=alloc STATEMENT_ROUNDS=0
+NEST	tables=81	segments=1924	views=19	statements=75	budget_mb=2048	threads=8
+OPEN	first	wall_ms=496.7	cpu_ms=348	bind_footer_reads=1924
+PASS	wall_ms=1013.9	cpu_ms=1167	first/counts/cold	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=833.3	cpu_ms=690	first/counts/warm	refused=0	scan_peak_kb=898	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=672.1	cpu_ms=677	first/counts/warm	refused=0	scan_peak_kb=666	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=772.3	cpu_ms=674	first/counts/warm	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=748.6	cpu_ms=719	first/counts/warm	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+OPEN	second	wall_ms=280.2	cpu_ms=209	bind_footer_reads=0
+PASS	wall_ms=1119.4	cpu_ms=1170	second/counts/cold	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=754.3	cpu_ms=661	second/counts/warm	refused=0	scan_peak_kb=898	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=841.6	cpu_ms=626	second/counts/warm	refused=0	scan_peak_kb=856	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=826.9	cpu_ms=649	second/counts/warm	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=776.8	cpu_ms=683	second/counts/warm	refused=0	scan_peak_kb=898	pool_peak_mb=0	footer_cache_kb=22291
+OPEN	third	wall_ms=354.8	cpu_ms=213	bind_footer_reads=0
+PASS	wall_ms=1240.2	cpu_ms=1276	third/metered-counts/cold	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=962.7	cpu_ms=762	third/metered-counts/warm	refused=0	scan_peak_kb=793	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=961.0	cpu_ms=713	third/metered-counts/warm	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=721.8	cpu_ms=673	third/metered-counts/warm	refused=0	scan_peak_kb=652	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=957.1	cpu_ms=732	third/metered-counts/warm	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+REBIND	wall_ms=229.0	cpu_ms=165	segments=1924
+REBIND	wall_ms=202.4	cpu_ms=170	segments=1924
+REBIND	wall_ms=200.5	cpu_ms=169	segments=1924
+REBIND	wall_ms=220.3	cpu_ms=170	segments=1924
+REBIND	wall_ms=246.5	cpu_ms=177	segments=1924
+PASS	wall_ms=746.1	cpu_ms=669	third/rebound	refused=0	scan_peak_kb=695	pool_peak_mb=0	footer_cache_kb=22291
+
+== all alloc c2
+# 2026-11-11T11:48:55Z load=75.13 78.70 83.14 variant=all nest=alloc STATEMENT_ROUNDS=0
+NEST	tables=81	segments=1924	views=19	statements=75	budget_mb=2048	threads=8
+OPEN	first	wall_ms=584.3	cpu_ms=371	bind_footer_reads=1924
+PASS	wall_ms=1336.1	cpu_ms=1179	first/counts/cold	refused=0	scan_peak_kb=909	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=826.9	cpu_ms=649	first/counts/warm	refused=0	scan_peak_kb=856	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=821.5	cpu_ms=627	first/counts/warm	refused=0	scan_peak_kb=896	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=787.5	cpu_ms=657	first/counts/warm	refused=0	scan_peak_kb=900	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=792.5	cpu_ms=699	first/counts/warm	refused=0	scan_peak_kb=804	pool_peak_mb=0	footer_cache_kb=22291
+OPEN	second	wall_ms=240.5	cpu_ms=175	bind_footer_reads=0
+PASS	wall_ms=858.6	cpu_ms=701	second/counts/cold	refused=0	scan_peak_kb=856	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=709.0	cpu_ms=667	second/counts/warm	refused=0	scan_peak_kb=905	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=687.2	cpu_ms=657	second/counts/warm	refused=0	scan_peak_kb=794	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=787.0	cpu_ms=688	second/counts/warm	refused=0	scan_peak_kb=850	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=780.6	cpu_ms=686	second/counts/warm	refused=0	scan_peak_kb=774	pool_peak_mb=0	footer_cache_kb=22291
+OPEN	third	wall_ms=218.2	cpu_ms=182	bind_footer_reads=0
+PASS	wall_ms=812.1	cpu_ms=709	third/metered-counts/cold	refused=0	scan_peak_kb=865	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=748.1	cpu_ms=702	third/metered-counts/warm	refused=0	scan_peak_kb=900	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=812.4	cpu_ms=705	third/metered-counts/warm	refused=0	scan_peak_kb=847	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=765.1	cpu_ms=694	third/metered-counts/warm	refused=0	scan_peak_kb=900	pool_peak_mb=0	footer_cache_kb=22291
+PASS	wall_ms=704.8	cpu_ms=664	third/metered-counts/warm	refused=0	scan_peak_kb=809	pool_peak_mb=0	footer_cache_kb=22291
+REBIND	wall_ms=146.0	cpu_ms=136	segments=1924
+REBIND	wall_ms=139.5	cpu_ms=133	segments=1924
+REBIND	wall_ms=146.7	cpu_ms=135	segments=1924
+REBIND	wall_ms=172.7	cpu_ms=139	segments=1924
+REBIND	wall_ms=143.5	cpu_ms=135	segments=1924
+PASS	wall_ms=713.9	cpu_ms=642	third/rebound	refused=0	scan_peak_kb=856	pool_peak_mb=0	footer_cache_kb=22291
+
+== base gate c1
+# 2026-11-11T11:41:13Z load=100.15 96.72 89.08 variant=base nest=gate STATEMENT_ROUNDS=0
+NEST	tables=83	segments=6753	views=23	statements=75	budget_mb=2048	threads=8
+OPEN	first	wall_ms=696.6	cpu_ms=605	bind_footer_reads=6753
+PASS	wall_ms=1850.1	cpu_ms=2507	first/counts/cold	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=975.1	cpu_ms=1142	first/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=951.2	cpu_ms=1124	first/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=945.5	cpu_ms=1148	first/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=984.6	cpu_ms=1146	first/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+OPEN	second	wall_ms=282.9	cpu_ms=221	bind_footer_reads=0
+PASS	wall_ms=1934.6	cpu_ms=2532	second/counts/cold	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1040.0	cpu_ms=1181	second/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=969.4	cpu_ms=1138	second/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1024.1	cpu_ms=1088	second/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1047.1	cpu_ms=1075	second/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+OPEN	third	wall_ms=257.7	cpu_ms=195	bind_footer_reads=0
+PASS	wall_ms=1976.1	cpu_ms=2803	third/metered-counts/cold	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1170.3	cpu_ms=1268	third/metered-counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1177.4	cpu_ms=1295	third/metered-counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1071.9	cpu_ms=1250	third/metered-counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1110.6	cpu_ms=1241	third/metered-counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+REBIND	wall_ms=305.4	cpu_ms=219	segments=6753
+REBIND	wall_ms=262.1	cpu_ms=212	segments=6753
+REBIND	wall_ms=245.6	cpu_ms=201	segments=6753
+REBIND	wall_ms=235.6	cpu_ms=196	segments=6753
+REBIND	wall_ms=231.2	cpu_ms=194	segments=6753
+PASS	wall_ms=990.2	cpu_ms=1152	third/rebound	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+
+== all gate c1
+# 2026-11-11T11:43:53Z load=79.71 89.30 87.49 variant=all nest=gate STATEMENT_ROUNDS=0
+NEST	tables=83	segments=6753	views=23	statements=75	budget_mb=2048	threads=8
+OPEN	first	wall_ms=754.9	cpu_ms=641	bind_footer_reads=6753
+PASS	wall_ms=1820.6	cpu_ms=2503	first/counts/cold	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1097.0	cpu_ms=1148	first/counts/warm	refused=0	scan_peak_kb=4936	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1051.0	cpu_ms=1151	first/counts/warm	refused=0	scan_peak_kb=4941	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1067.8	cpu_ms=1179	first/counts/warm	refused=0	scan_peak_kb=4936	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1147.7	cpu_ms=1177	first/counts/warm	refused=0	scan_peak_kb=4941	pool_peak_mb=4	footer_cache_kb=75249
+OPEN	second	wall_ms=286.3	cpu_ms=157	bind_footer_reads=0
+PASS	wall_ms=1174.5	cpu_ms=1126	second/counts/cold	refused=0	scan_peak_kb=4927	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1140.2	cpu_ms=1166	second/counts/warm	refused=0	scan_peak_kb=4941	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1126.3	cpu_ms=1188	second/counts/warm	refused=0	scan_peak_kb=4918	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1027.2	cpu_ms=1156	second/counts/warm	refused=0	scan_peak_kb=4923	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1187.9	cpu_ms=1180	second/counts/warm	refused=0	scan_peak_kb=4936	pool_peak_mb=4	footer_cache_kb=75249
+OPEN	third	wall_ms=213.7	cpu_ms=143	bind_footer_reads=0
+PASS	wall_ms=1075.6	cpu_ms=1219	third/metered-counts/cold	refused=0	scan_peak_kb=4918	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1368.1	cpu_ms=1230	third/metered-counts/warm	refused=0	scan_peak_kb=4918	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1133.5	cpu_ms=1260	third/metered-counts/warm	refused=0	scan_peak_kb=4927	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1118.7	cpu_ms=1244	third/metered-counts/warm	refused=0	scan_peak_kb=4936	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1151.5	cpu_ms=1208	third/metered-counts/warm	refused=0	scan_peak_kb=4932	pool_peak_mb=4	footer_cache_kb=75249
+REBIND	wall_ms=200.9	cpu_ms=136	segments=6753
+REBIND	wall_ms=189.3	cpu_ms=126	segments=6753
+REBIND	wall_ms=206.5	cpu_ms=115	segments=6753
+REBIND	wall_ms=145.4	cpu_ms=116	segments=6753
+REBIND	wall_ms=188.7	cpu_ms=109	segments=6753
+PASS	wall_ms=1053.6	cpu_ms=1140	third/rebound	refused=0	scan_peak_kb=4936	pool_peak_mb=4	footer_cache_kb=75249
+
+== base gate c2
+# 2026-11-11T11:47:49Z load=75.89 79.49 83.69 variant=base nest=gate STATEMENT_ROUNDS=0
+NEST	tables=83	segments=6753	views=23	statements=75	budget_mb=2048	threads=8
+OPEN	first	wall_ms=787.8	cpu_ms=668	bind_footer_reads=6753
+PASS	wall_ms=1844.3	cpu_ms=2420	first/counts/cold	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1003.4	cpu_ms=1125	first/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1032.4	cpu_ms=1142	first/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1073.2	cpu_ms=1141	first/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1182.3	cpu_ms=1109	first/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+OPEN	second	wall_ms=380.6	cpu_ms=232	bind_footer_reads=0
+PASS	wall_ms=2483.5	cpu_ms=2629	second/counts/cold	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1293.1	cpu_ms=1234	second/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1216.9	cpu_ms=1195	second/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1165.0	cpu_ms=1203	second/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1061.5	cpu_ms=1240	second/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+OPEN	third	wall_ms=351.7	cpu_ms=247	bind_footer_reads=0
+PASS	wall_ms=2242.2	cpu_ms=2825	third/metered-counts/cold	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1252.9	cpu_ms=1261	third/metered-counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1166.5	cpu_ms=1187	third/metered-counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1321.5	cpu_ms=1302	third/metered-counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1226.4	cpu_ms=1257	third/metered-counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+REBIND	wall_ms=250.1	cpu_ms=232	segments=6753
+REBIND	wall_ms=242.3	cpu_ms=225	segments=6753
+REBIND	wall_ms=281.4	cpu_ms=250	segments=6753
+REBIND	wall_ms=291.3	cpu_ms=239	segments=6753
+REBIND	wall_ms=265.2	cpu_ms=233	segments=6753
+PASS	wall_ms=1216.7	cpu_ms=1240	third/rebound	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+
+== all gate c2
+# 2026-11-11T11:48:15Z load=77.54 79.53 83.59 variant=all nest=gate STATEMENT_ROUNDS=0
+NEST	tables=83	segments=6753	views=23	statements=75	budget_mb=2048	threads=8
+OPEN	first	wall_ms=966.2	cpu_ms=720	bind_footer_reads=6753
+PASS	wall_ms=2255.0	cpu_ms=2627	first/counts/cold	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1393.2	cpu_ms=1214	first/counts/warm	refused=0	scan_peak_kb=4932	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1318.0	cpu_ms=1162	first/counts/warm	refused=0	scan_peak_kb=4914	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1145.9	cpu_ms=1126	first/counts/warm	refused=0	scan_peak_kb=4932	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1115.2	cpu_ms=1209	first/counts/warm	refused=0	scan_peak_kb=4932	pool_peak_mb=4	footer_cache_kb=75249
+OPEN	second	wall_ms=220.7	cpu_ms=176	bind_footer_reads=0
+PASS	wall_ms=1223.8	cpu_ms=1225	second/counts/cold	refused=0	scan_peak_kb=4932	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1048.9	cpu_ms=1209	second/counts/warm	refused=0	scan_peak_kb=4932	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1041.3	cpu_ms=1189	second/counts/warm	refused=0	scan_peak_kb=4941	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1091.8	cpu_ms=1217	second/counts/warm	refused=0	scan_peak_kb=4927	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1154.5	cpu_ms=1214	second/counts/warm	refused=0	scan_peak_kb=4923	pool_peak_mb=4	footer_cache_kb=75249
+OPEN	third	wall_ms=213.2	cpu_ms=147	bind_footer_reads=0
+PASS	wall_ms=1176.7	cpu_ms=1291	third/metered-counts/cold	refused=0	scan_peak_kb=4932	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1197.1	cpu_ms=1269	third/metered-counts/warm	refused=0	scan_peak_kb=4941	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1152.6	cpu_ms=1154	third/metered-counts/warm	refused=0	scan_peak_kb=4932	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1030.7	cpu_ms=1192	third/metered-counts/warm	refused=0	scan_peak_kb=4927	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1140.7	cpu_ms=1221	third/metered-counts/warm	refused=0	scan_peak_kb=4932	pool_peak_mb=4	footer_cache_kb=75249
+REBIND	wall_ms=143.5	cpu_ms=137	segments=6753
+REBIND	wall_ms=162.9	cpu_ms=140	segments=6753
+REBIND	wall_ms=177.5	cpu_ms=139	segments=6753
+REBIND	wall_ms=205.9	cpu_ms=141	segments=6753
+REBIND	wall_ms=157.3	cpu_ms=138	segments=6753
+PASS	wall_ms=1161.7	cpu_ms=1192	third/rebound	refused=0	scan_peak_kb=4914	pool_peak_mb=4	footer_cache_kb=75249
+
+== base qos c1
+# 2026-11-11T11:45:06Z load=64.22 83.19 85.53 variant=base nest=qos STATEMENT_ROUNDS=0
+NEST	tables=6	segments=14913	views=23	statements=9	budget_mb=704	threads=4
+OPEN	first	wall_ms=8645.1	cpu_ms=3160	bind_footer_reads=14913
+PASS	wall_ms=5087.4	cpu_ms=5895	first/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=5006.5	cpu_ms=6032	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=5021.5	cpu_ms=5918	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4005.7	cpu_ms=5704	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=3925.9	cpu_ms=5780	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+OPEN	second	wall_ms=200.1	cpu_ms=169	bind_footer_reads=0
+PASS	wall_ms=3995.9	cpu_ms=5584	second/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=3934.3	cpu_ms=5652	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=3894.1	cpu_ms=5667	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=3768.7	cpu_ms=5505	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=3857.8	cpu_ms=5393	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+OPEN	third	wall_ms=179.5	cpu_ms=179	bind_footer_reads=0
+PASS	wall_ms=3488.2	cpu_ms=6371	third/metered-counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=3556.5	cpu_ms=6484	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=3938.5	cpu_ms=6550	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=3689.2	cpu_ms=6665	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=3488.0	cpu_ms=6492	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+REBIND	wall_ms=156.8	cpu_ms=154	segments=14913
+REBIND	wall_ms=180.3	cpu_ms=180	segments=14913
+REBIND	wall_ms=168.7	cpu_ms=168	segments=14913
+REBIND	wall_ms=182.7	cpu_ms=180	segments=14913
+REBIND	wall_ms=154.0	cpu_ms=151	segments=14913
+PASS	wall_ms=3999.7	cpu_ms=5439	third/rebound	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+
+== all qos c1
+# 2026-11-11T11:46:29Z load=64.69 79.66 84.13 variant=all nest=qos STATEMENT_ROUNDS=0
+NEST	tables=6	segments=14913	views=23	statements=9	budget_mb=704	threads=4
+OPEN	first	wall_ms=1673.1	cpu_ms=1659	bind_footer_reads=14913
+PASS	wall_ms=3929.9	cpu_ms=5425	first/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=3750.0	cpu_ms=5476	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=3786.2	cpu_ms=5479	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4629.5	cpu_ms=6007	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4590.8	cpu_ms=6139	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+OPEN	second	wall_ms=66.1	cpu_ms=28	bind_footer_reads=0
+PASS	wall_ms=4924.2	cpu_ms=6287	second/counts/cold	refused=0	scan_peak_kb=41207	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=5361.9	cpu_ms=6193	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4835.2	cpu_ms=6269	second/counts/warm	refused=0	scan_peak_kb=41202	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=5430.6	cpu_ms=6290	second/counts/warm	refused=0	scan_peak_kb=41207	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4879.1	cpu_ms=6388	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+OPEN	third	wall_ms=24.6	cpu_ms=15	bind_footer_reads=0
+PASS	wall_ms=4384.7	cpu_ms=7286	third/metered-counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4553.9	cpu_ms=7015	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=3740.2	cpu_ms=6835	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=3740.2	cpu_ms=6640	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=3961.6	cpu_ms=6521	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+REBIND	wall_ms=13.4	cpu_ms=11	segments=14913
+REBIND	wall_ms=19.8	cpu_ms=8	segments=14913
+REBIND	wall_ms=11.7	cpu_ms=10	segments=14913
+REBIND	wall_ms=9.9	cpu_ms=10	segments=14913
+REBIND	wall_ms=17.6	cpu_ms=10	segments=14913
+PASS	wall_ms=4041.5	cpu_ms=5741	third/rebound	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+
+== base qos c2
+# 2026-11-11T11:49:10Z load=76.18 78.79 83.10 variant=base nest=qos STATEMENT_ROUNDS=0
+NEST	tables=6	segments=14913	views=23	statements=9	budget_mb=704	threads=4
+OPEN	first	wall_ms=2016.4	cpu_ms=1978	bind_footer_reads=14913
+PASS	wall_ms=4409.6	cpu_ms=5700	first/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4247.9	cpu_ms=5808	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4419.6	cpu_ms=5427	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4320.3	cpu_ms=5992	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4450.7	cpu_ms=5973	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+OPEN	second	wall_ms=317.9	cpu_ms=206	bind_footer_reads=0
+PASS	wall_ms=4353.9	cpu_ms=5761	second/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4503.8	cpu_ms=5610	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4253.3	cpu_ms=5849	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4808.8	cpu_ms=5973	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4753.1	cpu_ms=5632	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+OPEN	third	wall_ms=229.9	cpu_ms=205	bind_footer_reads=0
+PASS	wall_ms=4801.7	cpu_ms=6561	third/metered-counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=5016.1	cpu_ms=6653	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4860.6	cpu_ms=7052	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=5198.2	cpu_ms=6884	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4878.5	cpu_ms=7201	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+REBIND	wall_ms=199.8	cpu_ms=198	segments=14913
+REBIND	wall_ms=197.2	cpu_ms=193	segments=14913
+REBIND	wall_ms=215.0	cpu_ms=197	segments=14913
+REBIND	wall_ms=197.6	cpu_ms=196	segments=14913
+REBIND	wall_ms=194.6	cpu_ms=194	segments=14913
+PASS	wall_ms=4243.4	cpu_ms=5419	third/rebound	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+
+== all qos c2
+# 2026-11-11T11:50:28Z load=83.10 80.53 83.36 variant=all nest=qos STATEMENT_ROUNDS=0
+NEST	tables=6	segments=14913	views=23	statements=9	budget_mb=704	threads=4
+OPEN	first	wall_ms=2286.4	cpu_ms=2073	bind_footer_reads=14913
+PASS	wall_ms=3957.3	cpu_ms=5847	first/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4179.5	cpu_ms=5597	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4834.5	cpu_ms=5840	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4793.0	cpu_ms=5806	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4914.6	cpu_ms=6084	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+OPEN	second	wall_ms=42.2	cpu_ms=29	bind_footer_reads=0
+PASS	wall_ms=4409.4	cpu_ms=6240	second/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4555.8	cpu_ms=5810	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4488.7	cpu_ms=5758	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4470.9	cpu_ms=5982	second/counts/warm	refused=0	scan_peak_kb=41207	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4120.9	cpu_ms=5940	second/counts/warm	refused=0	scan_peak_kb=41202	pool_peak_mb=41	footer_cache_kb=90096
+OPEN	third	wall_ms=45.9	cpu_ms=15	bind_footer_reads=0
+PASS	wall_ms=4877.9	cpu_ms=7432	third/metered-counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4833.0	cpu_ms=7218	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4481.4	cpu_ms=6891	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=5118.4	cpu_ms=7158	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+PASS	wall_ms=4944.5	cpu_ms=7104	third/metered-counts/warm	refused=0	scan_peak_kb=41207	pool_peak_mb=41	footer_cache_kb=90096
+REBIND	wall_ms=9.8	cpu_ms=10	segments=14913
+REBIND	wall_ms=9.1	cpu_ms=9	segments=14913
+REBIND	wall_ms=9.9	cpu_ms=9	segments=14913
+REBIND	wall_ms=15.4	cpu_ms=11	segments=14913
+REBIND	wall_ms=10.5	cpu_ms=10	segments=14913
+PASS	wall_ms=4630.1	cpu_ms=6097	third/rebound	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=90096
+
+QoS again at 2,048 MB, where the footer cache may hold 256 MB: it fills that too.
+
+== base qos, BUDGET_MB=2048
+# 2026-11-11T11:58:43Z load=94.69 88.52 86.04 variant=base nest=qos BUDGET_MB=2048 STATEMENT_ROUNDS=0
+NEST	tables=6	segments=14913	views=23	statements=9	budget_mb=2048	threads=4
+OPEN	first	wall_ms=1719.1	cpu_ms=1667	bind_footer_reads=14913
+PASS	wall_ms=5078.5	cpu_ms=6087	first/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=5188.2	cpu_ms=5991	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=5203.9	cpu_ms=5704	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=5403.9	cpu_ms=5769	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=5089.7	cpu_ms=5728	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+OPEN	second	wall_ms=314.2	cpu_ms=222	bind_footer_reads=0
+PASS	wall_ms=4999.1	cpu_ms=5880	second/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=4789.2	cpu_ms=5580	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=4700.9	cpu_ms=5172	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=4944.8	cpu_ms=5859	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=5244.3	cpu_ms=5738	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+OPEN	third	wall_ms=243.8	cpu_ms=192	bind_footer_reads=0
+PASS	wall_ms=5289.5	cpu_ms=7060	third/metered-counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=4721.1	cpu_ms=6559	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=5374.7	cpu_ms=6592	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=5310.6	cpu_ms=6627	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=5754.2	cpu_ms=6625	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+REBIND	wall_ms=245.5	cpu_ms=202	segments=14913
+REBIND	wall_ms=230.1	cpu_ms=201	segments=14913
+REBIND	wall_ms=195.9	cpu_ms=192	segments=14913
+REBIND	wall_ms=198.6	cpu_ms=189	segments=14913
+REBIND	wall_ms=199.8	cpu_ms=191	segments=14913
+PASS	wall_ms=5014.9	cpu_ms=6155	third/rebound	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+
+== all qos, BUDGET_MB=2048
+# 2026-11-11T12:00:10Z load=86.34 87.04 85.73 variant=all nest=qos BUDGET_MB=2048 STATEMENT_ROUNDS=0
+NEST	tables=6	segments=14913	views=23	statements=9	budget_mb=2048	threads=4
+OPEN	first	wall_ms=2361.9	cpu_ms=2078	bind_footer_reads=14913
+PASS	wall_ms=4621.0	cpu_ms=5467	first/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=5152.7	cpu_ms=5721	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=4987.8	cpu_ms=5822	first/counts/warm	refused=0	scan_peak_kb=41207	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=4040.2	cpu_ms=5625	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=4057.0	cpu_ms=5428	first/counts/warm	refused=0	scan_peak_kb=41207	pool_peak_mb=41	footer_cache_kb=262141
+OPEN	second	wall_ms=37.1	cpu_ms=31	bind_footer_reads=0
+PASS	wall_ms=5462.9	cpu_ms=5949	second/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=5251.3	cpu_ms=5951	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=4963.8	cpu_ms=5670	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=4675.0	cpu_ms=5593	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=5068.1	cpu_ms=5910	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+OPEN	third	wall_ms=34.1	cpu_ms=19	bind_footer_reads=0
+PASS	wall_ms=5351.3	cpu_ms=7106	third/metered-counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=4970.7	cpu_ms=6964	third/metered-counts/warm	refused=0	scan_peak_kb=41207	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=4859.3	cpu_ms=6544	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=4632.2	cpu_ms=6731	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+PASS	wall_ms=5337.1	cpu_ms=6839	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+REBIND	wall_ms=41.5	cpu_ms=17	segments=14913
+REBIND	wall_ms=12.1	cpu_ms=12	segments=14913
+REBIND	wall_ms=12.5	cpu_ms=13	segments=14913
+REBIND	wall_ms=12.2	cpu_ms=12	segments=14913
+REBIND	wall_ms=19.7	cpu_ms=13	segments=14913
+PASS	wall_ms=4474.7	cpu_ms=5792	third/rebound	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=262141
+
+And at 8,192 MB, ROUNDS=3, where the cache may hold 1 GiB: the footers take 341 MB, and a warm
+count is a quarter of a cold one.
+
+== base qos, BUDGET_MB=8192
+# 2026-11-11T12:40:22Z load=108.27 98.93 94.26 variant=base nest=qos BUDGET_MB=8192 STATEMENT_ROUNDS=0 ROUNDS=3
+NEST	tables=6	segments=14913	views=23	statements=9	budget_mb=8192	threads=4
+OPEN	first	wall_ms=1789.7	cpu_ms=1716	bind_footer_reads=14913
+PASS	wall_ms=4649.4	cpu_ms=5520	first/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+PASS	wall_ms=1052.8	cpu_ms=2425	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+PASS	wall_ms=1033.3	cpu_ms=2350	first/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+OPEN	second	wall_ms=237.9	cpu_ms=222	bind_footer_reads=0
+PASS	wall_ms=4194.1	cpu_ms=5645	second/counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+PASS	wall_ms=1251.8	cpu_ms=2070	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+PASS	wall_ms=1101.4	cpu_ms=2360	second/counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+OPEN	third	wall_ms=290.5	cpu_ms=220	bind_footer_reads=0
+PASS	wall_ms=4626.3	cpu_ms=7024	third/metered-counts/cold	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+PASS	wall_ms=1246.7	cpu_ms=2638	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+PASS	wall_ms=1191.8	cpu_ms=2597	third/metered-counts/warm	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547
+REBIND	wall_ms=194.4	cpu_ms=183	segments=14913
+REBIND	wall_ms=178.9	cpu_ms=167	segments=14913
+REBIND	wall_ms=206.4	cpu_ms=197	segments=14913
+PASS	wall_ms=1045.5	cpu_ms=2375	third/rebound	refused=0	scan_peak_kb=41211	pool_peak_mb=41	footer_cache_kb=349547

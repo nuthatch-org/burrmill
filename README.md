@@ -221,7 +221,7 @@ Said plainly, because a README that implies otherwise is the thing this project 
     docs/research/replacing-duckdb  the investigations, plan.md, and migration.md with the tick lists
     docs/upstream            bugs found in DuckDB, DataFusion and nuthatch, drafted for filing
     docs/bench               transcripts the numbers above are quoted from
-    docs/rfc                 RFC-0044 to RFC-0046
+    docs/rfc                 RFC-0044 to RFC-0047
     demo/                    the browser page over burrmill-wasm, offline once loaded
     fuzz/                    cargo-fuzz targets for burrmill-ingest, in their own workspace
     corpus/                  ingest's CSV corpus
