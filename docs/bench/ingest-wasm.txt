@@ -1,4 +1,4 @@
-# burrmill-ingest, linked, wasm32-unknown-unknown. RFC-0047 slice 2.
+# burrmill-ingest, linked, wasm32-unknown-unknown. See docs/browser.md.
 #
 # The reader only. No engine and no page, so this is not the 8 MB demo gate.
 # Command: docs/bench/ingest-wasm.sh

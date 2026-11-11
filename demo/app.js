@@ -6,10 +6,10 @@ const QUESTIONS = [
   'Year-over-year change',
 ];
 
-// RFC-0047's stated default. Whether k should differ, or be per column, is open.
+// For the prompt and the blurb. The filter is AGGREGATE_K in crates/burrmill-wasm/src/aggregates.rs.
 const AGGREGATE_K = 10;
 
-// A label check only. The RFC says this is not a compliance claim.
+// A label check only, and a warning: it does not stop a send (docs/browser.md).
 const IDENTIFIER_LABELS = new Set(['email', 'phone', 'iban', 'ssn', 'patient', 'hiv', 'id']);
 
 const SVG_NS = 'http://www.w3.org/2000/svg';

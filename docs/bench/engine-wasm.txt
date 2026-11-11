@@ -1,4 +1,4 @@
-# Ingest plus the Burrmill operator, and the full Engine. RFC-0047, before the page.
+# Ingest plus the Burrmill operator, and the full Engine. See docs/browser.md.
 #
 # The 8 MB line is the demo path, ingest plus the Engine. That module is under it.
 # Command: docs/bench/engine-wasm.sh
