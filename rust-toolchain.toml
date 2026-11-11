@@ -1,0 +1,6 @@
+# What CI builds with; rust-lld in 1.98.1 aborts linking wasm32. rustup honours this file, a
+# Homebrew cargo ahead of it on PATH does not.
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown"]

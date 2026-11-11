@@ -9,6 +9,9 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -65,6 +68,17 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: clippy
         run: cargo clippy --locked -p burrmill-bench --all-targets --all-features -- -D warnings
+
+  # Advisories, licences, duplicate versions and sources, from deny.toml.
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features
 
   # RFC-0047 slice 2. The reader builds for wasm32 and its graph has no C.
   ingest-wasm:
