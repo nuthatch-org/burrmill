@@ -18,6 +18,7 @@ use datafusion_datasource_parquet::source::ParquetSource;
 use datafusion_datasource_parquet::{
     CachedParquetFileReaderFactory, DefaultParquetFileReaderFactory, ParquetFileReaderFactory,
 };
+use datafusion_execution::cache::cache_manager::FileMetadataCache;
 use datafusion_execution::object_store::ObjectStoreUrl;
 use datafusion_expr::utils::conjunction;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
@@ -238,7 +239,21 @@ pub(super) struct Selection {
     pruning: Option<Arc<datafusion_physical_optimizer::pruning::PruningPredicate>>,
     columns: Option<HashSet<String>>,
     store: Arc<dyn object_store::ObjectStore>,
+    footers: Arc<FileMetadataCache>,
     files: Vec<object_store::ObjectMeta>,
+}
+
+/// The footer cache a scan of `url` reads: the process's for files on this machine, the engine's
+/// for the keys of its store.
+fn footers_for(
+    url: &ObjectStoreUrl,
+    env: &datafusion_execution::runtime_env::RuntimeEnv,
+) -> Arc<FileMetadataCache> {
+    if *url == ObjectStoreUrl::local_filesystem() {
+        super::session::local_footers()
+    } else {
+        env.cache_manager.get_file_metadata_cache()
+    }
 }
 
 /// Every segment scan in `plan`, owned, so the plan is not held while the bytes are summed.
@@ -288,6 +303,7 @@ pub(super) fn selections(
             pruning,
             columns,
             store: env.object_store(&c.object_store_url)?,
+            footers: footers_for(&c.object_store_url, env),
             files: c
                 .file_groups
                 .iter()
@@ -302,10 +318,7 @@ pub(super) fn selections(
 /// their row-group statistics keep, read from the footers. Unlike the bytes a scan reads, which a
 /// TopK's dynamic filter or a `LIMIT` cut by how the partitions race, this repeats for the same
 /// statement over the same segments.
-pub(super) async fn selected_bytes(
-    scans: Vec<Selection>,
-    footers: Arc<datafusion_execution::cache::cache_manager::FileMetadataCache>,
-) -> DFResult<u64> {
+pub(super) async fn selected_bytes(scans: Vec<Selection>) -> DFResult<u64> {
     use datafusion_datasource_parquet::metadata::DFParquetMetadata;
     use datafusion_datasource_parquet::{
         ParquetAccessPlan, ParquetFileMetrics, RowGroupAccessPlanFilter,
@@ -317,7 +330,7 @@ pub(super) async fn selected_bytes(
     for s in scans {
         for f in s.files {
             let meta = DFParquetMetadata::new(s.store.as_ref(), &f)
-                .with_file_metadata_cache(Some(Arc::clone(&footers)))
+                .with_file_metadata_cache(Some(Arc::clone(&s.footers)))
                 .with_page_index_policy(Some(parquet::file::metadata::PageIndexPolicy::Skip))
                 .fetch_metadata()
                 .await?;
@@ -466,9 +479,9 @@ impl TableProvider for SegmentTable {
         };
         opts.global.pushdown_filters = true;
         let store = state.runtime_env().object_store(&url)?;
-        // The session's footer cache is read only through this factory; a limit on the cache
-        // manager alone leaves every statement reading every footer again (burrmill#98).
-        let footers = state.runtime_env().cache_manager.get_file_metadata_cache();
+        // A footer cache is read only through this factory; a limit on the cache manager alone
+        // leaves every statement reading every footer again (burrmill#98).
+        let footers = footers_for(&url, state.runtime_env());
         let source = ParquetSource::new(self.schema.clone()).with_table_parquet_options(opts);
         let bytes = MetricBuilder::new(source.metrics()).global_counter(SEALED_BYTES);
         let mut source = source.with_parquet_file_reader_factory(Arc::new(Unmetered(
