@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use arrow::datatypes::DataType;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion_common::{Column, DFSchema, Result, plan_err};
+use datafusion_common::{Column, DFSchema, DFSchemaRef, Result, plan_err};
 use datafusion_expr::expr::{AggregateFunction, ScalarFunction, WindowFunctionDefinition};
 use datafusion_expr::logical_plan::{Aggregate, Distinct, Projection, SubqueryAlias, Union};
 use datafusion_expr::{
@@ -298,16 +298,22 @@ fn scale(t: &DataType) -> i8 {
     }
 }
 
-/// The schema a node's own expressions are evaluated against.
-fn expr_schema(p: &LogicalPlan) -> DFSchema {
+/// The schema a node's own expressions are evaluated against. One input's is taken as it
+/// stands; merging copies every field.
+fn expr_schema(p: &LogicalPlan) -> DFSchemaRef {
     if let LogicalPlan::TableScan(s) = p {
-        return s.projected_schema.as_ref().clone();
+        return Arc::clone(&s.projected_schema);
     }
-    let mut schema = DFSchema::empty();
-    for i in p.inputs() {
-        schema.merge(i.schema());
+    match p.inputs().as_slice() {
+        [one] => Arc::clone(one.schema()),
+        inputs => {
+            let mut schema = DFSchema::empty();
+            for i in inputs {
+                schema.merge(i.schema());
+            }
+            Arc::new(schema)
+        }
     }
-    schema
 }
 
 impl CheckedArithmetic {
@@ -318,13 +324,14 @@ impl CheckedArithmetic {
             LogicalPlan::Projection(_) | LogicalPlan::Aggregate(_) | LogicalPlan::Window(_)
         );
         let t = p.map_expressions(|e| {
-            let name = e.schema_name().to_string();
+            let name = names_matter.then(|| e.schema_name().to_string());
             let t = e.transform_up(|e| self.rewrite(e, &schema))?;
             check_whitelist(&t.data, &schema)?;
-            if t.transformed && names_matter && t.data.schema_name().to_string() != name {
-                Ok(Transformed::yes(t.data.alias(name)))
-            } else {
-                Ok(t)
+            match name {
+                Some(name) if t.transformed && t.data.schema_name().to_string() != name => {
+                    Ok(Transformed::yes(t.data.alias(name)))
+                }
+                _ => Ok(t),
             }
         })?;
         if t.transformed {
@@ -411,6 +418,8 @@ impl CheckedArithmetic {
     fn aggregate(&self, a: &Aggregate) -> Result<Aggregate> {
         let mut input = a.input.as_ref().clone();
         let mut exprs = Vec::with_capacity(a.aggr_expr.len());
+        // What the input taints, walked once and again only when an expression replaces it.
+        let mut walked: Option<(DFSchemaRef, Vec<bool>)> = None;
         for e in &a.aggr_expr {
             let name = e.schema_name().to_string();
             let Expr::AggregateFunction(af) = unalias(e) else {
@@ -418,8 +427,9 @@ impl CheckedArithmetic {
                 continue;
             };
             let func = af.func.name();
-            let schema = input.schema().as_ref().clone();
-            let taint = lossy(&input);
+            let (schema, taint) = walked
+                .get_or_insert_with(|| (Arc::clone(input.schema()), lossy(&input)))
+                .clone();
             if af
                 .params
                 .filter
@@ -446,6 +456,7 @@ impl CheckedArithmetic {
             let mut params = af.params.clone();
             if let Some((p, w, _, true)) = &exact {
                 input = p.clone();
+                walked = None;
                 params.args = vec![w.clone()];
             }
             if tainted && exact.is_none() {
@@ -462,6 +473,7 @@ impl CheckedArithmetic {
                     );
                 };
                 input = new_input;
+                walked = None;
                 params.args = args;
             }
             let rebuilt = |params| {

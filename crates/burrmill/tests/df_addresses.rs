@@ -506,6 +506,31 @@ fn a_correlated_subquery_keys_on_the_address() {
     assert!(!plan.contains("address_text"), "{plan}");
 }
 
+/// The rule derives a node's schema again only where something under it or in it changed. A
+/// recursive term over nothing but its work table changes in no node the walk rewrites, and its
+/// schemas must follow the work table's all the same.
+#[test]
+fn a_recursive_term_over_its_work_table_alone_carries_the_address() {
+    let (_t, e) = engine();
+    // The filter reads `who` through a projection of the work table and nothing else.
+    assert_eq!(
+        rows(
+            &e,
+            &format!(
+                "WITH RECURSIVE walk AS (SELECT who, 1 AS n FROM t WHERE block_number = 2 \
+                 UNION ALL SELECT who, n + 1 FROM (SELECT who, n FROM walk) w \
+                 WHERE who = '{}' AND n < 3) SELECT who, n FROM walk ORDER BY n",
+                addr(2)
+            )
+        ),
+        vec![
+            json!({"who": addr(2), "n": 1}),
+            json!({"who": addr(2), "n": 2}),
+            json!({"who": addr(2), "n": 3}),
+        ]
+    );
+}
+
 /// A filter the optimizer pushed through the decode compares the text column, so the scan's
 /// filter decodes nothing, and a window partitioned by the filtered address plans: the sort
 /// enforcement and the plan check agree on what is constant.

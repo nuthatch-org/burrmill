@@ -1,0 +1,622 @@
+Planning time per rule, 2026-11-11. ThinkPad, 32 cores, release, burrmill 9ffacd0 with
+docs/research/replacing-duckdb/probes/plan-times. The box ran other jobs all day (1-minute load 60
+to 120), so read shares, and before against after only where the two were run back to back.
+Columns: stage, rule, milliseconds summed over the statements, calls. "inside" lines are spans
+within a rule and are counted by it; a count with 0.000 ms is the largest seen in one statement.
+
+== nuthatch tests/network_contract.rs (c0efbf55, --features graph, one thread), main's rules
+statements 240
+total 429234.190 ms
+STAGE parse         35203.150 ms
+STAGE analyzer     182320.374 ms
+STAGE optimizer    158293.271 ms
+STAGE physical      53417.395 ms
+parse      parse and sql_to_rel                            35203.150 ms     12427
+analyzer   type_coercion                                   46761.967 ms       480
+analyzer   addresses                                       34149.719 ms       240
+analyzer   share_repeats                                   16380.275 ms       240
+analyzer   fast_text_casts                                 15453.982 ms       240
+analyzer   checked_arithmetic                              13345.959 ms       240
+analyzer   duck_comparisons                                10709.298 ms       240
+analyzer   duck_semantics                                   9863.284 ms       240
+analyzer   move_constants                                   9476.379 ms       240
+analyzer   bound_values                                     4923.188 ms       240
+analyzer   duck_doubles                                     3618.053 ms       240
+analyzer   outermost_order                                  2707.284 ms       240
+analyzer   latest_correlation                               1970.816 ms       240
+analyzer   single_row_subqueries                            1429.148 ms       240
+analyzer   non_equi_correlation                             1357.465 ms       240
+analyzer   nullable_subqueries                              1284.007 ms       240
+analyzer   keyed_correlation                                1277.838 ms       240
+analyzer   subqueries_below_aggregates                      1235.768 ms       240
+analyzer   checked_shifts                                   1049.362 ms       240
+analyzer   (checks)                                          952.302 ms       240
+analyzer   fold_substitution                                 862.031 ms       240
+analyzer   top_per_group                                     854.051 ms       240
+analyzer   partition_extreme                                 710.981 ms       240
+analyzer   distinct_rows                                     678.010 ms       240
+analyzer   distinct_split                                    672.584 ms       240
+analyzer   resolve_grouping_function                         596.622 ms       240
+optimizer  optimize_projections                            20260.277 ms       718
+optimizer  simplify_expressions                            15019.445 ms       718
+optimizer  common_sub_expression_eliminate                 14563.649 ms       718
+optimizer  prune_shared                                    11370.531 ms       718
+optimizer  rewrite_set_comparison                          10085.949 ms       718
+optimizer  optimize_unions                                  8285.694 ms       718
+optimizer  push_down_filter                                 7629.971 ms       718
+optimizer  extract_leaf_expressions                         7045.072 ms       718
+optimizer  scalar_subquery_to_join                          6441.546 ms       718
+optimizer  eliminate_join                                   6144.815 ms       718
+optimizer  eliminate_outer_join                             4519.978 ms       718
+optimizer  decorrelate_predicate_subquery                   4363.727 ms       718
+optimizer  push_down_leaf_projections                       4031.034 ms       718
+optimizer  eliminate_cross_join                             3666.054 ms       718
+optimizer  bound_values                                     3271.056 ms       718
+optimizer  single_distinct_aggregation_to_group_by          3250.841 ms       718
+optimizer  eliminate_duplicated_expr                        3188.126 ms       718
+optimizer  replace_distinct_aggregate                       3023.206 ms       718
+optimizer  extract_equijoin_predicate                       2929.981 ms       718
+optimizer  propagate_empty_relation                         2926.300 ms       718
+optimizer  filter_null_join_keys                            2900.364 ms       718
+optimizer  decorrelate_lateral_join                         2889.986 ms       718
+optimizer  push_down_limit                                  2853.147 ms       718
+optimizer  eliminate_filter                                 2850.446 ms       718
+optimizer  eliminate_limit                                  2843.484 ms       718
+optimizer  (checks)                                         1001.545 ms       240
+optimizer  narrow_joins                                      623.427 ms       240
+optimizer  unions_to_filter                                  313.620 ms       718
+physical   EnsureRequirements                              22427.296 ms       240
+physical   ProjectionPushdown                               8900.874 ms       480
+physical   (initial plan)                                   7552.660 ms       240
+physical   join_selection                                   5392.976 ms       240
+physical   FilterPushdown(Post)                             1503.954 ms       240
+physical   small_inputs                                     1159.257 ms       240
+physical   FilterPushdown                                   1087.753 ms       240
+physical   OptimizeAggregateOrder                            941.415 ms       240
+physical   compact_views                                     930.361 ms       240
+physical   held_input                                        741.831 ms       240
+physical   CombinePartialFinalAggregate                      653.999 ms       240
+physical   cancellable                                       368.603 ms       240
+physical   text_address_filters                              365.239 ms       240
+physical   build_on_smaller                                  296.122 ms       240
+physical   SanityCheckPlan                                   278.916 ms       240
+physical   computed_key_filters                              124.175 ms       240
+physical   EnsureCooperative                                  82.333 ms       240
+physical   LimitPushdown                                      69.417 ms       240
+physical   aggregate_statistics                               65.029 ms       240
+physical   OutputRequirements                                 64.938 ms       480
+physical   LimitedDistinctAggregation                         50.262 ms       240
+physical   PushdownSort                                       48.427 ms       240
+physical   LimitPushPastWindows                               47.370 ms       240
+physical   topk_filters                                       43.516 ms       240
+physical   topk_merge_order                                   41.781 ms       240
+physical   range_bounds                                       38.912 ms       240
+physical   range_join                                         38.219 ms       240
+physical   LimitAggregation                                   36.289 ms       240
+physical   TopKRepartition                                    35.913 ms       240
+physical   publish_shared                                     29.132 ms       240
+physical   WindowTopN                                          0.234 ms       240
+physical   HashJoinBuffering                                   0.191 ms       240
+inside     PruneShared optimize_projections                 9319.771 ms      3801
+inside     OverShared refresh                               6072.757 ms      1348
+inside     bytes_read                                        216.069 ms     15682
+inside     logical nodes after analysis                        0.000 ms      4768
+inside     physical nodes                                      0.000 ms      3709
+inside     relations in one statement                          0.000 ms        63
+inside     shared definitions                                  0.000 ms         9
+
+== the same run, its dearest statement, rules of 5 ms and over
+DEAREST 5257.832 ms: SELECT "channelDisputeEpochs", "curation", "curationPercentage", "currentEpoch", "currentL1BlockNumber", "delegationParameters...
+STAGE parse           673.116 ms
+STAGE analyzer       1429.474 ms
+STAGE optimizer      2707.311 ms
+STAGE physical        447.932 ms
+parse      parse and sql_to_rel                              673.116 ms       213
+analyzer   type_coercion                                     335.162 ms         2
+analyzer   addresses                                         263.268 ms         1
+analyzer   share_repeats                                     134.755 ms         1
+analyzer   duck_comparisons                                   89.399 ms         1
+analyzer   fast_text_casts                                    89.039 ms         1
+analyzer   duck_semantics                                     77.247 ms         1
+analyzer   checked_arithmetic                                 76.420 ms         1
+analyzer   move_constants                                     69.964 ms         1
+analyzer   bound_values                                       59.000 ms         1
+analyzer   duck_doubles                                       46.165 ms         1
+analyzer   outermost_order                                    27.522 ms         1
+analyzer   (checks)                                           18.024 ms         1
+analyzer   non_equi_correlation                               17.408 ms         1
+analyzer   keyed_correlation                                  17.078 ms         1
+analyzer   single_row_subqueries                              16.371 ms         1
+analyzer   latest_correlation                                 15.259 ms         1
+analyzer   subqueries_below_aggregates                        15.005 ms         1
+analyzer   nullable_subqueries                                12.929 ms         1
+analyzer   checked_shifts                                     10.136 ms         1
+analyzer   fold_substitution                                   7.680 ms         1
+analyzer   top_per_group                                       7.502 ms         1
+analyzer   partition_extreme                                   6.844 ms         1
+analyzer   distinct_split                                      6.818 ms         1
+analyzer   distinct_rows                                       6.501 ms         1
+optimizer  optimize_projections                              284.901 ms         3
+optimizer  common_sub_expression_eliminate                   220.295 ms         3
+optimizer  scalar_subquery_to_join                           210.210 ms         3
+optimizer  simplify_expressions                              204.317 ms         3
+optimizer  prune_shared                                      154.542 ms         3
+optimizer  push_down_filter                                  151.166 ms         3
+optimizer  rewrite_set_comparison                            148.131 ms         3
+optimizer  extract_leaf_expressions                          132.295 ms         3
+optimizer  optimize_unions                                   126.858 ms         3
+optimizer  eliminate_join                                    105.148 ms         3
+optimizer  decorrelate_predicate_subquery                    104.429 ms         3
+optimizer  push_down_leaf_projections                         83.617 ms         3
+optimizer  eliminate_outer_join                               79.429 ms         3
+optimizer  eliminate_duplicated_expr                          65.133 ms         3
+optimizer  filter_null_join_keys                              63.225 ms         3
+optimizer  single_distinct_aggregation_to_group_by            62.801 ms         3
+optimizer  decorrelate_lateral_join                           62.620 ms         3
+optimizer  extract_equijoin_predicate                         62.592 ms         3
+optimizer  eliminate_filter                                   61.576 ms         3
+optimizer  push_down_limit                                    56.789 ms         3
+optimizer  propagate_empty_relation                           55.724 ms         3
+optimizer  eliminate_limit                                    52.286 ms         3
+optimizer  bound_values                                       51.417 ms         3
+optimizer  replace_distinct_aggregate                         46.679 ms         3
+optimizer  eliminate_cross_join                               28.355 ms         3
+optimizer  (checks)                                           17.978 ms         1
+optimizer  narrow_joins                                       13.034 ms         1
+physical   EnsureRequirements                                170.245 ms         1
+physical   (initial plan)                                     87.678 ms         1
+physical   ProjectionPushdown                                 72.281 ms         2
+physical   join_selection                                     40.683 ms         1
+physical   FilterPushdown                                     15.185 ms         1
+physical   FilterPushdown(Post)                               14.676 ms         1
+physical   text_address_filters                                7.464 ms         1
+physical   small_inputs                                        6.985 ms         1
+inside     PruneShared optimize_projections                  120.530 ms        18
+inside     bytes_read                                          0.715 ms       103
+inside     logical nodes after analysis                        0.000 ms      4741
+inside     physical nodes                                      0.000 ms      3709
+inside     relations in one statement                          0.000 ms        63
+inside     shared definitions                                  0.000 ms         5
+
+== the contract with the #157 change, run straight after; rules of 200 ms and over
+statements 240
+total 409957.028 ms
+STAGE parse         35550.203 ms
+STAGE analyzer     163122.135 ms
+STAGE optimizer    157719.682 ms
+STAGE physical      53565.009 ms
+parse      parse and sql_to_rel                            35550.203 ms     12427
+analyzer   type_coercion                                   40154.351 ms       480
+analyzer   addresses                                       31093.725 ms       240
+analyzer   share_repeats                                   16610.470 ms       240
+analyzer   fast_text_casts                                 15399.693 ms       240
+analyzer   duck_comparisons                                10633.213 ms       240
+analyzer   checked_arithmetic                              10105.777 ms       240
+analyzer   duck_semantics                                   9803.512 ms       240
+analyzer   move_constants                                   9334.893 ms       240
+analyzer   bound_values                                     4861.743 ms       240
+analyzer   outermost_order                                  2665.035 ms       240
+analyzer   duck_doubles                                     2525.140 ms       240
+analyzer   nullable_subqueries                              1310.927 ms       240
+analyzer   checked_shifts                                   1081.034 ms       240
+analyzer   (checks)                                          952.784 ms       240
+analyzer   latest_correlation                                894.435 ms       240
+analyzer   fold_substitution                                 870.935 ms       240
+analyzer   top_per_group                                     850.086 ms       240
+analyzer   partition_extreme                                 721.338 ms       240
+analyzer   distinct_rows                                     692.796 ms       240
+analyzer   distinct_split                                    692.148 ms       240
+analyzer   resolve_grouping_function                         629.176 ms       240
+analyzer   single_row_subqueries                             472.489 ms       240
+analyzer   non_equi_correlation                              295.027 ms       240
+analyzer   keyed_correlation                                 249.384 ms       240
+analyzer   subqueries_below_aggregates                       222.025 ms       240
+optimizer  optimize_projections                            20205.096 ms       718
+optimizer  simplify_expressions                            15091.329 ms       718
+optimizer  common_sub_expression_eliminate                 14491.302 ms       718
+optimizer  prune_shared                                    11281.702 ms       718
+optimizer  rewrite_set_comparison                          10070.490 ms       718
+optimizer  optimize_unions                                  8249.498 ms       718
+optimizer  push_down_filter                                 7545.197 ms       718
+optimizer  extract_leaf_expressions                         7054.814 ms       718
+optimizer  scalar_subquery_to_join                          6435.608 ms       718
+optimizer  eliminate_join                                   6102.525 ms       718
+optimizer  eliminate_outer_join                             4545.985 ms       718
+optimizer  decorrelate_predicate_subquery                   4386.688 ms       718
+optimizer  push_down_leaf_projections                       4077.270 ms       718
+optimizer  eliminate_cross_join                             3645.193 ms       718
+optimizer  bound_values                                     3309.931 ms       718
+optimizer  single_distinct_aggregation_to_group_by          3232.742 ms       718
+optimizer  eliminate_duplicated_expr                        3199.251 ms       718
+optimizer  replace_distinct_aggregate                       3062.195 ms       718
+optimizer  propagate_empty_relation                         2962.599 ms       718
+optimizer  decorrelate_lateral_join                         2953.441 ms       718
+optimizer  extract_equijoin_predicate                       2905.174 ms       718
+optimizer  filter_null_join_keys                            2897.112 ms       718
+optimizer  push_down_limit                                  2856.721 ms       718
+optimizer  eliminate_filter                                 2848.500 ms       718
+optimizer  eliminate_limit                                  2822.998 ms       718
+optimizer  (checks)                                          958.656 ms       240
+optimizer  unions_to_filter                                  310.695 ms       718
+optimizer  narrow_joins                                      216.970 ms       240
+physical   EnsureRequirements                              22589.984 ms       240
+physical   ProjectionPushdown                               8904.159 ms       480
+physical   (initial plan)                                   7497.082 ms       240
+physical   join_selection                                   5448.214 ms       240
+physical   FilterPushdown(Post)                             1489.971 ms       240
+physical   small_inputs                                     1175.001 ms       240
+physical   FilterPushdown                                   1094.165 ms       240
+physical   compact_views                                     927.247 ms       240
+physical   OptimizeAggregateOrder                            917.391 ms       240
+physical   held_input                                        743.141 ms       240
+physical   CombinePartialFinalAggregate                      642.544 ms       240
+physical   cancellable                                       370.911 ms       240
+physical   text_address_filters                              370.431 ms       240
+physical   build_on_smaller                                  302.619 ms       240
+physical   SanityCheckPlan                                   281.188 ms       240
+inside     PruneShared optimize_projections                 9212.997 ms      3801
+inside     OverShared refresh                                665.059 ms       643
+inside     bytes_read                                        219.865 ms     15682
+inside     logical nodes after analysis                        0.000 ms      4768
+inside     physical nodes                                      0.000 ms      3709
+inside     relations in one statement                          0.000 ms        63
+
+== a second pair, the same way
+main's rules   statements 240  total 429233.921 ms  analyzer 182191.760  optimizer 158095.407
+the change     statements 240  total 409140.795 ms  analyzer 162221.892  optimizer 157542.548  addresses 30771.102  checked_arithmetic 10053.527
+
+== the contract with spans inside the address and checked rules (a separate, heavier-loaded run;
+== the spans cost about what they measure, so this is for the split only)
+statements 240
+total 759502.176 ms
+analyzer   addresses                                       60899.394 ms       240
+analyzer   checked_arithmetic                              27119.161 ms       240
+inside     Addresses recompute_schema                      25307.445 ms    996688
+inside     PruneShared optimize_projections                16010.362 ms      3801
+inside     OverShared refresh                              10327.424 ms      1348
+inside     Addresses rewrite                                5663.617 ms   4589285
+inside     Addresses schema merge                           5420.783 ms    996688
+inside     Addresses schema_name                            5019.370 ms   4589285
+inside     CheckedArithmetic expr_schema                    4305.857 ms   1009446
+inside     CheckedArithmetic lossy walk                     4201.869 ms     10818
+inside     CheckedArithmetic schema_name                    3987.425 ms   4694694
+inside     CheckedArithmetic whitelist                      2668.772 ms   4694694
+inside     CheckedArithmetic rewrite                        2279.572 ms   4694694
+inside     CheckedArithmetic aggregate                      1902.938 ms      1296
+inside     bytes_read                                        286.789 ms     15682
+inside     logical nodes after analysis                        0.000 ms      4768
+inside     physical nodes                                      0.000 ms      3709
+inside     relations in one statement                          0.000 ms        63
+inside     shared definitions                                  0.000 ms         9
+
+== nuthatch serve::tests (--features graph,counter,crash-points), main's rules; 500 ms and over
+statements 190
+total 261281.574 ms
+STAGE parse         24759.733 ms
+STAGE analyzer     126069.230 ms
+STAGE optimizer     90844.265 ms
+STAGE physical      19608.346 ms
+parse      parse and sql_to_rel                            24759.733 ms      4256
+analyzer   type_coercion                                   30022.604 ms       380
+analyzer   addresses                                       26634.956 ms       190
+analyzer   share_repeats                                   12520.658 ms       190
+analyzer   checked_arithmetic                              11545.222 ms       190
+analyzer   fast_text_casts                                 11260.855 ms       190
+analyzer   move_constants                                   6301.807 ms       190
+analyzer   duck_semantics                                   6049.060 ms       190
+analyzer   duck_comparisons                                 5982.827 ms       190
+analyzer   bound_values                                     3257.070 ms       190
+analyzer   duck_doubles                                     1749.364 ms       190
+analyzer   latest_correlation                               1405.704 ms       190
+analyzer   outermost_order                                  1289.052 ms       190
+analyzer   nullable_subqueries                               840.047 ms       190
+analyzer   single_row_subqueries                             817.270 ms       190
+analyzer   subqueries_below_aggregates                       816.437 ms       190
+analyzer   keyed_correlation                                 799.555 ms       190
+analyzer   non_equi_correlation                              775.046 ms       190
+analyzer   checked_shifts                                    594.940 ms       190
+analyzer   (checks)                                          571.938 ms       190
+analyzer   fold_substitution                                 547.213 ms       190
+analyzer   distinct_split                                    540.949 ms       190
+analyzer   top_per_group                                     536.042 ms       190
+analyzer   distinct_rows                                     510.848 ms       190
+optimizer  optimize_projections                            10148.122 ms       405
+optimizer  simplify_expressions                             8682.015 ms       405
+optimizer  common_sub_expression_eliminate                  7166.089 ms       405
+optimizer  scalar_subquery_to_join                          5892.476 ms       405
+optimizer  rewrite_set_comparison                           5815.859 ms       405
+optimizer  decorrelate_predicate_subquery                   5525.947 ms       405
+optimizer  prune_shared                                     5520.413 ms       405
+optimizer  push_down_filter                                 4626.860 ms       405
+optimizer  eliminate_join                                   3869.394 ms       405
+optimizer  optimize_unions                                  3626.707 ms       405
+optimizer  extract_leaf_expressions                         3428.857 ms       405
+optimizer  eliminate_cross_join                             2496.835 ms       405
+optimizer  eliminate_duplicated_expr                        2047.311 ms       405
+optimizer  eliminate_outer_join                             2025.814 ms       405
+optimizer  push_down_leaf_projections                       1853.418 ms       405
+optimizer  single_distinct_aggregation_to_group_by          1827.342 ms       405
+optimizer  eliminate_filter                                 1826.800 ms       405
+optimizer  extract_equijoin_predicate                       1799.910 ms       405
+optimizer  replace_distinct_aggregate                       1790.118 ms       405
+optimizer  propagate_empty_relation                         1764.183 ms       405
+optimizer  decorrelate_lateral_join                         1727.307 ms       405
+optimizer  push_down_limit                                  1720.008 ms       405
+optimizer  filter_null_join_keys                            1717.223 ms       405
+optimizer  bound_values                                     1582.136 ms       405
+optimizer  eliminate_limit                                  1565.094 ms       405
+physical   EnsureRequirements                               6700.844 ms       190
+physical   (initial plan)                                   4318.526 ms       190
+physical   ProjectionPushdown                               3443.322 ms       380
+physical   join_selection                                   1568.190 ms       190
+physical   FilterPushdown(Post)                              627.021 ms       190
+inside     OverShared refresh                               5551.640 ms       386
+inside     PruneShared optimize_projections                 4213.319 ms       801
+inside     bytes_read                                         77.079 ms      2979
+inside     logical nodes after analysis                        0.000 ms      5721
+inside     physical nodes                                      0.000 ms      3083
+inside     relations in one statement                          0.000 ms        63
+inside     shared definitions                                  0.000 ms        21
+
+== serve::tests with the #157 change (lighter load: compare shares); 250 ms and over
+statements 190
+total 119303.725 ms
+STAGE parse         13209.100 ms
+STAGE analyzer      60327.074 ms
+STAGE optimizer     36980.569 ms
+STAGE physical       8786.982 ms
+parse      parse and sql_to_rel                            13209.100 ms      4256
+analyzer   type_coercion                                   13880.787 ms       380
+analyzer   addresses                                       12471.807 ms       190
+analyzer   share_repeats                                    7139.607 ms       190
+analyzer   fast_text_casts                                  5861.364 ms       190
+analyzer   checked_arithmetic                               4312.440 ms       190
+analyzer   duck_comparisons                                 3623.259 ms       190
+analyzer   duck_semantics                                   3422.677 ms       190
+analyzer   move_constants                                   3387.636 ms       190
+analyzer   bound_values                                     1390.785 ms       190
+analyzer   outermost_order                                   739.774 ms       190
+analyzer   duck_doubles                                      618.976 ms       190
+analyzer   nullable_subqueries                               461.630 ms       190
+analyzer   checked_shifts                                    409.929 ms       190
+analyzer   fold_substitution                                 320.174 ms       190
+analyzer   latest_correlation                                318.003 ms       190
+analyzer   top_per_group                                     310.008 ms       190
+analyzer   partition_extreme                                 308.753 ms       190
+analyzer   distinct_rows                                     297.834 ms       190
+analyzer   distinct_split                                    292.009 ms       190
+optimizer  optimize_projections                             4313.642 ms       405
+optimizer  simplify_expressions                             3724.709 ms       405
+optimizer  common_sub_expression_eliminate                  2982.991 ms       405
+optimizer  rewrite_set_comparison                           2362.382 ms       405
+optimizer  prune_shared                                     2334.600 ms       405
+optimizer  scalar_subquery_to_join                          2266.905 ms       405
+optimizer  decorrelate_predicate_subquery                   2182.830 ms       405
+optimizer  push_down_filter                                 1838.948 ms       405
+optimizer  eliminate_join                                   1558.102 ms       405
+optimizer  optimize_unions                                  1539.108 ms       405
+optimizer  extract_leaf_expressions                         1516.763 ms       405
+optimizer  eliminate_cross_join                             1054.834 ms       405
+optimizer  eliminate_outer_join                              873.639 ms       405
+optimizer  push_down_leaf_projections                        797.827 ms       405
+optimizer  replace_distinct_aggregate                        761.460 ms       405
+optimizer  eliminate_duplicated_expr                         721.141 ms       405
+optimizer  single_distinct_aggregation_to_group_by           698.765 ms       405
+optimizer  extract_equijoin_predicate                        686.573 ms       405
+optimizer  eliminate_filter                                  669.352 ms       405
+optimizer  decorrelate_lateral_join                          661.911 ms       405
+optimizer  push_down_limit                                   654.149 ms       405
+optimizer  propagate_empty_relation                          649.177 ms       405
+optimizer  bound_values                                      644.577 ms       405
+optimizer  filter_null_join_keys                             627.238 ms       405
+optimizer  eliminate_limit                                   603.149 ms       405
+physical   EnsureRequirements                               3091.091 ms       190
+physical   (initial plan)                                   1862.013 ms       190
+physical   ProjectionPushdown                               1539.442 ms       380
+physical   join_selection                                    704.254 ms       190
+physical   FilterPushdown(Post)                              251.087 ms       190
+inside     PruneShared optimize_projections                 1802.496 ms       801
+inside     OverShared refresh                                285.990 ms       159
+inside     bytes_read                                         48.614 ms      2979
+inside     logical nodes after analysis                        0.000 ms      5721
+inside     physical nodes                                      0.000 ms      3083
+inside     relations in one statement                          0.000 ms        63
+
+== burrmill-bench plan-times ~/1165-corpus/graph-allocations-nest-next 9 (13 views of 19 register),
+== main's rules; 20 ms and over
+statements 117
+total 7553.889 ms
+STAGE parse           334.640 ms
+STAGE analyzer       3596.406 ms
+STAGE optimizer      2283.687 ms
+STAGE physical       1339.157 ms
+parse      parse and sql_to_rel                              334.640 ms       254
+analyzer   type_coercion                                    1143.879 ms       234
+analyzer   addresses                                         596.254 ms       117
+analyzer   checked_arithmetic                                269.691 ms       117
+analyzer   fast_text_casts                                   262.139 ms       117
+analyzer   duck_semantics                                    232.370 ms       117
+analyzer   bound_values                                      222.598 ms       117
+analyzer   duck_comparisons                                  219.553 ms       117
+analyzer   move_constants                                    151.203 ms       117
+analyzer   share_repeats                                     126.686 ms       117
+analyzer   duck_doubles                                       91.163 ms       117
+analyzer   single_row_subqueries                              29.825 ms       117
+analyzer   (checks)                                           28.522 ms       117
+analyzer   latest_correlation                                 25.945 ms       117
+analyzer   outermost_order                                    25.061 ms       117
+analyzer   nullable_subqueries                                22.649 ms       117
+analyzer   subqueries_below_aggregates                        21.290 ms       117
+analyzer   non_equi_correlation                               20.151 ms       117
+optimizer  optimize_projections                              370.394 ms       270
+optimizer  simplify_expressions                              342.063 ms       270
+optimizer  common_sub_expression_eliminate                   232.283 ms       270
+optimizer  rewrite_set_comparison                            231.998 ms       270
+optimizer  optimize_unions                                   160.240 ms       270
+optimizer  prune_shared                                      157.952 ms       270
+optimizer  eliminate_join                                    128.341 ms       270
+optimizer  extract_leaf_expressions                           89.582 ms       270
+optimizer  bound_values                                       56.439 ms       270
+optimizer  eliminate_duplicated_expr                          55.078 ms       270
+optimizer  decorrelate_predicate_subquery                     45.106 ms       270
+optimizer  (checks)                                           41.397 ms       117
+optimizer  push_down_filter                                   35.334 ms       270
+optimizer  push_down_leaf_projections                         35.019 ms       270
+optimizer  replace_distinct_aggregate                         33.082 ms       270
+optimizer  scalar_subquery_to_join                            27.081 ms       270
+optimizer  eliminate_outer_join                               26.533 ms       270
+optimizer  single_distinct_aggregation_to_group_by            26.179 ms       270
+optimizer  extract_equijoin_predicate                         23.705 ms       270
+optimizer  propagate_empty_relation                           23.660 ms       270
+optimizer  eliminate_filter                                   22.969 ms       270
+optimizer  eliminate_cross_join                               21.973 ms       270
+optimizer  eliminate_limit                                    21.512 ms       270
+optimizer  filter_null_join_keys                              20.644 ms       270
+optimizer  decorrelate_lateral_join                           20.560 ms       270
+optimizer  push_down_limit                                    20.214 ms       270
+physical   EnsureRequirements                                538.434 ms       117
+physical   (initial plan)                                    312.023 ms       117
+physical   ProjectionPushdown                                178.596 ms       234
+physical   join_selection                                     62.129 ms       117
+physical   small_inputs                                       51.940 ms       117
+physical   FilterPushdown(Post)                               51.508 ms       117
+physical   build_on_smaller                                   29.689 ms       117
+physical   FilterPushdown                                     24.598 ms       117
+inside     PruneShared optimize_projections                  136.721 ms       387
+inside     bytes_read                                          2.470 ms       756
+inside     logical nodes after analysis                        0.000 ms       238
+inside     physical nodes                                      0.000 ms       142
+inside     shared definitions                                  0.000 ms         8
+
+== the same, BUDGET_MB=2048 THREADS=2 (compact_views runs); physical rules of 2 ms and over
+statements 117
+total 7423.572 ms
+STAGE parse           390.277 ms
+STAGE analyzer       3510.610 ms
+STAGE optimizer      2184.018 ms
+STAGE physical       1338.668 ms
+physical   EnsureRequirements                                537.493 ms       117
+physical   (initial plan)                                    328.346 ms       117
+physical   ProjectionPushdown                                184.520 ms       234
+physical   join_selection                                     59.856 ms       117
+physical   FilterPushdown(Post)                               46.103 ms       117
+physical   small_inputs                                       33.611 ms       117
+physical   build_on_smaller                                   30.177 ms       117
+physical   FilterPushdown                                     22.983 ms       117
+physical   computed_key_filters                               18.143 ms       117
+physical   SanityCheckPlan                                    15.186 ms       117
+physical   compact_views                                      12.810 ms       117
+physical   OptimizeAggregateOrder                              6.879 ms       117
+physical   EnsureCooperative                                   4.550 ms       117
+physical   held_input                                          4.002 ms       117
+physical   OutputRequirements                                  3.868 ms       234
+physical   cancellable                                         3.575 ms       117
+physical   LimitPushdown                                       2.939 ms       117
+physical   LimitPushPastWindows                                2.473 ms       117
+physical   text_address_filters                                2.381 ms       117
+physical   aggregate_statistics                                2.365 ms       117
+inside     PruneShared optimize_projections                  137.593 ms       387
+inside     bytes_read                                          2.402 ms       666
+inside     logical nodes after analysis                        0.000 ms       238
+inside     physical nodes                                      0.000 ms       192
+inside     shared definitions                                  0.000 ms         8
+
+== plan-times on the allocations nest, main's rules and the #157 change turn about
+round 1  main's rules  PLAN-TOTAL median sum 671.074 ms over 19 views | all planning 6054.658 ms, addresses 476.633, checked_arithmetic 210.061
+round 1  the change    PLAN-TOTAL median sum 679.233 ms over 19 views | all planning 6070.434 ms, addresses 470.714, checked_arithmetic 183.069
+round 2  main's rules  all planning 6069.214 ms, addresses 483.794, checked_arithmetic 212.721
+round 2  the change    all planning 5908.596 ms, addresses 445.697, checked_arithmetic 174.232
+
+== burrmill-bench join-chain: one-row relations, whole statement, least of three
+JOIN-CHAIN   64 star  least    0.205 s  1 row
+JOIN-CHAIN   64 chain least    0.220 s  1 row
+JOIN-CHAIN   64 comma least    0.092 s  1 row
+JOIN-CHAIN   96 star  least    0.515 s  1 row
+JOIN-CHAIN   96 chain least    0.668 s  1 row
+JOIN-CHAIN   96 comma least    0.137 s  1 row
+JOIN-CHAIN  128 star  least    1.189 s  1 row
+JOIN-CHAIN  128 chain least    1.575 s  1 row
+JOIN-CHAIN  128 comma least    0.303 s  1 row
+JOIN-CHAIN  192 star  least    4.046 s  1 row
+JOIN-CHAIN  192 chain least    5.267 s  1 row
+JOIN-CHAIN  192 comma least    0.781 s  1 row
+JOIN-CHAIN  256 star  least    9.851 s  1 row
+JOIN-CHAIN  256 chain least   14.358 s  1 row
+JOIN-CHAIN  256 comma least    1.424 s  1 row
+== the chain of 128, planning by stage (the first of the three, cold)
+DEAREST 1685.453 ms: SELECT count(*) AS n FROM range(1) t0 JOIN range(1) t1 ON t0.range = t1.range JOIN range(1) t2 ON t1.range = t2.range JOIN ran...
+STAGE parse            38.360 ms
+STAGE analyzer        146.106 ms
+STAGE optimizer      1363.793 ms
+STAGE physical        137.193 ms
+analyzer   type_coercion                                      63.589 ms         2
+optimizer  eliminate_cross_join                             1316.704 ms         2
+physical   EnsureRequirements                                 63.561 ms         1
+physical   join_selection                                     58.069 ms         1
+inside     CheckedArithmetic schema_name                       4.226 ms       129
+inside     CheckedArithmetic expr_schema                       3.377 ms       385
+inside     bytes_read                                          1.506 ms       255
+inside     CheckedArithmetic aggregate                         0.135 ms         1
+inside     CheckedArithmetic rewrite                           0.074 ms       129
+inside     CheckedArithmetic lossy walk                        0.040 ms         1
+inside     CheckedArithmetic whitelist                         0.028 ms       129
+inside     logical nodes after analysis                        0.000 ms       385
+inside     physical nodes                                      0.000 ms       513
+inside     relations in one statement                          0.000 ms       128
+== the chain of 256
+DEAREST 15125.508 ms: SELECT count(*) AS n FROM range(1) t0 JOIN range(1) t1 ON t0.range = t1.range JOIN range(1) t2 ON t1.range = t2.range JOIN ra...
+STAGE parse           152.284 ms
+STAGE analyzer        298.704 ms
+STAGE optimizer     14159.937 ms
+STAGE physical        514.584 ms
+parse      parse and sql_to_rel                              152.284 ms         1
+optimizer  eliminate_cross_join                            14086.217 ms         2
+physical   join_selection                                    243.863 ms         1
+physical   EnsureRequirements                                233.738 ms         1
+inside     CheckedArithmetic expr_schema                      13.530 ms       769
+inside     bytes_read                                          6.701 ms       511
+inside     CheckedArithmetic rewrite                           1.394 ms       257
+inside     CheckedArithmetic schema_name                       0.391 ms       257
+inside     CheckedArithmetic aggregate                         0.176 ms         1
+inside     CheckedArithmetic lossy walk                        0.076 ms         1
+inside     CheckedArithmetic whitelist                         0.046 ms       257
+inside     logical nodes after analysis                        0.000 ms       769
+inside     physical nodes                                      0.000 ms      1025
+inside     relations in one statement                          0.000 ms       256
+
+== burrmill-bench relations: the six gate nests' views and query sets, the 1165 corpus, the network
+== nest fixture, the dashboard statements; the largest
+RELATIONS    65 ~/1165-corpus/graph-allocations-nest-next/views lodestar_indexers
+RELATIONS    63 nuthatch/tests/fixtures/network-nest/views network_refresh_event
+RELATIONS    63 gate-nests/alloc-nest/views lodestar_network
+RELATIONS    62 gate-nests/alloc-nest/views lodestar_indexers
+RELATIONS    59 ~/1165-corpus/graph-allocations-nest-next/views lodestar_network
+RELATIONS    42 gate-nests/alloc-nest/views lodestar_indexer_ledger
+RELATIONS    38 gate-nests/alloc-nest/views lodestar_epochs
+RELATIONS    35 nuthatch/tests/fixtures/network-nest/views graph_network
+
+== plans, main's rules against the #157 change (MacBook, unoptimized, same sources): each
+== statement's optimized logical plan with every node's schema, shared-subquery ids renumbered
+serve::tests       statements 120, with shared-subquery ids 34, plan lines 42852, differing 3
+                   (the three hold now() as a literal and differ between two runs of one build)
+network_contract   statements 130, with shared-subquery ids 92, plan lines 128686, differing 0
+burrmill's suite   statements 793 stable between two runs of one build, 1194 plans, differing 0
+                   (hashes of the plans and of the physical operators and schemas)
+dialect-parity     cases=370 differing=0 with main's rules and with the change
+
+== the release gate's statements (nuthatch-ops scripts/release-gate.sh, one pass, each nest's
+== production budget and concurrency, load checks and time bounds off), nuthatch c0efbf55 over
+== burrmill main and over main with #157, #160 and the relation bound; segments linked from the
+== gate's copies
+alloc-nest main: 75 of 75 answered, 0 failed, 0 regressed; p99 11133 ms over the queries that answered; peak RSS 922 MiB, budget 2048 MiB; RESULT: PASS
+alloc-nest all: 75 of 75 answered, 0 failed, 0 regressed, 0 answers differ; p99 7717 ms over the queries that answered, baseline 11133 ms; peak RSS 922 MiB, budget 2048 MiB; RESULT: PASS
+qos-nest main: 9 of 9 answered, 0 failed, 0 regressed; p99 8603 ms over the queries that answered; peak RSS 1021 MiB, budget 2048 MiB; RESULT: PASS
+qos-nest all: 9 of 9 answered, 0 failed, 0 regressed, 0 answers differ; p99 8658 ms over the queries that answered, baseline 8603 ms; peak RSS 1026 MiB, budget 2048 MiB; RESULT: PASS
+gns-nest main: 9 of 9 answered, 0 failed, 0 regressed; p99 512 ms over the queries that answered; peak RSS 212 MiB, budget 2048 MiB; RESULT: PASS
+gns-nest all: 9 of 9 answered, 0 failed, 0 regressed, 0 answers differ; p99 499 ms over the queries that answered, baseline 512 ms; peak RSS 208 MiB, budget 2048 MiB; RESULT: PASS
+dips-nest main: 16 of 16 answered, 0 failed, 0 regressed; p99 91 ms over the queries that answered; peak RSS 116 MiB, budget 2048 MiB; RESULT: PASS
+dips-nest all: 16 of 16 answered, 0 failed, 0 regressed, 0 answers differ; p99 119 ms over the queries that answered, baseline 91 ms; peak RSS 116 MiB, budget 2048 MiB; RESULT: PASS
+data-services-nest main: 5 of 5 answered, 0 failed, 0 regressed; p99 61 ms over the queries that answered; peak RSS 101 MiB, budget 2048 MiB; RESULT: PASS
+data-services-nest all: 5 of 5 answered, 0 failed, 0 regressed, 0 answers differ; p99 51 ms over the queries that answered, baseline 61 ms; peak RSS 101 MiB, budget 2048 MiB; RESULT: PASS
+staking-archive-nest main: 3 of 3 answered, 0 failed, 0 regressed; p99 109 ms over the queries that answered; peak RSS 119 MiB, budget 2048 MiB; RESULT: PASS
+staking-archive-nest all: 3 of 3 answered, 0 failed, 0 regressed, 0 answers differ; p99 124 ms over the queries that answered, baseline 109 ms; peak RSS 118 MiB, budget 2048 MiB; RESULT: PASS
