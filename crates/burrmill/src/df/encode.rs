@@ -170,7 +170,21 @@ fn blob(b: &[u8]) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::scaled;
+    use std::sync::Arc;
+
+    use arrow::array::{Int64Array, RecordBatch};
+
+    use super::{rows, scaled};
+
+    #[test]
+    fn a_row_keeps_its_columns_in_select_order() {
+        let batch = RecordBatch::try_from_iter([
+            ("z", Arc::new(Int64Array::from(vec![1])) as _),
+            ("a", Arc::new(Int64Array::from(vec![2])) as _),
+        ])
+        .unwrap();
+        assert_eq!(rows(&batch).unwrap()[0].to_string(), r#"{"z":1,"a":2}"#);
+    }
 
     #[test]
     fn scaled_decimals_keep_their_places() {
