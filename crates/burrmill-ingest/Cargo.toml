@@ -43,3 +43,7 @@ parquet = { workspace = true, features = ["lz4"] }
 [[test]]
 name = "parquet"
 required-features = ["parquet"]
+
+[[test]]
+name = "parquet_pages"
+required-features = ["parquet"]

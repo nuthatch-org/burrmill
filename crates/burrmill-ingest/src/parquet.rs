@@ -32,22 +32,16 @@ pub(crate) fn read(
     check_clock: &dyn Fn(&Budget) -> Result<()>,
 ) -> Result<(Vec<RecordBatch>, IngestReport)> {
     let bytes_read = raw.len() as u64;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(raw)).map_err(invalid)?;
+    let file = Bytes::from(raw);
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file.clone()).map_err(invalid)?;
     let meta = builder.metadata().clone();
 
     let schema = Arc::clone(builder.schema());
     let width = schema.fields().len() as u64;
     budget.charge("max_columns", budget.max_columns, width)?;
     let mut declared_rows = meta.file_metadata().num_rows().max(0) as u64;
-    let mut declared_bytes = 0u64;
     for rg in meta.row_groups() {
         declared_rows = declared_rows.max(rg.num_rows().max(0) as u64);
-        for c in rg.columns() {
-            if let Some(format) = unread_codec(c.compression()) {
-                return Err(IngestError::Unsupported { format });
-            }
-            declared_bytes = declared_bytes.saturating_add(c.uncompressed_size().max(0) as u64);
-        }
     }
     let row_sum: u64 = meta
         .row_groups()
@@ -55,10 +49,27 @@ pub(crate) fn read(
         .map(|rg| rg.num_rows().max(0) as u64)
         .sum();
     budget.charge("max_rows", budget.max_rows, declared_rows.max(row_sum))?;
-    // The pages say how big they decode to, and that is what the decoder allocates.
-    let mut memory = bytes_read.saturating_add(declared_bytes);
-    budget.charge("max_memory_bytes", budget.max_memory_bytes, memory)?;
-    memory = bytes_read;
+    // Each page header says how big the page decodes to, and the decoder allocates that before
+    // it reads the page. The footer's sizes are counted too, but a page need not agree with them.
+    let (mut declared_bytes, mut paged_bytes) = (0u64, 0u64);
+    for c in meta.row_groups().iter().flat_map(|rg| rg.columns()) {
+        if let Some(format) = unread_codec(c.compression()) {
+            return Err(IngestError::Unsupported { format });
+        }
+        declared_bytes = declared_bytes.saturating_add(c.uncompressed_size().max(0) as u64);
+        let start = c.dictionary_page_offset().unwrap_or(c.data_page_offset());
+        let pages = crate::pages::decoded_size(&file, start, c.compressed_size())
+            .ok_or(IngestError::Invalid { format: "parquet" })?;
+        paged_bytes = paged_bytes.saturating_add(pages);
+        budget.charge(
+            "max_memory_bytes",
+            budget.max_memory_bytes,
+            bytes_read.saturating_add(declared_bytes.max(paged_bytes)),
+        )?;
+        check_clock(budget)?;
+    }
+    drop(file);
+    let mut memory = bytes_read;
     let mut peak = memory;
 
     let reader = builder

@@ -12,6 +12,8 @@ mod encoding;
 mod error;
 mod infer;
 #[cfg(feature = "parquet")]
+mod pages;
+#[cfg(feature = "parquet")]
 mod parquet;
 mod report;
 mod sniff;
