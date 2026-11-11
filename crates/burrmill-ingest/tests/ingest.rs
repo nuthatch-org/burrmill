@@ -618,6 +618,33 @@ fn a_short_sniff_window_does_not_panic_on_a_bad_tail() {
 }
 
 #[test]
+fn a_sniff_window_that_splits_a_character_is_still_utf8() {
+    let mut s = String::from("who,city\n");
+    while s.len() < 70_000 {
+        s.push_str("Иван,София\n");
+    }
+    assert!(!s.is_char_boundary(64 << 10));
+    let table = go(s.as_bytes());
+    assert_eq!(table.report().dialect.encoding, EncodingKind::Utf8);
+    let rows = table.preview(usize::MAX);
+    assert_eq!(rows.len() as u64, table.report().rows);
+    for row in rows {
+        assert_eq!(row, vec![Some("Иван".into()), Some("София".into())]);
+    }
+}
+
+#[test]
+fn many_short_lines_sniff_in_linear_time() {
+    let mut s = String::from("n\n");
+    while s.len() < 64 << 10 {
+        s.push_str("1\n");
+    }
+    let budget = Budget::untrusted().max_millis(2_000);
+    let table = ingest_bytes(s.as_bytes(), FormatHint::Sniff, &budget).unwrap();
+    assert_eq!(table.report().rows as usize, (s.len() - 2) / 2);
+}
+
+#[test]
 fn issue_storage_stops_at_sixty_four() {
     let mut s = String::from("a,b,c\n");
     for _ in 0..70 {
