@@ -1,5 +1,6 @@
-//! A scan that stops when the engine's token is cancelled, and `Cancellable`, which puts the same
-//! check where a join does its work.
+//! A scan that stops when its statement's token is cancelled, and `Cancellable`, which puts the
+//! same check where a join does its work. The token is the one in the task context the plan runs
+//! under, so each statement stops at its own.
 //!
 //! DataFusion's operators do not yield inside themselves (apache/datafusion#19358): an aggregate
 //! over a join produces nothing until it has consumed everything, so a check between output
@@ -14,6 +15,7 @@
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
@@ -45,9 +47,21 @@ use crate::CancelToken;
 #[derive(Debug)]
 pub(super) struct CancelExec {
     inner: Arc<dyn ExecutionPlan>,
-    token: CancelToken,
+    /// Where a wrapped join's [`CancelExpr`] finds the token, which only `execute` knows.
+    filter: Option<Slot>,
     /// A segment scan's thread-CPU meter, off until a metered statement arms it.
     cpu: Option<ScanCpu>,
+}
+
+/// A plan is made for one statement, so the first token set is the only one.
+type Slot = Arc<OnceLock<CancelToken>>;
+
+/// The token of the statement `ctx` runs.
+pub(super) fn statement_token(ctx: &TaskContext) -> CancelToken {
+    ctx.session_config()
+        .get_extension::<CancelToken>()
+        .map(|t| t.as_ref().clone())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -57,25 +71,19 @@ pub(super) struct ScanCpu {
 }
 
 impl CancelExec {
-    pub(super) fn wrap(
-        inner: Arc<dyn ExecutionPlan>,
-        token: CancelToken,
-    ) -> Arc<dyn ExecutionPlan> {
+    fn wrap(inner: Arc<dyn ExecutionPlan>, filter: Option<Slot>) -> Arc<dyn ExecutionPlan> {
         Arc::new(Self {
             inner,
-            token,
+            filter,
             cpu: None,
         })
     }
 
-    /// [`CancelExec::wrap`] for a segment scan, whose decoding [`arm_scan_cpu`] can time.
-    pub(super) fn wrap_scan(
-        inner: Arc<dyn ExecutionPlan>,
-        token: CancelToken,
-    ) -> Arc<dyn ExecutionPlan> {
+    /// A segment scan, whose decoding [`arm_scan_cpu`] can time.
+    pub(super) fn wrap_scan(inner: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         Arc::new(Self {
             inner,
-            token,
+            filter: None,
             cpu: Some(ScanCpu::default()),
         })
     }
@@ -124,7 +132,7 @@ impl ExecutionPlan for CancelExec {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(Arc::new(Self {
             inner: children.pop().expect("one child"),
-            token: self.token.clone(),
+            filter: self.filter.clone(),
             cpu: self.cpu.clone(),
         }))
     }
@@ -160,6 +168,10 @@ impl ExecutionPlan for CancelExec {
         partition: usize,
         ctx: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
+        let token = statement_token(&ctx);
+        if let Some(slot) = &self.filter {
+            let _ = slot.set(token.clone());
+        }
         // Charged whether or not it fits, so the operators that can spill make room for it.
         let bytes = super::catalog::bookkeeping(&self.inner, partition);
         let held = (bytes > 0).then(|| {
@@ -180,7 +192,6 @@ impl ExecutionPlan for CancelExec {
             });
         }
         let schema = stream.schema();
-        let token = self.token.clone();
         let checked = stream.map(move |item| {
             let _held = &held;
             if token.is_cancelled() {
@@ -242,7 +253,7 @@ fn thread_cpu_nanos() -> u64 {
 /// Wraps every join's output in [`CancelExec`] and its filter in [`CancelExpr`]. Last among the
 /// physical rules, so it sees the joins `RangeJoin` made.
 #[derive(Debug)]
-pub(super) struct Cancellable(pub(super) CancelToken);
+pub(super) struct Cancellable;
 
 impl PhysicalOptimizerRule for Cancellable {
     fn optimize(
@@ -254,22 +265,28 @@ impl PhysicalOptimizerRule for Cancellable {
             if !p.name().ends_with("JoinExec") {
                 return Ok(Transformed::no(p));
             }
-            let p = if let Some(j) = p.downcast_ref::<NestedLoopJoinExec>() {
-                Arc::new(
+            let slot = Slot::default();
+            let (p, filtered) = if let Some(j) = p.downcast_ref::<NestedLoopJoinExec>() {
+                let p: Arc<dyn ExecutionPlan> = Arc::new(
                     NestedLoopJoinExecBuilder::from(j)
-                        .with_filter(j.filter().map(|f| self.checked(f)))
+                        .with_filter(j.filter().map(|f| checked(f, &slot)))
                         .build()?,
-                )
+                );
+                (p, true)
             } else if let Some(j) = p.downcast_ref::<HashJoinExec>() {
-                Arc::new(
+                let p: Arc<dyn ExecutionPlan> = Arc::new(
                     j.builder()
-                        .with_filter(j.filter().map(|f| self.checked(f)))
+                        .with_filter(j.filter().map(|f| checked(f, &slot)))
                         .build()?,
-                )
+                );
+                (p, true)
             } else {
-                p
+                (p, false)
             };
-            Ok(Transformed::yes(CancelExec::wrap(p, self.0.clone())))
+            Ok(Transformed::yes(CancelExec::wrap(
+                p,
+                filtered.then_some(slot),
+            )))
         })
         .map(|t| t.data)
     }
@@ -283,24 +300,23 @@ impl PhysicalOptimizerRule for Cancellable {
     }
 }
 
-impl Cancellable {
-    fn checked(&self, f: &JoinFilter) -> JoinFilter {
-        JoinFilter::new(
-            Arc::new(CancelExpr {
-                inner: Arc::clone(f.expression()),
-                token: self.0.clone(),
-            }),
-            f.column_indices().to_vec(),
-            Arc::clone(f.schema()),
-        )
-    }
+fn checked(f: &JoinFilter, slot: &Slot) -> JoinFilter {
+    JoinFilter::new(
+        Arc::new(CancelExpr {
+            inner: Arc::clone(f.expression()),
+            token: Arc::clone(slot),
+        }),
+        f.column_indices().to_vec(),
+        Arc::clone(f.schema()),
+    )
 }
 
-/// An expression that fails once the token is cancelled, and is otherwise the one it wraps.
+/// An expression that fails once the statement's token is cancelled, and is otherwise the one it
+/// wraps.
 #[derive(Debug)]
 struct CancelExpr {
     inner: Arc<dyn PhysicalExpr>,
-    token: CancelToken,
+    token: Slot,
 }
 
 impl PartialEq for CancelExpr {
@@ -325,7 +341,7 @@ impl fmt::Display for CancelExpr {
 
 impl PhysicalExpr for CancelExpr {
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
-        if self.token.is_cancelled() {
+        if self.token.get().is_some_and(CancelToken::is_cancelled) {
             return Err(DataFusionError::Execution("cancelled".into()));
         }
         self.inner.evaluate(batch)
@@ -342,7 +358,7 @@ impl PhysicalExpr for CancelExpr {
     ) -> Result<Arc<dyn PhysicalExpr>> {
         Ok(Arc::new(Self {
             inner: children.pop().expect("one child"),
-            token: self.token.clone(),
+            token: Arc::clone(&self.token),
         }))
     }
     fn fmt_sql(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

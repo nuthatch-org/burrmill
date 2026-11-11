@@ -419,7 +419,7 @@ impl MiniSession {
                     as Arc<dyn PhysicalOptimizerRule + Send + Sync>
             }))
             .chain([
-                Arc::new(super::cancel::Cancellable(cancel))
+                Arc::new(super::cancel::Cancellable)
                     as Arc<dyn PhysicalOptimizerRule + Send + Sync>,
                 Arc::new(super::sharing::PublishShared),
             ])
