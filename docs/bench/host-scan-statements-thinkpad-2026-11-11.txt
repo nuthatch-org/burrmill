@@ -1,0 +1,234 @@
+host-scan and engine-sql on the ThinkPad, 2026-11-11: statements, for burrmill#156, #158, #159 and #180.
+
+base is main at 99f0ffb with the probe (bench-base); all adds burrmill#267, #268 and #269. Nests,
+budgets and the load on the box are as in host-scan-thinkpad-2026-11-11.txt: the load average was 60
+to 120 throughout, and one configuration's statement pass spread from 15.3 to 26.5 s between runs,
+so differences of a few per cent here are not findings. scan_peak_kb is from a counter patched into
+cancel.rs for the measurement; the page index and bloom filter switches were patched into
+catalog.rs the same way and are in no tree.
+
+
+1. What the scans hold in the pool (#156)
+
+One pass of the statements, the peak of the SegmentScan reservations in any one statement.
+"base, charged whole" is main made to find the scan under CompactViews, which is what main meant
+to charge; main as it stands finds no scan there and charges a scan of text columns nothing.
+
+                                     refused   scan peak      pool peak
+  gate, 75 statements, 2 GB: base    0         1,192 KiB      1791 MiB
+    base, charged whole              0         48,764 KiB     1788 MiB
+    all                              0         17,421 KiB     1790 MiB
+  qos, 9 statements, 704 MB: base    2         0 KiB          615 MiB
+    base                             3         0 KiB          615 MiB
+    base                             2         0 KiB          614 MiB
+    base, charged whole              4         87,483 KiB     615 MiB
+    all                              4         50,839 KiB     615 MiB
+    all                              4         50,839 KiB     615 MiB
+
+The five statements holding most, gate copy:
+
+  base, charged whole   network 48,764 KiB, delegator.stakes 36,237 KiB, delegator.active_stakes 36,237 KiB, refresh.indexers_all 36,157 KiB, indexer.detail 36,157 KiB
+  all                   network 17,421 KiB, indexers 12,069 KiB, indexer.detail 11,839 KiB, refresh.indexers_all 10,701 KiB, delegator.active_stakes 10,516 KiB
+
+The QoS statements under all, at 704 MB with no spill directory (two runs agree):
+
+  provenance	ms=27.5	scan_peak_kb=0	pool_peak_mb=0	ok
+  day_probe	ms=688.5	scan_peak_kb=3508	pool_peak_mb=20	ok
+  indexer_day	ms=6938.4	scan_peak_kb=50839	pool_peak_mb=612	limit exceeded: Out of Memory Error: Additional allocation f
+  seconds_behind_day	ms=6809.1	scan_peak_kb=50839	pool_peak_mb=607	limit exceeded: Out of Memory Error: Additional allocation f
+  network_rows	ms=7609.2	scan_peak_kb=50839	pool_peak_mb=615	limit exceeded: Out of Memory Error: Additional allocation f
+  indexer_daily	ms=7371.7	scan_peak_kb=50839	pool_peak_mb=555	ok
+  indexer_gateways	ms=6186.7	scan_peak_kb=50839	pool_peak_mb=127	ok
+  indexer_seconds_behind	ms=7277.6	scan_peak_kb=50839	pool_peak_mb=611	limit exceeded: Out of Memory Error: Additional allocation f
+  freshness	ms=691.1	scan_peak_kb=3413	pool_peak_mb=157	ok
+
+
+2. The page index and bloom filters off (#159)
+
+One pass of the statements on base, wall s (CPU s), three runs each on alloc and qos and one on
+gate. The 1,924-segment alloc copy's views predate the portable rewrite, so 57 of its 75 statements
+run. The footer cache held the same bytes in every configuration: 22,291 KB on alloc, and its limit
+on qos. metadata_load_time is not available: the scans drop DataFusion's per-file metrics (#86).
+
+           default                page index off         bloom filters off      both off
+  alloc 1  25.2 (52.0)            20.8 (50.1)            15.3 (47.0)            17.1 (48.0)
+  alloc 2  25.5 (53.2)            23.9 (51.5)            24.2 (52.6)            23.1 (51.5)
+  alloc 3  26.0 (53.1)            24.8 (52.5)            26.5 (52.8)            25.6 (52.5)
+  qos 1    61.4 (122.0)           58.7 (121.6)           55.4 (117.3)           56.1 (121.5)
+  qos 2    62.5 (126.2)           61.4 (120.1)           55.0 (118.4)           53.0 (116.9)
+  qos 3    56.1 (121.9)           55.0 (119.9)           59.3 (122.7)           60.3 (121.2)
+  gate 1   79.0 (240.2)           74.8 (230.6)           76.9 (235.6)           -
+
+
+3. Allocations (#158)
+
+bench-base built with --features alloc-stats, gate copy, ROUNDS=2. A count of every table scans
+each of the 6,753 segments once.
+
+# 2026-11-11T14:12:31Z load=58.73 59.84 62.23 variant=basealloc nest=gate ROUNDS=2 EACH=1
+NEST	tables=83	segments=6753	views=23	statements=75	budget_mb=2048	threads=8
+OPEN	first	wall_ms=915.5	cpu_ms=775	allocs=1598819	bind_footer_reads=6753
+PASS	wall_ms=2273.0	cpu_ms=4344	allocs=4038917	first/counts/cold	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1432.4	cpu_ms=3039	allocs=3030180	first/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=116018.6	cpu_ms=383976	allocs=282144311	first/statements	refused=0	scan_peak_kb=1192	pool_peak_mb=1790	footer_cache_kb=75249
+OPEN	second	wall_ms=256.0	cpu_ms=200	allocs=280086	bind_footer_reads=0
+PASS	wall_ms=2287.8	cpu_ms=4291	allocs=4038434	second/counts/cold	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1465.0	cpu_ms=3526	allocs=3030209	second/counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+OPEN	third	wall_ms=288.4	cpu_ms=227	allocs=280108	bind_footer_reads=0
+PASS	wall_ms=2409.5	cpu_ms=5078	allocs=4292539	third/metered-counts/cold	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+PASS	wall_ms=1456.1	cpu_ms=3568	allocs=3100770	third/metered-counts/warm	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+REBIND	wall_ms=260.1	cpu_ms=212	allocs=291852	segments=6753
+REBIND	wall_ms=250.6	cpu_ms=199	allocs=291830	segments=6753
+PASS	wall_ms=1507.2	cpu_ms=3170	allocs=3030199	third/rebound	refused=0	scan_peak_kb=4945	pool_peak_mb=4	footer_cache_kb=75249
+
+
+4. Both engines over the gate's query sets (#180)
+
+  burrmill-bench engine-sql <nest> <one file per statement>
+
+In process, one client, each statement once for the answer and then five times timed, median
+reported; DuckDB first, then Burrmill. DuckDB is set up as nuthatch set it up (read_parquet over
+each table's file list, union_by_name) at eight threads with no memory limit; Burrmill has
+BUDGET_MB and THREADS as given and no spill directory. The binary is bench-base but for the last run. Where a digest differs the rows differ in the
+last digit of a float sum, and DuckDB's own digest for those statements changes between runs
+(delegation_flows: f544.. then 07ee..).
+
+alloc gate copy, 6,753 segments, 75 statements, BUDGET_MB=2048 THREADS=8
+# 2026-11-11T12:53:47Z load=116.89 100.07 94.48 engine-sql alloc 2048 MB 8 threads
+  both answer all 75; Burrmill is the faster on 65
+  median  DuckDB 1616 ms, Burrmill 555 ms
+  sum     DuckDB 243.3 s, Burrmill 102.2 s
+  slowest DuckDB 26531 ms, Burrmill 9222 ms
+
+  statement                                    DuckDB  Burrmill
+  001-indexers                                  13190      8575
+  002-curators                                    205       144
+  003-epochs                                    26531      3792
+  004-network                                   17757      9222
+  005-network_params                             2222      1167
+  006-indexer.detail                             6367      6609
+  007-indexer.operators                            17        16
+  008-indexer.delegators                          631       571
+  009-indexer.active_allocations                 4468      1005
+  010-indexer.closed_allocations                 2592      1684
+  011-delegation_ratio                           2160      1037
+  012-indexer.delegators_page                   11138      6789
+  013-indexer.stake_history                      6064      4872
+  014-indexer.daily                              5019      3192
+  015-indexer.revenue_daily                      4763      2555
+  016-indexer.revenue_by_deployment              4146      2824
+  017-indexer.allocation_shares                  4216       614
+  018-indexer.qos_qualifying_signal               315       184
+  019-delegator                                   500       663
+  020-delegator.stakes                          13813      5925
+  021-delegator.active_stakes                    9492      4310
+  022-curator                                     139        94
+  023-curator.signals                            2065       869
+  024-provisions.by_indexer                      1722       912
+  025-provisions.max_thawing                       42        30
+  026-provisions.service_totals                  1909       559
+  027-provisions.thaw_requests                     76        42
+  028-provisions.horizon_activity                 213       119
+  029-provisions.by_service                      9894      4037
+  030-payments.accounts                           153       130
+  031-payments.transactions                       217       317
+  032-payments.tally                               99       100
+  033-payments.by_payer                           105        78
+  034-payments.receiver_accounts                  131       143
+  035-payments.receiver_transactions              226       393
+  036-payments.receiver_tally                      84        91
+  037-payments.receiver_by_payer                   89        80
+  038-poi.overview                               2974      2074
+  039-poi.deployment                             2696      1969
+  040-delegation_events                           123        91
+  041-delegation_flows                             58        45
+  042-deployments.list                           3432       729
+  043-deployments.one                            3514       624
+  044-deployments.fees_30d                       1475       555
+  045-deployments.by_fee_ids                     3477       753
+  046-deployments.directory                      3691       757
+  047-deployments.fees_window                    1467       500
+  048-deployment.signals                         1826       374
+  049-deployment.signal_transactions               74        44
+  050-deployment.allocation_history              1467       305
+  051-deployment.status                          1575       422
+  052-deployment.allocations                     9519      2286
+  053-deployments.signal_stake                   1511       368
+  054-deployment.disassembly_signal              1903       409
+  055-search.figures                             3554       603
+  056-search.deployment_ids                      3178       620
+  057-sqlplay.sample                               34        27
+  058-sqlplay.delegations_to_indexer               28        22
+  059-sqlplay.delegator_activity                   48        32
+  060-sqlplay.net_delegation_to_indexer            24        17
+  061-refresh.indexers_all                       8115      4441
+  062-refresh.active_allocations_all             2746       523
+  063-refresh.delegation_flow_7d                  193        53
+  064-refresh.closed_allocations_90d             1495       715
+  065-refresh.data_service_counts                1564       136
+  066-refresh.exchange_rates_30d                 6285      2070
+  067-refresh.exchange_rates_90d                 5784      2091
+  068-ingest.epochs                             11033      2422
+  069-ingest.delegation_events                    241       105
+  070-ingest.allocations                         1885       919
+  071-ingest.disputes                            1616       367
+  072-live.delegation_events                      103       138
+  073-live.newest_provisions                       11        13
+  074-rav.collections                             374       505
+  075-qos.allocation_shares_all                  1461       382
+
+qos gate copy, 14,913 segments, 9 statements, BUDGET_MB=704 THREADS=4
+# 2026-11-11T12:40:50Z load=107.55 99.52 94.58 engine-sql qos 704 MB 4 threads
+
+  statement                                    DuckDB  Burrmill
+  001-provenance                                   12         4
+  002-day_probe                                  1623       757
+  003-indexer_day                                8329   refused
+  004-seconds_behind_day                         6741      9420
+  005-network_rows                               5067   refused
+  006-indexer_daily                              4845      9422
+  007-indexer_gateways                           5069      8500
+  008-indexer_seconds_behind                     7246      9482
+  009-freshness                                   830       908
+
+the same again
+# 2026-11-11T13:53:22Z load=65.80 62.17 66.44 engine-sql qos 704 MB 4 threads
+
+  statement                                    DuckDB  Burrmill
+  001-provenance                                    2         2
+  002-day_probe                                   969       580
+  003-indexer_day                                5228   refused
+  004-seconds_behind_day                         5099   refused
+  005-network_rows                               4657   refused
+  006-indexer_daily                              4706      7158
+  007-indexer_gateways                           4261      6025
+  008-indexer_seconds_behind                     4803   refused
+  009-freshness                                   421       558
+
+qos, BUDGET_MB=2048 THREADS=4
+# 2026-11-11T14:18:30Z load=67.61 62.59 62.63 engine-sql qos 2048 MB 4 threads
+
+  statement                                    DuckDB  Burrmill
+  001-provenance                                    1         3
+  002-day_probe                                   943       561
+  003-indexer_day                                5424      5392
+  004-seconds_behind_day                         4569      4428
+  005-network_rows                               4705      4945
+  006-indexer_daily                              4887      3829
+  007-indexer_gateways                           4126      2682
+  008-indexer_seconds_behind                     4606      4293
+  009-freshness                                   442       516
+
+qos, BUDGET_MB=704 THREADS=4, bench-all: with #267, #268 and #269
+# 2026-11-11T14:39:02Z load=60.58 60.93 61.16 engine-sql qos 704 MB 4 threads, bench-all
+
+  statement                                    DuckDB  Burrmill
+  001-provenance                                    0         2
+  002-day_probe                                   964       537
+  003-indexer_day                                5176   refused
+  004-seconds_behind_day                         4615   refused
+  005-network_rows                               4655   refused
+  006-indexer_daily                              4663      7066
+  007-indexer_gateways                           4013      6231
+  008-indexer_seconds_behind                     4630   refused
+  009-freshness                                   445       559

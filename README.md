@@ -100,9 +100,20 @@ one-day statements took 3.2 to 4.1 s against DuckDB's 0.6 to 0.7, because a date
 through a join was not pushed to the scan and Burrmill read every segment where DuckDB read the
 day's. `RangeBounds` (#68, 2026-10-04) now bounds the probe scan by the join's build-side extremes,
 and on a QoS copy the kittiwake one-day statements went from 7 to 11 s to 1.1 to 1.6 s, 47 of 5.32K
-row groups read. Lodestar's eight and the allocations figures have not been re-measured since #68 or
-the 2,048-row batch (#112). Byte-identical throughout, and the engine's memory limit holds; it is the
-speed that nuthatch's README now quotes, and the swap was not made for speed.
+row groups read. Byte-identical throughout, and the engine's memory limit holds; it is the speed
+that nuthatch's README now quotes, and the swap was not made for speed.
+
+**Re-measured on 2026-11-11, in process.** Nuthatch no longer carries DuckDB, so the `/sql` sweep
+cannot be repeated. These are `engine-sql` over the ThinkPad's gate copies: one client, warm medians
+of five, DuckDB bound as nuthatch bound it and at eight threads, the box under a load average of 60
+to 110 (`docs/bench/host-scan-statements-thinkpad-2026-11-11.txt`). Over the allocations dashboard's
+75 statements (6,753 segments, Burrmill at 2 GB and eight threads) Burrmill's median is 555 ms
+against DuckDB's 1,616, the sum 102 s against 243, and it is the faster on 65. Over the QoS day
+set's nine (14,913 segments, four threads) Burrmill at 2 GB answers all nine, the six heavy ones in
+2.7 to 5.4 s against DuckDB's 4.1 to 5.4. At the nest's own 704 MB, with no spill directory, it
+refuses four of the nine, and the two heavy ones it answers take 6.2 and 7.1 s against DuckDB's 4.0
+and 4.7; before #269 charged a scan for the segments it holds, it refused two to four. Answers
+match but for float sums in the last digit, which DuckDB does not repeat between runs either.
 
 **Exact.** Integer overflow returns an error, never a wrapped number, on both layers. The owned fold
 refuses when an intermediate partial sum leaves `i128`; the engine's `CheckedArithmetic` makes the
@@ -172,8 +183,13 @@ Said plainly, because a README that implies otherwise is the thing this project 
   through `/sql` on the allocations nest, and 4.5 s against 0.7 for the QoS nest's eight one-day
   statements. The QoS cause, a day range through a join side not reaching the scan, is fixed by
   `RangeBounds` (#68) for a collect-left join that drops unmatched probe rows; a partitioned join,
-  an outer probe side or a float comparison still reads every segment. Both figures are owed a
-  re-measurement on the current tree.
+  an outer probe side or a float comparison still reads every segment. Neither figure can be taken
+  again as it was, since nuthatch has no DuckDB to serve beside. In process on 2026-11-11 Burrmill
+  was the faster on the allocations statements and level with DuckDB on the QoS day set at 2 GB
+  (above). What QoS is owed now is memory rather than pruning: at 704 MB without a spill directory
+  it refuses four of the nine day statements and runs the heavy ones it answers at about 1.5 times
+  DuckDB's time, and no session keeps a large table's footers between statements, since the nest's
+  take 341 MB and a 704 MB budget's cache holds 88 (RFC-0047 §3).
 - **More memory per session.** The allocations nest's dashboard refuses 12 or 13 of its statements
   at 1 GB and 18 at 768 MB, so nuthatch runs it at two sessions of 2 GB and eight threads where
   DuckDB had four of 256 MB. The engine's limit holds; what glibc then kept of a whole-day statement's
