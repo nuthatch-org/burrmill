@@ -223,20 +223,25 @@ impl Session {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn aggregate_feedback(&self, sql: &str) -> Result<String, String> {
-        let sized = match measure_sql(sql) {
-            Ok(sql) => sql,
+        let measured = match measure_sql(sql) {
+            Ok(measured) => measured,
             Err(reason) => return Ok(skipped(reason)),
         };
-        Ok(filter_payload(&self.query(&sized)?))
+        let dropped = self.query(&measured.dropped)?;
+        Ok(filter_payload(&self.query(&measured.answer)?, &dropped))
     }
 
     #[cfg(target_arch = "wasm32")]
     pub async fn aggregate_feedback(&self, sql: &str) -> Result<String, String> {
-        let sized = match measure_sql(sql) {
-            Ok(sql) => sql,
+        let measured = match measure_sql(sql) {
+            Ok(measured) => measured,
             Err(reason) => return Ok(skipped(reason)),
         };
-        Ok(filter_payload(&self.query(&sized).await?))
+        let dropped = self.query(&measured.dropped).await?;
+        Ok(filter_payload(
+            &self.query(&measured.answer).await?,
+            &dropped,
+        ))
     }
 
     /// Replace the token map. An empty list clears it, so a later schema or
