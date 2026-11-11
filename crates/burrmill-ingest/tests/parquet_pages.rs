@@ -1,11 +1,14 @@
-//! A page header that claims more than the budget is refused before the decoder allocates for it.
-//! Its own binary, so the largest allocation seen is this test's.
+//! What a Parquet file would make the decoder allocate past the budget is refused before it does:
+//! a page header's claim, and a list column's values. Its own binary, and one test at a time, so
+//! the largest allocation seen is the test's own.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-use arrow::array::{ArrayRef, Int32Array, RecordBatch};
+use arrow::array::{ArrayRef, Int32Array, ListArray, RecordBatch, StructArray};
+use arrow::buffer::OffsetBuffer;
+use arrow::datatypes::{DataType, Field};
 use burrmill_ingest::{Budget, BudgetBreach, FormatHint, IngestError, ingest_bytes};
 use bytes::Bytes;
 use parquet::arrow::ArrowWriter;
@@ -37,6 +40,8 @@ unsafe impl GlobalAlloc for Watch {
 
 #[global_allocator]
 static WATCH: Watch = Watch;
+
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 const CLAIM: u64 = 256 << 20;
 
@@ -104,6 +109,7 @@ fn lying_file() -> Vec<u8> {
 
 #[test]
 fn a_page_claiming_more_than_the_budget_is_refused_before_it_is_allocated() {
+    let _alone = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let file = lying_file();
     let budget = Budget::untrusted().max_memory_bytes(16 << 20);
     LARGEST.store(0, Ordering::Relaxed);
@@ -118,4 +124,74 @@ fn a_page_claiming_more_than_the_budget_is_refused_before_it_is_allocated() {
         })
     );
     assert!(largest < 1 << 20, "allocated {largest} bytes at once");
+}
+
+fn write(columns: Vec<(&str, ArrayRef)>) -> Vec<u8> {
+    let batch = RecordBatch::try_from_iter(columns).unwrap();
+    let props = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .build();
+    let mut file = Vec::new();
+    let mut w = ArrowWriter::try_new(&mut file, batch.schema(), Some(props)).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+    file
+}
+
+/// One row whose list holds `n` zeros: a few kilobytes of file, `4 * n` bytes decoded, and no
+/// page that says so.
+fn one_long_list(n: usize) -> ArrayRef {
+    Arc::new(ListArray::new(
+        Arc::new(Field::new_list_field(DataType::Int32, false)),
+        OffsetBuffer::from_lengths([n]),
+        Arc::new(Int32Array::from(vec![0; n])),
+        None,
+    ))
+}
+
+#[test]
+fn a_list_column_is_refused_before_its_values_are_decoded() {
+    let _alone = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let id = Arc::new(Int32Array::from(vec![1])) as ArrayRef;
+    let list = one_long_list(8 << 20);
+    let inside: ArrayRef = Arc::new(StructArray::from(vec![(
+        Arc::new(Field::new("tags", list.data_type().clone(), false)),
+        Arc::clone(&list),
+    )]));
+    for column in [list, inside] {
+        let file = write(vec![("id", Arc::clone(&id)), ("c", column)]);
+        assert!(file.len() < 64 << 10, "{}", file.len());
+        LARGEST.store(0, Ordering::Relaxed);
+        let err = ingest_bytes(&file, FormatHint::Sniff, &Budget::untrusted()).unwrap_err();
+        let largest = LARGEST.load(Ordering::Relaxed);
+        assert_eq!(
+            err,
+            IngestError::Unsupported {
+                format: "parquet with a list or map column"
+            }
+        );
+        assert!(largest < 1 << 20, "allocated {largest} bytes at once");
+    }
+}
+
+#[test]
+fn a_struct_of_plain_fields_still_opens_as_text() {
+    let _alone = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let point: ArrayRef = Arc::new(StructArray::from(vec![(
+        Arc::new(Field::new("x", DataType::Int32, false)),
+        Arc::new(Int32Array::from(vec![7, 8])) as ArrayRef,
+    )]));
+    let table = ingest_bytes(
+        &write(vec![("point", point)]),
+        FormatHint::Sniff,
+        &Budget::untrusted(),
+    )
+    .unwrap();
+    assert_eq!(
+        table.preview(2),
+        vec![
+            vec![Some("{x: 7}".to_string())],
+            vec![Some("{x: 8}".to_string())]
+        ]
+    );
 }
