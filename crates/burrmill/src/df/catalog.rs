@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
@@ -169,27 +169,91 @@ pub fn apply_schema_text(tables: &mut Vec<NestTable>, raw: &str) -> crate::Resul
     Ok(())
 }
 
-/// What a scan holds for each segment it opens until the scan ends, beside two copies of its path:
-/// DataFusion's per-file metrics and the opener's state. `tests/df_scanpool.rs` measures it.
+/// What a scan holds for each segment until the scan ends, beside two copies of its path: `LISTED`
+/// of it from the start, for the segment's place in the plan's file lists, and the rest once it
+/// opens the segment, for DataFusion's per-file metrics and the opener's state.
+/// `tests/df_scanpool.rs` measures both.
 const PER_SEGMENT: usize = 5_632;
+const LISTED: usize = 1_024;
 
-/// The bytes `plan`, if it is a segment scan, holds for the segments of `partition` while it runs.
-pub(super) fn bookkeeping(plan: &Arc<dyn ExecutionPlan>, partition: usize) -> usize {
-    plan.downcast_ref::<DataSourceExec>()
-        .and_then(|d| d.data_source().downcast_ref::<FileScanConfig>())
+/// The bytes the segment scan under `plan` holds for listing the segments of `partition`.
+pub(super) fn listed(plan: &Arc<dyn ExecutionPlan>, partition: usize) -> usize {
+    // `CompactViews` wraps a scan of text columns partition for partition. Looking no further than
+    // `plan` itself charged such a scan nothing.
+    let mut plan = plan;
+    let scan = loop {
+        if let Some(d) = plan.downcast_ref::<DataSourceExec>() {
+            break d;
+        }
+        match plan.children().as_slice() {
+            [child] => plan = child,
+            _ => return 0,
+        }
+    };
+    scan.data_source()
+        .downcast_ref::<FileScanConfig>()
         .and_then(|c| c.file_groups.get(partition))
         .map_or(0, |g| {
             g.iter()
-                .map(|f| PER_SEGMENT + 2 * f.object_meta.location.as_ref().len())
+                .map(|f| LISTED + 2 * f.object_meta.location.as_ref().len())
                 .sum()
         })
+}
+
+/// The pool reservations of one scan's running partitions. Its reader factory charges a segment
+/// to its partition's as the segment opens, so a scan holds for what it has opened and not for
+/// every segment of the table before its first row (#156).
+#[derive(Debug, Default)]
+pub(super) struct Opened(Mutex<HashMap<usize, Vec<Running>>>);
+
+type Held = datafusion_execution::memory_pool::MemoryReservation;
+
+#[derive(Debug)]
+struct Running {
+    held: Weak<Held>,
+    /// A segment's bloom filters are read through a second reader, which must not charge it twice.
+    charged: HashSet<u64>,
+}
+
+impl Opened {
+    /// `held` is what `partition` charges from here on, until its stream drops it.
+    pub(super) fn running(&self, partition: usize, held: &Arc<Held>) {
+        let mut all = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let runs = all.entry(partition).or_default();
+        runs.retain(|r| r.held.strong_count() > 0);
+        runs.push(Running {
+            held: Arc::downgrade(held),
+            charged: HashSet::new(),
+        });
+    }
+
+    fn opened(&self, partition: usize, file: &PartitionedFile) {
+        let location = file.object_meta.location.as_ref();
+        let mut all = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        // A plan run again while its first run is still read charges the newer run.
+        let Some((run, held)) = all
+            .get_mut(&partition)
+            .into_iter()
+            .flatten()
+            .rev()
+            .find_map(|r| r.held.upgrade().map(|h| (r, h)))
+        else {
+            return;
+        };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(location, &mut h);
+        if run.charged.insert(std::hash::Hasher::finish(&h)) {
+            // Charged whether or not it fits, so the operators that can spill make room for it.
+            held.grow(PER_SEGMENT - LISTED);
+        }
+    }
 }
 
 /// DataFusion's reader, its per-file metrics registered into a set dropped as soon as it is made.
 /// Kept, they held 4 KiB a segment until the scan ended (#86). The data bytes it reads go to the
 /// scan's one counter instead, which [`crate::QueryMetrics`] reports.
 #[derive(Debug)]
-struct Unmetered(Arc<dyn ParquetFileReaderFactory>, Count);
+struct Unmetered(Arc<dyn ParquetFileReaderFactory>, Count, Arc<Opened>);
 
 /// The [`crate::QueryMetrics::sealed_bytes_scanned`] counter in a scan's metrics.
 pub(super) const SEALED_BYTES: &str = "sealed_bytes_scanned";
@@ -202,6 +266,7 @@ impl ParquetFileReaderFactory for Unmetered {
         metadata_size_hint: Option<usize>,
         _metrics: &ExecutionPlanMetricsSet,
     ) -> DFResult<Box<dyn AsyncFileReader + Send>> {
+        self.2.opened(partition_index, &file);
         let unread = ExecutionPlanMetricsSet::new();
         let inner = self
             .0
@@ -471,9 +536,11 @@ impl TableProvider for SegmentTable {
         let footers = state.runtime_env().cache_manager.get_file_metadata_cache();
         let source = ParquetSource::new(self.schema.clone()).with_table_parquet_options(opts);
         let bytes = MetricBuilder::new(source.metrics()).global_counter(SEALED_BYTES);
+        let opened = Arc::new(Opened::default());
         let mut source = source.with_parquet_file_reader_factory(Arc::new(Unmetered(
             Arc::new(CachedParquetFileReaderFactory::new(store, footers)),
             bytes,
+            Arc::clone(&opened),
         )));
         let filters = filters
             .iter()
@@ -501,6 +568,7 @@ impl TableProvider for SegmentTable {
             .build();
         Ok(super::cancel::CancelExec::wrap_scan(
             DataSourceExec::from_data_source(cfg),
+            opened,
         ))
     }
 }
@@ -650,5 +718,38 @@ mod tests {
             );
         }
         assert!(local_location(&real.join("missing.parquet"), &mut parents).is_err());
+    }
+
+    #[test]
+    fn a_segment_is_charged_once_to_the_run_that_opens_it() {
+        use datafusion_execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+        let run = |name: &str| Arc::new(MemoryConsumer::new(name).register(&pool));
+        let opened = Opened::default();
+        let (a, b) = (
+            PartitionedFile::new("/s/a.parquet", 1),
+            PartitionedFile::new("/s/b.parquet", 1),
+        );
+        // No partition is running: nothing to charge.
+        opened.opened(0, &a);
+        assert_eq!(pool.reserved(), 0);
+        let first = run("first");
+        opened.running(0, &first);
+        opened.opened(0, &a);
+        // The reader its bloom filters are read through.
+        opened.opened(0, &a);
+        opened.opened(1, &b);
+        assert_eq!(first.size(), PER_SEGMENT - LISTED);
+        opened.opened(0, &b);
+        assert_eq!(first.size(), 2 * (PER_SEGMENT - LISTED));
+        // The plan run again: the newer run is charged, and the older again once that has gone.
+        let second = run("second");
+        opened.running(0, &second);
+        opened.opened(0, &a);
+        assert_eq!(second.size(), PER_SEGMENT - LISTED);
+        drop(second);
+        assert_eq!(pool.reserved(), first.size());
+        opened.opened(0, &PartitionedFile::new("/s/c.parquet", 1));
+        assert_eq!(first.size(), 3 * (PER_SEGMENT - LISTED));
     }
 }
