@@ -41,7 +41,7 @@ rustc-hash = "2"
 # heap allocation each, which is the difference between owning an aggregation and renting std's.
 hashbrown = "0.17"
 rayon = "1"
-sqlparser = "0.62"
+sqlparser = "0.63"
 
 # Gzip size of the ingest reader. Selected by hand. Does not change `release`.
 [profile.wasm-size]
