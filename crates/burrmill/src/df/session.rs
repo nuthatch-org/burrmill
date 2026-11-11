@@ -356,6 +356,9 @@ impl MiniSession {
                 )
                 .chain([Arc::new(super::bound::BoundValues(Arc::clone(&limits)))
                     as Arc<dyn AnalyzerRule + Send + Sync>])
+                .map(|r| {
+                    Arc::new(super::cancel::Stoppable(r)) as Arc<dyn AnalyzerRule + Send + Sync>
+                })
                 .collect(),
             ),
             // Without `eliminate_group_by_constant`: it recomputes a key that is a function of
@@ -372,6 +375,10 @@ impl MiniSession {
                             as Arc<dyn datafusion_optimizer::OptimizerRule + Send + Sync>,
                         Arc::new(super::sharing::PruneShared),
                     ])
+                    .map(|r| {
+                        Arc::new(super::cancel::Stoppable(r))
+                            as Arc<dyn datafusion_optimizer::OptimizerRule + Send + Sync>
+                    })
                     .collect(),
             ),
             // Last, so it sees the join filter after projection pushdown has made its operands columns.
@@ -422,6 +429,10 @@ impl MiniSession {
                 Arc::new(super::sequential::Sequential)
                     as Arc<dyn PhysicalOptimizerRule + Send + Sync>
             }))
+            .map(|r| {
+                Arc::new(super::cancel::Stoppable(r))
+                    as Arc<dyn PhysicalOptimizerRule + Send + Sync>
+            })
             .collect(),
             execution_props: ExecutionProps::new(),
             table_options: TableOptions::new(),

@@ -216,6 +216,7 @@ impl ParquetFileReaderFactory for Unmetered {
 /// The counter a plan's segment scan or owned fold reads into, taken before it runs: holding the
 /// plan itself through the statement would keep every segment's DataFusion metrics alive (#86).
 /// An owned fold's counter is flagged: it reads exactly what its footers select, so it counts as both.
+#[recursive::recursive]
 pub(super) fn sealed_counters(plan: &Arc<dyn ExecutionPlan>, out: &mut Vec<(Count, bool)>) {
     let fold = plan.name() == "OwnedSignedFoldExec";
     for m in plan.metrics().iter().flat_map(|s| s.iter()) {

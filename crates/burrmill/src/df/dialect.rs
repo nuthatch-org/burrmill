@@ -2008,6 +2008,7 @@ fn duck_decimal(e: &Expr, schema: &DFSchema, inputs: &[&LogicalPlan]) -> bool {
 }
 
 /// Whether output column `i` of `p` is a DuckDB DECIMAL, by [`duck_decimal`].
+#[recursive::recursive]
 fn decimal_output(p: &LogicalPlan, i: usize) -> bool {
     let produced = |e: Option<&Expr>, input: &LogicalPlan| {
         e.is_some_and(|e| duck_decimal(e, input.schema(), &[input]))
