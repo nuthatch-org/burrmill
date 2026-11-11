@@ -270,6 +270,10 @@ impl Session {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn pseudonym_feedback(&self, sql: &str) -> Result<String, String> {
         let identifiers = self.identifier_names();
+        // Nothing marked would send every row as it is, under a mode named for tokens.
+        if self.marked.is_empty() {
+            return Ok(pseudonym::omitted(&identifiers, pseudonym::NONE_MARKED));
+        }
         if let Err(reason) = pseudonym::projection_allows(sql, &self.marked) {
             return Ok(pseudonym::omitted(&identifiers, reason));
         }
@@ -280,6 +284,10 @@ impl Session {
     #[cfg(target_arch = "wasm32")]
     pub async fn pseudonym_feedback(&self, sql: &str) -> Result<String, String> {
         let identifiers = self.identifier_names();
+        // Nothing marked would send every row as it is, under a mode named for tokens.
+        if self.marked.is_empty() {
+            return Ok(pseudonym::omitted(&identifiers, pseudonym::NONE_MARKED));
+        }
         if let Err(reason) = pseudonym::projection_allows(sql, &self.marked) {
             return Ok(pseudonym::omitted(&identifiers, reason));
         }

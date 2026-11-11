@@ -8,7 +8,8 @@ use burrmill_ingest::InferredType;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sqlparser::ast::{
-    Expr, Query, Select, SelectItem, SetExpr, Statement, TableAlias, TableFactor, Visit, Visitor,
+    Expr, GroupByExpr, JoinConstraint, JoinOperator, ObjectNamePart, Query, Select, SelectItem,
+    SetExpr, Statement, TableAlias, TableFactor, Visit, Visitor,
 };
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
@@ -17,6 +18,8 @@ use crate::format::cell_string;
 use crate::session::QueryOut;
 
 const EXPR: &str = "an identifier column is used in an expression";
+pub(crate) const NONE_MARKED: &str = "no column is marked as an identifier, so no rows are sent";
+const FILTER: &str = "an identifier column is used to choose rows";
 const UNTOKENISED: &str = "an identifier value was not tokenised";
 const NOT_ONE: &str = "the statement was not one query";
 
@@ -407,13 +410,75 @@ fn check_select(select: &Select, marked: &mut BTreeSet<String>) -> Result<bool, 
     for item in &select.projection {
         passes |= check_item(item, marked)?;
     }
-    if let Some(expr) = &select.selection {
+    // A predicate on an identifier is an oracle: `WHERE email LIKE 'alice%'` returns her row.
+    for expr in [&select.selection, &select.having, &select.qualify]
+        .into_iter()
+        .flatten()
+    {
+        if mentions(expr, marked) {
+            return Err(FILTER);
+        }
         check_expr_queries(expr, marked)?;
     }
-    if let Some(expr) = &select.having {
-        check_expr_queries(expr, marked)?;
+    for table in &select.from {
+        for join in &table.joins {
+            check_join(&join.join_operator, marked)?;
+        }
+    }
+    if let GroupByExpr::Expressions(keys, _) = &select.group_by {
+        for key in keys {
+            if !is_bare(key) && mentions(key, marked) {
+                return Err(EXPR);
+            }
+        }
     }
     Ok(passes)
+}
+
+fn check_join(op: &JoinOperator, marked: &BTreeSet<String>) -> Result<(), &'static str> {
+    let (condition, constraint) = match op {
+        JoinOperator::AsOf {
+            match_condition,
+            constraint,
+        } => (Some(match_condition), Some(constraint)),
+        JoinOperator::Join(c)
+        | JoinOperator::Inner(c)
+        | JoinOperator::Left(c)
+        | JoinOperator::LeftOuter(c)
+        | JoinOperator::Right(c)
+        | JoinOperator::RightOuter(c)
+        | JoinOperator::FullOuter(c)
+        | JoinOperator::CrossJoin(c)
+        | JoinOperator::Semi(c)
+        | JoinOperator::LeftSemi(c)
+        | JoinOperator::RightSemi(c)
+        | JoinOperator::Anti(c)
+        | JoinOperator::LeftAnti(c)
+        | JoinOperator::RightAnti(c)
+        | JoinOperator::StraightJoin(c) => (None, Some(c)),
+        _ => (None, None),
+    };
+    if condition.is_some_and(|e| mentions(e, marked)) {
+        return Err(FILTER);
+    }
+    match constraint {
+        Some(JoinConstraint::On(e)) if mentions(e, marked) => Err(FILTER),
+        Some(JoinConstraint::Using(names))
+            if names.iter().any(|n| {
+                n.0.last().is_some_and(|part| match part {
+                    ObjectNamePart::Identifier(id) => {
+                        marked.contains(&id.value.to_ascii_lowercase())
+                    }
+                    _ => true,
+                })
+            }) =>
+        {
+            Err(FILTER)
+        }
+        // A natural join can match on an identifier without naming it.
+        Some(JoinConstraint::Natural) => Err(FILTER),
+        _ => Ok(()),
+    }
 }
 
 fn check_item(item: &SelectItem, marked: &mut BTreeSet<String>) -> Result<bool, &'static str> {
@@ -621,6 +686,47 @@ OTHER_MERCHANT,canary.two@example.com,DE89370400440532013000,+359 888 100002,-3.
         assert_no("renamed passthrough", &renamed);
         assert!(renamed.contains("CUSTOMER_"), "{renamed}");
         assert!(renamed.contains("KEPT_MERCHANT"), "{renamed}");
+    }
+
+    #[test]
+    fn an_identifier_cannot_choose_rows() {
+        let s = bound();
+        let oracles = [
+            "SELECT amount FROM t WHERE email LIKE 'canary.one%'",
+            "SELECT amount FROM t WHERE email = 'canary.one@example.com'",
+            "SELECT merchant, sum(amount) AS a FROM t GROUP BY merchant HAVING max(email) > 'canary.o'",
+            "SELECT t.amount FROM t JOIN t AS u ON t.email = u.email AND u.email LIKE 'c%'",
+            "SELECT t.amount FROM t JOIN t AS u USING (email)",
+            "SELECT t.amount FROM t NATURAL JOIN t AS u",
+            "SELECT amount FROM t QUALIFY row_number() OVER (ORDER BY amount) = 1 AND email < 'canary.p'",
+            "SELECT count(*) AS n FROM t GROUP BY substr(email, 1, 8)",
+            "WITH x AS (SELECT email AS e, amount FROM t) SELECT amount FROM x WHERE e LIKE 'canary.one%'",
+        ];
+        for sql in oracles {
+            let payload = s.pseudonym_feedback(sql).unwrap();
+            assert!(!payload.contains("-10.00"), "{sql}: {payload}");
+            let value: Value = serde_json::from_str(&payload).unwrap();
+            assert!(value["omitted"].is_string(), "{sql}: {payload}");
+        }
+        for sql in [
+            "SELECT email, amount FROM t WHERE amount < -5",
+            "SELECT email, count(*) AS n FROM t GROUP BY email",
+        ] {
+            let payload = s.pseudonym_feedback(sql).unwrap();
+            assert_no(sql, &payload);
+            assert!(payload.contains("CUSTOMER_"), "{sql}: {payload}");
+        }
+    }
+
+    #[test]
+    fn nothing_marked_sends_no_rows() {
+        let s = session();
+        let payload = s.pseudonym_feedback("SELECT * FROM t").unwrap();
+        assert!(!payload.contains("KEPT_MERCHANT"), "{payload}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&payload).unwrap()["omitted"],
+            NONE_MARKED
+        );
     }
 
     #[test]
