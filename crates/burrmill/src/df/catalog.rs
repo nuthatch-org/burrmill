@@ -386,17 +386,11 @@ pub struct SegmentTable {
     files: Vec<PartitionedFile>,
     groups: usize,
     url: ObjectStoreUrl,
-    /// The engine's token; every scan of this table stops at it.
-    cancel: crate::CancelToken,
     lowercase: HashSet<String>,
 }
 
 impl SegmentTable {
-    pub fn new(
-        table: &NestTable,
-        groups: usize,
-        cancel: crate::CancelToken,
-    ) -> crate::Result<Self> {
+    pub fn new(table: &NestTable, groups: usize) -> crate::Result<Self> {
         // A table's segments share one or two directories; canonicalising each file walked every
         // component of its path per request (nuthatch#2669).
         let mut parents: HashMap<PathBuf, PathBuf> = HashMap::new();
@@ -422,7 +416,6 @@ impl SegmentTable {
             } else {
                 ObjectStoreUrl::local_filesystem()
             },
-            cancel,
             lowercase: table.lowercase.iter().cloned().collect(),
         })
     }
@@ -507,7 +500,6 @@ impl TableProvider for SegmentTable {
             .build();
         Ok(super::cancel::CancelExec::wrap_scan(
             DataSourceExec::from_data_source(cfg),
-            self.cancel.clone(),
         ))
     }
 }

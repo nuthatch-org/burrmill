@@ -131,3 +131,55 @@ jobs:
           gz=$(gzip -9 -c target/wasm32-unknown-unknown/wasm-size/ingest-engine.wasm | wc -c)
           echo "ingest-engine.wasm gzip -9: $gz"
           test "$gz" -le 8388608
+
+  # The page's claim, that the cells stay in the tab, is tested only in a browser: every
+  # demo/*.mjs against the built engine on a static server.
+  demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: demo
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The CLI must match the crate's pin, so the pin is read rather than repeated.
+      - id: pin
+        run: echo "version=$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' crates/burrmill-wasm/Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - id: bindgen
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/wasm-bindgen
+          key: wasm-bindgen-${{ steps.pin.outputs.version }}-${{ runner.os }}
+      - name: install wasm-bindgen
+        if: steps.bindgen.outputs.cache-hit != 'true'
+        run: cargo install wasm-bindgen-cli --version "${{ steps.pin.outputs.version }}" --locked --root ~/wasm-bindgen
+      - run: echo "$HOME/wasm-bindgen/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+      - name: build the engine
+        run: demo/build.sh
+      - name: browser
+        working-directory: demo
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: browser tests
+        working-directory: demo
+        run: |
+          python3 -m http.server 18747 --bind 127.0.0.1 &
+          until curl -sf http://127.0.0.1:18747/ >/dev/null; do sleep 1; done
+          failed=0
+          for t in *.mjs; do
+            echo "::group::$t"
+            node "$t" 18747 || { failed=1; echo "::error::$t failed"; }
+            echo "::endgroup::"
+          done
+          exit "$failed"

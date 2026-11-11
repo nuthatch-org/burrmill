@@ -63,6 +63,8 @@ const SAFE_SCALARS: &[&str] = &[
     "array_max",
     "array_min",
     "array_position",
+    // `lists::ListSum`: exact over integers and decimals, refusing past 38 digits.
+    "array_sum",
     // A count of boundaries, checked where it could leave 64 bits; -1, 0 or 1.
     "date_diff",
     "burrmill_nullable",
