@@ -51,9 +51,12 @@ impl WasmSession {
         self.inner.grammar()
     }
 
+    /// `{"answer": ..}`, or `{"error": .., "feedback": ..}` where only `feedback` may leave.
     pub async fn query(&self, sql: &str) -> Result<String, JsError> {
-        let out = self.inner.query(sql).await.map_err(|e| JsError::new(&e))?;
-        serde_json::to_string(&out).map_err(|e| JsError::new(&e.to_string()))
+        match self.inner.query(sql).await {
+            Ok(out) => json_out(serde_json::json!({ "answer": out })),
+            Err(f) => json_out(serde_json::json!({ "error": f.local, "feedback": f.feedback })),
+        }
     }
 
     pub async fn aggregate_feedback(&self, sql: &str) -> Result<String, JsError> {
