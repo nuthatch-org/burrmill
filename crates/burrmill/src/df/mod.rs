@@ -114,6 +114,13 @@ pub fn selection_passes() -> u64 {
     catalog::SELECTIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// File lists built in this process, for a test that binding a table to the files it already has
+/// builds none.
+#[doc(hidden)]
+pub fn file_lists_built() -> u64 {
+    host::LISTS_BUILT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Local segment footers read in this process, for a test that a second engine reads none again.
 #[doc(hidden)]
 pub fn footer_reads() -> u64 {

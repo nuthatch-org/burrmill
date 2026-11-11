@@ -446,25 +446,28 @@ impl AsyncFileReader for Counted {
     }
 }
 
+/// A table's segments as a scan reads them, built once for the file list it was given.
 #[derive(Debug)]
-pub struct SegmentTable {
-    schema: SchemaRef,
-    files: Vec<PartitionedFile>,
-    groups: usize,
-    url: ObjectStoreUrl,
-    lowercase: HashSet<String>,
+pub(super) struct Listed {
+    pub(super) files: Vec<(PathBuf, u64)>,
+    /// Each distinct footer schema in the order the files first carry it, where a host bound them.
+    pub(super) schemas: Vec<SchemaRef>,
+    located: Vec<PartitionedFile>,
 }
 
-impl SegmentTable {
-    pub fn new(table: &NestTable, groups: usize) -> crate::Result<Self> {
+impl Listed {
+    pub(super) fn new(
+        files: Vec<(PathBuf, u64)>,
+        schemas: Vec<SchemaRef>,
+        keyed: bool,
+    ) -> crate::Result<Self> {
         // A table's segments share one or two directories; canonicalising each file walked every
         // component of its path per request (nuthatch#2669).
         let mut parents: HashMap<PathBuf, PathBuf> = HashMap::new();
-        let files = table
-            .files
+        let located = files
             .iter()
             .map(|(p, size)| {
-                let loc = if table.keyed {
+                let loc = if keyed {
                     store_location(p, true)?
                 } else {
                     local_location(p, &mut parents)?
@@ -473,8 +476,37 @@ impl SegmentTable {
             })
             .collect::<crate::Result<Vec<_>>>()?;
         Ok(Self {
-            schema: table.schema.clone(),
             files,
+            schemas,
+            located,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct SegmentTable {
+    schema: SchemaRef,
+    listed: Arc<Listed>,
+    groups: usize,
+    url: ObjectStoreUrl,
+    lowercase: HashSet<String>,
+}
+
+impl SegmentTable {
+    pub fn new(table: &NestTable, groups: usize) -> crate::Result<Self> {
+        let listed = Listed::new(table.files.clone(), Vec::new(), table.keyed)?;
+        Self::over(table, Arc::new(listed), groups)
+    }
+
+    /// `table` over `listed`, which was built from its files.
+    pub(super) fn over(
+        table: &NestTable,
+        listed: Arc<Listed>,
+        groups: usize,
+    ) -> crate::Result<Self> {
+        Ok(Self {
+            schema: table.schema.clone(),
+            listed,
             groups: groups.max(1),
             url: if table.keyed {
                 ObjectStoreUrl::parse(NEST_STORE)
@@ -555,9 +587,10 @@ impl TableProvider for SegmentTable {
             source = source.with_predicate(state.create_physical_expr(pred, &df_schema)?);
         }
 
-        let n = self.groups.min(self.files.len().max(1));
+        let files = &self.listed.located;
+        let n = self.groups.min(files.len().max(1));
         let mut groups: Vec<Vec<PartitionedFile>> = vec![Vec::new(); n];
-        for (i, f) in self.files.iter().enumerate() {
+        for (i, f) in files.iter().enumerate() {
             groups[i % n].push(f.clone());
         }
         let file_source: Arc<dyn FileSource> = Arc::new(source);
