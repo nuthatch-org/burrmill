@@ -341,7 +341,7 @@ fn windows_1251_semicolon_and_windows_1252_cafe() {
 /// Byte 0x98 is undefined in the Python codec and is U+0098 on the WHATWG page.
 #[test]
 fn undefined_1251_bytes_decode_as_themselves() {
-    // One row, so the cell stays a value. A second text row would be read as a header.
+    // One row, so the cell stays a value.
     let table = go(b"\xc8\xe2\xe0\xed\x98");
     assert_eq!(table.report().dialect.encoding, EncodingKind::Windows1251);
     assert_eq!(table.preview(1)[0][0].as_deref(), Some("Иван\u{0098}"));
