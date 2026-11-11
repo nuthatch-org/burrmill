@@ -127,7 +127,10 @@ jobs:
         run: |
           cargo clippy --locked -p burrmill-wasm --all-targets -- -D warnings
           cargo test --locked -p burrmill-wasm
+      # Warnings refuse: what only wasm32 leaves unused is seen by no clippy step above.
       - name: build for wasm32
+        env:
+          RUSTFLAGS: -D warnings
         run: cargo build --locked -p burrmill-wasm --target wasm32-unknown-unknown
       # The demo downloads ingest and the engine as one module.
       - name: engine gzip under 8 MiB
