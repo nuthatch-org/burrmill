@@ -64,6 +64,12 @@ and inside the engine's plans for everything else.
 **The parser role** (`burrmill::inspect::reach`, default build) is nuthatch's allowlist and
 reachability rules on sqlparser's AST, failing closed.
 
+**Reference.** [docs/sql.md](docs/sql.md) lists the DuckDB forms `Engine` admits and the ones it
+refuses by name, with what to write instead; [docs/browser.md](docs/browser.md) describes the tab.
+[llms.txt](llms.txt) points a coding agent at both. `Engine::open_segments` and `open_nest` read
+`<table>-<hash>.parquet`: the text before the last hyphen is the table, and a `.parquet` file with no
+hyphen is skipped.
+
 ## The three claims
 
 **Faster.** Measured 2026-09-24 and 25 on a 32-core ThinkPad against a 1,925-segment copy of the
@@ -174,7 +180,6 @@ Said plainly, because a README that implies otherwise is the thing this project 
   from a DOUBLE or FLOAT (#63), rather than answer a NULL DuckDB would not give. Its `IS [NOT] NULL`
   and its `SUM` answer as DuckDB does, the sum exactly while the total fits 38 digits.
   No real nest has produced one.
-- **An integer compared with a boolean** (`1 = false`) casts in DuckDB and refuses here.
 - **What DuckDB computes and Burrmill refuses, by design**: a `SUM` over a `TRY_CAST` that DuckDB
   answers by dropping what did not fit. The fuzzer counts these separately and they are allowed.
 - **What Burrmill computes and DuckDB refuses**: `TIMESTAMPTZ + INTERVAL` and a `TIMESTAMPTZ` to
@@ -211,8 +216,8 @@ Said plainly, because a README that implies otherwise is the thing this project 
   about 9% on the curation fold. The Gate 1 harnesses set DuckDB up as nuthatch does; the old
   synthetic sweep has not been re-run with it.
 - **Seven of the allocations nest's views had to be rewritten** to run here (`ASOF`, `LATERAL` and
-  list lambdas do not define on Burrmill), each compared whole against its original on DuckDB before
-  the engine changed (23/23, `lodestar_indexer_ledger` 1,678,525 rows). They are on the nest's main
+  list lambdas; of these `LATERAL` and lambdas answer now and `ASOF` still fails as a syntax error), each
+  compared whole against its original on DuckDB before the engine changed (23/23, `lodestar_indexer_ledger` 1,678,525 rows). They are on the nest's main
   (graph-allocations-nest#28). Two more (`lodestar_delegator_stakes`, `lodestar_delegators`) run
   unchanged.
 
@@ -220,7 +225,7 @@ Said plainly, because a README that implies otherwise is the thing this project 
 
     crates/burrmill          the library. Default build: arrow, parquet, rustc-hash, rayon,
                              hashbrown, sqlparser. Feature `datafusion` adds the engine: about
-                             sixteen datafusion-* component crates pinned =55.0.0, tokio,
+                             sixteen datafusion-* component crates pinned =55.2.0, tokio,
                              object_store. No DuckDB. No C++. `src/df/` holds the engine and its
                              rules, one file each.
     crates/burrmill/examples hosted_fold: the memory gate in a Burrmill-only binary.

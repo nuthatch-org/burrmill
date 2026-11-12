@@ -36,6 +36,16 @@ mod outerorder;
 pub use depth::check_expr_bounds;
 mod builder;
 pub use builder::EngineBuilder;
+
+/// The dialect statements parse with, for a walk that must read what the engine reads.
+#[cfg(test)]
+pub(crate) fn engine_parses(sql: &str) -> bool {
+    dialect::parse_statements(sql).is_ok()
+}
+
+pub(crate) fn duck_dialect() -> dialect::Duck {
+    dialect::Duck
+}
 mod buildside;
 mod distinct;
 mod distinctrows;
@@ -377,6 +387,12 @@ impl Engine {
         self.session.function_names()
     }
 
+    /// The DuckDB spellings the dialect rewrites to a registered function, so are not in
+    /// [`Engine::function_names`] but are answered.
+    pub fn duckdb_spellings() -> &'static [&'static str] {
+        dialect::DUCKDB_SPELLINGS
+    }
+
     /// Every registered name, the `__raw`, `__hot` and `__union` parts a statement may not name
     /// included. [`Engine::visible_tables`] is the listing a host serves.
     pub fn tables(&self) -> Vec<String> {
@@ -539,7 +555,7 @@ impl Engine {
             {
                 Err(BurrmillError::Timeout)
             }
-            r => r,
+            r => self.with_spill_hint(r),
         }
     }
 
@@ -614,6 +630,20 @@ impl Engine {
             m.exec_nanos += started.elapsed().as_nanos() as u64;
         }
         r
+    }
+
+    /// A pool refusal on an engine with no spill directory says that one would help.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn with_spill_hint(&self, r: Result<()>) -> Result<()> {
+        match r {
+            Err(BurrmillError::LimitExceeded(m))
+                if m.starts_with(errors::POOL_EXHAUSTED)
+                    && !self.session.runtime_env().disk_manager.tmp_files_enabled() =>
+            {
+                Err(BurrmillError::LimitExceeded(errors::with_spill_hint(&m)))
+            }
+            r => r,
+        }
     }
 
     /// Run a query on the caller's event loop, for a host with one thread and no runtime: a
@@ -725,7 +755,7 @@ impl Engine {
             .with_extension(Arc::new(token.clone()));
         let ctx = ctx.with_session_config(config);
         let Some(metrics) = metrics else {
-            let stream = sequential::execute_stream(physical, Arc::new(ctx)).map_err(df_err)?;
+            let stream = sequential::execute_stream(physical, Arc::new(ctx)).map_err(run_err)?;
             return self.drain(stream, token, f, &mut 0).await;
         };
         // Its own recorder over the engine's pool, so a peak is this statement's and not a neighbour's.
@@ -749,7 +779,7 @@ impl Engine {
         catalog::sealed_counters(&physical, &mut counters);
         let mut cpu = Vec::new();
         cancel::arm_scan_cpu(&physical, &mut cpu);
-        let stream = sequential::execute_stream(physical, ctx).map_err(df_err)?;
+        let stream = sequential::execute_stream(physical, ctx).map_err(run_err)?;
         let mut rows = 0u64;
         let r = self.drain(stream, token, f, &mut rows).await;
         #[cfg(not(target_arch = "wasm32"))]
@@ -810,7 +840,7 @@ impl Engine {
                     Ok(b) => b,
                     // A scan stopped by the token surfaces here as its error; say what it was.
                     Err(_) if token.is_cancelled() => return Err(BurrmillError::Cancelled),
-                    Err(e) => return Err(df_err(e)),
+                    Err(e) => return Err(run_err(e)),
                 };
                 *rows += b.num_rows() as u64;
                 f(dialect::strip_dup_suffix(b))?;
@@ -1232,6 +1262,13 @@ fn plan_err(e: datafusion_common::DataFusionError) -> BurrmillError {
         BurrmillError::Substrate(s) => BurrmillError::Plan(s),
         e => e,
     }
+}
+
+/// `df_err` for a failure while running: its text can be built from cells (`error(text)`), so it
+/// never chooses a variant that says the statement read no row.
+fn run_err(e: datafusion_common::DataFusionError) -> BurrmillError {
+    let s = clipped(errors::restate(e.to_string()));
+    errors::typed(&e, &s).unwrap_or(BurrmillError::Substrate(s))
 }
 
 fn df_err(e: datafusion_common::DataFusionError) -> BurrmillError {

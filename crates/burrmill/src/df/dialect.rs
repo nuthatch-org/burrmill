@@ -48,7 +48,28 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
     super::depth::refuse_set_op_tokens(&expanded)?;
     DFParser::parse_sql_with_dialect(expanded.as_str(), &Duck)
         .map(|stmts| stmts.into_iter().collect())
-        .map_err(|e| BurrmillError::Parse(super::errors::restate(format!("SQL error: {e:?}"))))
+        .map_err(|e| BurrmillError::Parse(super::errors::restate(parser_text(&e))))
+}
+
+/// The parser's own words, without the span and diagnostic DataFusion wraps around them.
+fn parser_text(e: &datafusion_common::DataFusionError) -> String {
+    match e.find_root() {
+        datafusion_common::DataFusionError::SQL(p, _) => format!("SQL error: {p}"),
+        other => other.to_string(),
+    }
+}
+
+/// `PIVOT` and `UNPIVOT`, as a statement or after `FROM`, are refused by this name.
+fn pivot_refusal(pivot: bool) -> String {
+    let (word, instead) = if pivot {
+        (
+            "PIVOT",
+            "one aggregate per value, with FILTER (WHERE ...) or CASE, under GROUP BY",
+        )
+    } else {
+        ("UNPIVOT", "one SELECT per column, joined by UNION ALL")
+    };
+    format!("{word} is not supported here; write {instead}")
 }
 
 /// Parse with DuckDB's dialect and rewrite into what DataFusion plans. The result columns' DuckDB
@@ -157,16 +178,9 @@ impl sqlparser::dialect::Dialect for Duck {
             sqlparser::tokenizer::Token::Word(w)
                 if matches!(w.keyword, Keyword::PIVOT | Keyword::UNPIVOT) =>
             {
-                let instead = match w.keyword {
-                    Keyword::PIVOT => {
-                        "one aggregate per value, with FILTER (WHERE ...) or CASE, under GROUP BY"
-                    }
-                    _ => "one SELECT per column, joined by UNION ALL",
-                };
-                Some(Err(sqlparser::parser::ParserError::ParserError(format!(
-                    "{} is not supported here; write {instead}",
-                    w.value.to_ascii_uppercase()
-                ))))
+                Some(Err(sqlparser::parser::ParserError::ParserError(
+                    pivot_refusal(w.keyword == Keyword::PIVOT),
+                )))
             }
             _ => None,
         }
@@ -180,7 +194,9 @@ impl sqlparser::dialect::Dialect for Duck {
         use sqlparser::dialect::Precedence;
         match &parser.peek_token().token {
             sqlparser::tokenizer::Token::CaretAt => Some(Ok(self.prec_value(Precedence::Like))),
-            sqlparser::tokenizer::Token::Word(w) if w.value.eq_ignore_ascii_case("glob") => {
+            sqlparser::tokenizer::Token::Word(w)
+                if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("glob") =>
+            {
                 Some(Ok(self.prec_value(Precedence::Like)))
             }
             _ => None,
@@ -205,7 +221,9 @@ impl sqlparser::dialect::Dialect for Duck {
                         .map(|b| call("starts_with", vec![expr.clone(), b])),
                 );
             }
-            sqlparser::tokenizer::Token::Word(w) if w.value.eq_ignore_ascii_case("glob") => {
+            sqlparser::tokenizer::Token::Word(w)
+                if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("glob") =>
+            {
                 return Some(Err(sqlparser::parser::ParserError::ParserError(
                     "GLOB is not supported here; LIKE is, with % for * and _ for ?".into(),
                 )));
@@ -847,6 +865,40 @@ fn arg_extreme(f: &mut sq::Function, max: bool) {
         }]));
     f.name = sq::ObjectName::from(vec![sq::Ident::new("first_value")]);
 }
+
+/// The DuckDB spellings the dialect rewrites to DataFusion's own and the demo offers the model. A
+/// test in burrmill-wasm runs each against a table, so a name here is one the engine answers.
+pub const DUCKDB_SPELLINGS: &[&str] = &[
+    "if",
+    "ifnull",
+    "arg_max",
+    "arg_min",
+    "max_by",
+    "min_by",
+    "struct_pack",
+    "first",
+    "last",
+    "list_reverse_sort",
+    "array_reverse_sort",
+    "regexp_matches",
+    "regexp_full_match",
+    "year",
+    "month",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "quarter",
+    "week",
+    "epoch",
+    "millisecond",
+    "microsecond",
+    "isodow",
+    "dayofweek",
+    "dayofyear",
+    "dayofmonth",
+    "weekofyear",
+];
 
 /// DuckDB's names for functions DataFusion has under another: the date-part shorthands
 /// (`year(t)` is `date_part('year', t)`), `regexp_matches`, which is `regexp_like`, and the
@@ -1510,6 +1562,16 @@ impl VisitorMut for Rewriter {
     fn post_visit_query(&mut self, q: &mut sq::Query) -> ControlFlow<()> {
         super::subqueries::distinct_aggregate_names(q);
         ControlFlow::Continue(())
+    }
+
+    fn pre_visit_table_factor(&mut self, t: &mut sq::TableFactor) -> ControlFlow<()> {
+        let pivot = match t {
+            sq::TableFactor::Pivot { .. } => true,
+            sq::TableFactor::Unpivot { .. } => false,
+            _ => return ControlFlow::Continue(()),
+        };
+        self.refused = Some(pivot_refusal(pivot));
+        ControlFlow::Break(())
     }
 
     fn pre_visit_query(&mut self, q: &mut sq::Query) -> ControlFlow<()> {
@@ -3889,5 +3951,23 @@ mod tests {
         ]);
         assert_eq!(*k.base, *rebuilt.base);
         assert_eq!(k.columns("bets"), Some(cols(&["Id", "amount"])));
+    }
+
+    /// Each name the grammar offers the model is one the dialect rewrites: none survives a parse
+    /// as the call the model wrote.
+    #[test]
+    fn every_duckdb_spelling_is_rewritten() {
+        for name in super::DUCKDB_SPELLINGS {
+            let rewritten = (1..=3).any(|n| {
+                let args = ["a", "b", "c"][..n].join(", ");
+                let sql = format!("SELECT {name}({args}) FROM t");
+                let (stmt, _) = super::parse(&sql, &Known::default()).unwrap();
+                !stmt
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains(&format!("{name}("))
+            });
+            assert!(rewritten, "{name} reaches the planner as written");
+        }
     }
 }

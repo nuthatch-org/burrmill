@@ -26,6 +26,15 @@ pub fn redact(err: &str, tokens: &TokenMap, columns: &[String]) -> String {
     redact_quotes(&out, columns)
 }
 
+/// A column as the card lists it, or qualified by its table as DataFusion's hint writes it.
+fn is_column(span: &str, columns: &[String]) -> bool {
+    let bare = match span.split_once('.') {
+        Some((table, col)) if table.chars().all(|c| c.is_alphanumeric() || c == '_') => col,
+        _ => span,
+    };
+    columns.iter().any(|col| col == span || col == bare)
+}
+
 fn redact_quotes(s: &str, columns: &[String]) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -48,7 +57,7 @@ fn redact_quotes(s: &str, columns: &[String]) -> String {
             out.push_str(&inner);
             break;
         }
-        let keep = columns.iter().any(|col| col == &inner) || inner.len() < 4;
+        let keep = is_column(&inner, columns) || inner.len() < 4;
         out.push(c);
         if keep {
             out.push_str(&inner);
@@ -87,6 +96,15 @@ mod tests {
         assert!(!got.contains("CANARY_VALUE_991"));
         assert!(got.contains("amount"));
         assert!(got.contains('?'));
+    }
+
+    #[test]
+    fn a_qualified_column_name_stays_in_a_hint() {
+        let columns = vec!["merchant".to_string()];
+        let err = "Did you mean 't.merchant'? Valid fields are 'x.CANARY_VALUE_991'";
+        let got = redact(err, &TokenMap::default(), &columns);
+        assert!(got.contains("'t.merchant'"), "{got}");
+        assert!(!got.contains("CANARY_VALUE_991"), "{got}");
     }
 
     #[test]

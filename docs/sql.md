@@ -66,9 +66,11 @@ wherever the statement names them.
 ## Refused by name
 
 `Engine` refuses each of these with a message that says so, and names what to write instead where
-there is a supported equivalent. Every equivalent named is in the corpus and answers as DuckDB
-does; the refusals and their messages are held by `duckdb_answers_still_refused_say_so_by_name` and
-`refusals_name_what_to_write_instead` (`crates/burrmill/tests/df_functions.rs`).
+there is a supported equivalent. The refusals and their messages are held by
+`duckdb_answers_still_refused_say_so_by_name`, `refusals_name_what_to_write_instead`,
+`pivot_after_from_is_refused_by_name_not_dumped` and `median_over_decimal_says_what_to_write`
+(`crates/burrmill/tests/df_functions.rs`). Equivalents other than the `DECIMAL` median's are in
+the corpus and answer as DuckDB does.
 
 | Refused | Write instead |
 |---|---|
@@ -78,8 +80,9 @@ does; the refusals and their messages are held by `duckdb_answers_still_refused_
 | `try_strptime(s, fmt)` | for ISO 8601 text, `TRY_CAST(s AS TIMESTAMP)` |
 | `COLUMNS(...)` | the columns by name, or `* EXCLUDE (...)` |
 | `a GLOB p` | `a LIKE p`, with `%` for `*` and `_` for `?` |
-| `PIVOT` | one aggregate per value, `sum(a) FILTER (WHERE k = 'x')` or `CASE`, under `GROUP BY` |
-| `UNPIVOT` | one `SELECT` per column, joined by `UNION ALL` |
+| `PIVOT`, also after `FROM` | one aggregate per value, `sum(a) FILTER (WHERE k = 'x')` or `CASE`, under `GROUP BY` |
+| `UNPIVOT`, also after `FROM` | one `SELECT` per column, joined by `UNION ALL` |
+| `median(x)` over a `DECIMAL` | `median(CAST(x AS DOUBLE))`, `quantile_cont(x, 0.5)` or `approx_median(x)` |
 | `LIKE ... ESCAPE 'c'` over a pattern that is not a literal | a literal pattern, or `ESCAPE '\'` |
 | `UHUGEINT` | none: `DECIMAL(38,0)` stops short of 2^128 |
 | `unnest` in `FROM` | `unnest` in the select list |
@@ -89,6 +92,8 @@ does; the refusals and their messages are held by `duckdb_answers_still_refused_
 | `CAST(struct AS VARCHAR)` | none: `to_json` writes JSON, not DuckDB's struct text |
 | an integer literal wider than 64 bits | `CAST('n' AS DECIMAL(38,0))` |
 | a `HUGEINT` past 10^38 | none: `DECIMAL(38,0)` cannot hold it |
+
+Not refused by name: `ASOF JOIN` fails as a syntax error, and has no equivalent here.
 
 ## Bounds
 
