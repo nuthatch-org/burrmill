@@ -126,3 +126,8 @@ From `demo/index.html` and `demo/app.js`:
   `send.mjs`, `warn.mjs`, `offline.mjs` and `persist.mjs` cover the other modes and controls, and
   `a11y.mjs` fails on any axe violation. CI's `demo` job builds the engine with `demo/build.sh` and
   runs every `demo/*.mjs`.
+
+Building on macOS needs Homebrew's LLVM (`brew install llvm`): Apple clang has no wasm32 target, and
+`zstd-sys` compiles C. `demo/build.sh` finds it and sets `CC_wasm32_unknown_unknown` and
+`AR_wasm32_unknown_unknown`; building `burrmill-wasm` for wasm32 by hand needs the same two set to
+`$(brew --prefix llvm)/bin/clang` and `llvm-ar`.
