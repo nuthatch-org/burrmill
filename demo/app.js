@@ -151,6 +151,7 @@ function promptText(question, card, grammar, feedback, previousSql, mode, identi
       'A smaller group is not in that list. Rows that are not groups are not sent.',
       'group_n is the measured size of a group.',
       'Every count, group_n, the number dropped and the row count of t come back as a range such as 10-99.',
+      'Every sum and avg, and arithmetic over them, comes back to two significant figures.',
       'A count leaves only as itself or as what a sum or avg is divided by. HAVING over a count, and a limit after ORDER BY a count, are not applied to what is sent.',
     );
   }

@@ -34,6 +34,8 @@ pub(crate) struct Measured {
     pub dropped: String,
     /// The output columns that are counts, `group_n` last, which leave as a [`bucket`].
     pub counts: Vec<usize>,
+    /// The output columns that hold a `sum` or `avg`, which leave as [`two_figures`].
+    pub sums: Vec<usize>,
     /// What of the statement was not applied, because it would choose groups by an exact count.
     pub unapplied: Vec<&'static str>,
 }
@@ -98,6 +100,24 @@ pub(crate) fn measure_sql(sql: &str) -> Result<Measured, &'static str> {
         .filter(|&i| uses[i] == CountUse::Whole)
         .collect();
     counts.push(uses.len());
+    let keys = match &select.group_by {
+        GroupByExpr::Expressions(keys, _) => keys.clone(),
+        GroupByExpr::All(_) => Vec::new(),
+    };
+    let sums: Vec<usize> = select
+        .projection
+        .iter()
+        .enumerate()
+        .filter(|(i, item)| match item {
+            SelectItem::UnnamedExpr(expr) => !is_key(expr, None, *i, &keys) && has_summary(expr),
+            SelectItem::ExprWithAlias { expr, alias } => {
+                !is_key(expr, Some(alias), *i, &keys) && has_summary(expr)
+            }
+            _ => false,
+        })
+        .map(|(i, _)| i)
+        .filter(|i| !counts.contains(i))
+        .collect();
     select.projection.push(count_star());
     if orders_by_count(&query, &counted) {
         clear_limits(&mut query);
@@ -115,6 +135,7 @@ pub(crate) fn measure_sql(sql: &str) -> Result<Measured, &'static str> {
         answer,
         dropped,
         counts,
+        sums,
         unapplied,
     })
 }
@@ -303,7 +324,7 @@ pub(crate) fn filter_payload(out: &QueryOut, dropped: &QueryOut, measured: &Meas
                 .and_then(parse_size)
                 .is_some_and(|n| n >= AGGREGATE_K)
             {
-                groups.push(row_object(&out.columns, row, &measured.counts, idx));
+                groups.push(row_object(&out.columns, row, measured, idx));
             }
         }
     }
@@ -329,6 +350,27 @@ pub(crate) fn filter_payload(out: &QueryOut, dropped: &QueryOut, measured: &Meas
     payload.to_string()
 }
 
+/// `text` to two significant figures, so `253.00` leaves as `250`: one member moves a sum or an
+/// average only when it carries the figure across a rounding edge.
+pub(crate) fn two_figures(text: &str) -> Option<String> {
+    let x: f64 = text.parse().ok().filter(|x: &f64| x.is_finite())?;
+    if x == 0.0 {
+        return Some("0".into());
+    }
+    let mut place = x.abs().log10().floor() as i32 - 1;
+    let mut r = (x / 10f64.powi(place)).round();
+    // `99.6` rounds up to `100`, which has one more digit.
+    if r.abs() >= 100.0 {
+        place += 1;
+        r = (x / 10f64.powi(place)).round();
+    }
+    Some(if place >= 0 {
+        format!("{:.0}", r * 10f64.powi(place))
+    } else {
+        format!("{:.*}", (-place) as usize, r * 10f64.powi(place))
+    })
+}
+
 fn parse_size(text: &str) -> Option<u64> {
     if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -339,17 +381,20 @@ fn parse_size(text: &str) -> Option<u64> {
 fn row_object(
     columns: &[crate::session::Column],
     row: &[Option<String>],
-    counts: &[usize],
+    measured: &Measured,
     group_n: usize,
 ) -> Value {
     let mut obj = serde_json::Map::new();
     for (i, (column, cell)) in columns.iter().zip(row).enumerate() {
         let value = match cell {
-            Some(text) if i == group_n || counts.contains(&i) => text
+            Some(text) if i == group_n || measured.counts.contains(&i) => text
                 .parse::<f64>()
                 .ok()
                 .filter(|n| n.is_finite() && *n >= 0.0)
                 .map_or(Value::Null, |n| Value::String(bucket(n as u64))),
+            Some(text) if measured.sums.contains(&i) => {
+                two_figures(text).map_or(Value::Null, Value::String)
+            }
             Some(text) => Value::String(text.clone()),
             None => Value::Null,
         };
@@ -791,7 +836,7 @@ mod tests {
         assert_eq!(value["dropped"], "0-9");
         assert_eq!(value["groups"].as_array().unwrap().len(), 1);
         assert_eq!(value["groups"][0]["merchant"], "KEPT_GROUP");
-        assert_eq!(value["groups"][0]["total"], "80.00");
+        assert_eq!(value["groups"][0]["total"], "80");
         assert_eq!(value["groups"][0]["group_n"], "10-99");
 
         let lied = "SELECT merchant, sum(amount) AS total, 10 AS group_n FROM t GROUP BY merchant";
@@ -915,10 +960,10 @@ mod tests {
         assert_eq!(value["omitted"], NOT_SUMMARY, "{payload}");
     }
 
-    /// Fifty ordinary rows and, unless `member` is `None`, one row for `CANARY_X` of that amount.
+    /// Five hundred ordinary rows and, unless `member` is `None`, one row for `CANARY_X` of that amount.
     fn with_member(member: Option<&str>) -> Session {
         let mut lines = vec!["merchant,amount".to_string()];
-        for n in 0..50 {
+        for n in 0..500 {
             lines.push(format!("SHOP_{:02},5.00", n % 4));
         }
         if let Some(amount) = member {
@@ -941,6 +986,9 @@ mod tests {
             "SELECT (merchant <> 'CANARY_X' OR amount > 2) AS g, CAST(count(*) AS VARCHAR) AS n FROM t GROUP BY 1",
             "SELECT merchant, count(*) AS n FROM t WHERE merchant = 'CANARY_X' AND amount < 2 GROUP BY merchant",
             "SELECT merchant, count(*) AS n FROM t WHERE merchant <> 'CANARY_X' OR amount < 2 GROUP BY merchant",
+            "SELECT (merchant <> 'CANARY_X' OR amount > 2) AS g, sum(amount) AS s, avg(amount) AS a FROM t GROUP BY 1",
+            "SELECT (merchant <> 'CANARY_X' OR amount > 2) AS g, sum(amount) / avg(amount) AS n FROM t GROUP BY 1",
+            "SELECT (merchant <> 'CANARY_X' OR amount > 2) AS g, round(sum(amount) / count(*), 3) AS mean FROM t GROUP BY 1",
         ];
         let below = with_member(Some("1.00"));
         let above = with_member(Some("3.00"));
@@ -955,7 +1003,7 @@ mod tests {
         let card = |s: &Session| s.card(&[], &[], true).unwrap();
         assert_eq!(card(&with_member(None)), card(&below));
         assert!(
-            card(&below).contains(r#""rows":"10-99""#),
+            card(&below).contains(r#""rows":"100-999""#),
             "{}",
             card(&below)
         );
@@ -963,7 +1011,7 @@ mod tests {
             below
                 .card(&[], &[], false)
                 .unwrap()
-                .contains(r#""rows":51"#)
+                .contains(r#""rows":501"#)
         );
     }
 
@@ -1024,7 +1072,18 @@ mod tests {
                 "SELECT merchant, round(sum(amount) / count(*), 2) AS mean FROM t GROUP BY merchant",
             )
             .unwrap();
-        assert!(mean.contains(r#""mean":"5""#), "{mean}");
+        assert!(mean.contains(r#""mean":"5.0""#), "{mean}");
+        for (text, want) in [
+            ("253.00", "250"),
+            ("2503.00", "2500"),
+            ("-3.50", "-3.5"),
+            ("0.01234", "0.012"),
+            ("99.6", "100"),
+            ("500", "500"),
+            ("0", "0"),
+        ] {
+            assert_eq!(two_figures(text).as_deref(), Some(want), "{text}");
+        }
         assert_eq!(bucket(0), "0-9");
         assert_eq!(bucket(9), "0-9");
         assert_eq!(bucket(10), "10-99");
