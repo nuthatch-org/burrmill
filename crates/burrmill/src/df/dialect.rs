@@ -46,9 +46,22 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
     // Before the parser: sqlparser rejects `[expr FOR x IN list]`, which the views still write.
     let expanded = crate::listcomp::before_parse(sql);
     super::depth::refuse_set_op_tokens(&expanded)?;
-    DFParser::parse_sql_with_dialect(expanded.as_str(), &Duck)
-        .map(|stmts| stmts.into_iter().collect())
-        .map_err(|e| BurrmillError::Parse(super::errors::restate(parser_text(&e))))
+    let parsed = DFParser::parse_sql_with_dialect(expanded.as_str(), &Duck).map_err(|e| {
+        let text = parser_text(&e);
+        BurrmillError::Parse(if asof_error(&text) {
+            ASOF_REFUSAL.into()
+        } else {
+            super::errors::restate(text)
+        })
+    })?;
+    let asof = parsed.iter().any(|s| match s {
+        DfStatement::Statement(s) => crate::walk::walk(s.as_ref(), &mut HasAsof).is_break(),
+        _ => false,
+    });
+    if asof {
+        return Err(BurrmillError::Parse(ASOF_REFUSAL.into()));
+    }
+    Ok(parsed.into_iter().collect())
 }
 
 /// The parser's own words, without the span and diagnostic DataFusion wraps around them.
@@ -74,32 +87,62 @@ fn pivot_refusal(pivot: bool) -> String {
 
 const ASOF_REFUSAL: &str = "ASOF JOIN is not supported here; join on the inequality and keep the nearest row with row_number() OVER (PARTITION BY ... ORDER BY ... DESC) = 1";
 
-/// `ASOF [LEFT|RIGHT|FULL|INNER|OUTER] JOIN` anywhere in the statement. sqlparser has no hook in a
-/// join, and reads only Snowflake's `MATCH_CONDITION` form, so DuckDB's `ON` fails as a syntax error.
-fn has_asof_join(parser: &sqlparser::parser::Parser) -> bool {
-    use sqlparser::keywords::Keyword::{AS, ASOF, FULL, INNER, JOIN, LEFT, OUTER, RIGHT};
-    use sqlparser::tokenizer::Token;
-    let word = |n: usize| match parser.peek_nth_token(n).token {
-        Token::Word(w) if w.quote_style.is_none() => Some(w.keyword),
-        Token::EOF => None,
-        _ => Some(sqlparser::keywords::Keyword::NoKeyword),
-    };
-    let mut n = 0;
-    let mut prev = None;
-    while let Some(k) = word(n) {
-        if k == ASOF
-            && prev != Some(AS)
-            && matches!(
-                word(n + 1),
-                Some(JOIN | LEFT | RIGHT | FULL | INNER | OUTER)
-            )
+/// sqlparser reads only Snowflake's `ASOF JOIN ... MATCH_CONDITION`, so DuckDB's `ON` or `USING`
+/// fails on the missing keyword. That failure, or a `MATCH_CONDITION` that parses, is an `ASOF JOIN`.
+fn asof_error(msg: &str) -> bool {
+    msg.contains("Expected: MATCH_CONDITION")
+}
+
+fn asof_refusal() -> sqlparser::parser::ParserError {
+    sqlparser::parser::ParserError::ParserError(ASOF_REFUSAL.into())
+}
+
+struct HasAsof;
+
+impl HasAsof {
+    fn joins(joins: &[sq::Join]) -> ControlFlow<()> {
+        if joins
+            .iter()
+            .any(|j| matches!(j.join_operator, sq::JoinOperator::AsOf { .. }))
         {
-            return true;
+            return ControlFlow::Break(());
         }
-        prev = Some(k);
-        n += 1;
+        ControlFlow::Continue(())
     }
-    false
+}
+
+impl sq::Visitor for HasAsof {
+    type Break = ();
+
+    fn pre_visit_select(&mut self, s: &sq::Select) -> ControlFlow<()> {
+        s.from.iter().try_for_each(|t| Self::joins(&t.joins))
+    }
+
+    fn pre_visit_table_factor(&mut self, t: &sq::TableFactor) -> ControlFlow<()> {
+        match t {
+            sq::TableFactor::NestedJoin {
+                table_with_joins, ..
+            } => Self::joins(&table_with_joins.joins),
+            _ => ControlFlow::Continue(()),
+        }
+    }
+}
+
+/// What [`inspect::parse`](crate::inspect) returns: the parse, with an `ASOF JOIN` refused by name.
+pub(crate) fn refuse_asof(
+    parsed: std::result::Result<Vec<sq::Statement>, sqlparser::parser::ParserError>,
+) -> std::result::Result<Vec<sq::Statement>, sqlparser::parser::ParserError> {
+    match parsed {
+        Err(e) if asof_error(&e.to_string()) => Err(asof_refusal()),
+        Ok(stmts)
+            if stmts
+                .iter()
+                .any(|s| crate::walk::walk(s, &mut HasAsof).is_break()) =>
+        {
+            Err(asof_refusal())
+        }
+        other => other,
+    }
 }
 
 /// Parse with DuckDB's dialect and rewrite into what DataFusion plans. The result columns' DuckDB
@@ -198,17 +241,12 @@ impl sqlparser::dialect::Dialect for Duck {
         true
     }
 
-    /// `PIVOT`, `UNPIVOT` and `ASOF JOIN` are refused by name rather than as a syntax error.
+    /// `PIVOT` and `UNPIVOT` are refused by name rather than as a syntax error.
     fn parse_statement(
         &self,
         parser: &mut sqlparser::parser::Parser,
     ) -> Option<std::result::Result<sq::Statement, sqlparser::parser::ParserError>> {
         use sqlparser::keywords::Keyword;
-        if has_asof_join(parser) {
-            return Some(Err(sqlparser::parser::ParserError::ParserError(
-                ASOF_REFUSAL.into(),
-            )));
-        }
         match &parser.peek_token().token {
             sqlparser::tokenizer::Token::Word(w)
                 if matches!(w.keyword, Keyword::PIVOT | Keyword::UNPIVOT) =>

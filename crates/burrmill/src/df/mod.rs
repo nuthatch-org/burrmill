@@ -43,6 +43,8 @@ pub(crate) fn engine_parses(sql: &str) -> bool {
     dialect::parse_statements(sql).is_ok()
 }
 
+pub(crate) use dialect::refuse_asof;
+
 pub(crate) fn duck_dialect() -> dialect::Duck {
     dialect::Duck
 }
