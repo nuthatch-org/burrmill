@@ -42,7 +42,7 @@ pub struct ColumnInfo {
     pub temporal: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct QueryOut {
     pub columns: Vec<Column>,
     pub rows: Vec<Vec<Option<String>>>,
@@ -212,19 +212,17 @@ impl Session {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn query(&self, sql: &str) -> Result<QueryOut, Failure> {
         self.guard(sql)?;
-        match self.engine.sql(sql) {
-            Ok(batches) => Ok(self.pack(batches)),
-            Err(e) => Err(self.failure(&e)),
-        }
+        let mut out = Packed::default();
+        let r = self.engine.sql_for_each(sql, |b| out.take(&b));
+        self.packed(out, r)
     }
 
     #[cfg(target_arch = "wasm32")]
     pub async fn query(&self, sql: &str) -> Result<QueryOut, Failure> {
         self.guard(sql)?;
-        match self.engine.sql_async(sql).await {
-            Ok(batches) => Ok(self.pack(batches)),
-            Err(e) => Err(self.failure(&e)),
-        }
+        let mut out = Packed::default();
+        let r = self.engine.sql_async_for_each(sql, |b| out.take(&b)).await;
+        self.packed(out, r)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -374,36 +372,12 @@ impl Session {
         }
     }
 
-    fn pack(&self, batches: Vec<RecordBatch>) -> QueryOut {
-        let columns = batches
-            .first()
-            .map(|b| {
-                b.schema()
-                    .fields()
-                    .iter()
-                    .map(|f| Column {
-                        name: f.name().clone(),
-                        type_name: type_name(f.data_type()),
-                        numeric: is_numeric(f.data_type()),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut rows = Vec::new();
-        let mut truncated = false;
-        'rows: for batch in &batches {
-            for r in 0..batch.num_rows() {
-                if rows.len() == RESULT_ROWS {
-                    truncated = true;
-                    break 'rows;
-                }
-                rows.push(batch.columns().iter().map(|c| cell_string(c, r)).collect());
-            }
-        }
-        QueryOut {
-            columns,
-            rows,
-            truncated,
+    /// A statement stopped once its rows are kept answers with them.
+    fn packed(&self, out: Packed, r: burrmill::Result<()>) -> Result<QueryOut, Failure> {
+        match r {
+            Ok(()) => Ok(out.out),
+            Err(_) if out.out.truncated => Ok(out.out),
+            Err(e) => Err(self.failure(&e)),
         }
     }
 
@@ -415,6 +389,43 @@ impl Session {
         self.engine
             .register_batch(TABLE, out)
             .map_err(|e| e.to_string())
+    }
+}
+
+/// The answer as its batches arrive: the first `RESULT_ROWS` rows, after which the statement is
+/// stopped, so an answer larger than the page shows is never held whole.
+#[derive(Default)]
+struct Packed {
+    out: QueryOut,
+    started: bool,
+}
+
+impl Packed {
+    fn take(&mut self, batch: &RecordBatch) -> burrmill::Result<()> {
+        if !self.started {
+            self.started = true;
+            self.out.columns = batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| Column {
+                    name: f.name().clone(),
+                    type_name: type_name(f.data_type()),
+                    numeric: is_numeric(f.data_type()),
+                })
+                .collect();
+        }
+        for r in 0..batch.num_rows() {
+            if self.out.rows.len() == RESULT_ROWS {
+                self.out.truncated = true;
+                return Err(burrmill::BurrmillError::Substrate(
+                    "the page's rows are kept".into(),
+                ));
+            }
+            let row = batch.columns().iter().map(|c| cell_string(c, r)).collect();
+            self.out.rows.push(row);
+        }
+        Ok(())
     }
 }
 
