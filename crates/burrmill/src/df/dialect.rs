@@ -848,8 +848,8 @@ fn arg_extreme(f: &mut sq::Function, max: bool) {
     f.name = sq::ObjectName::from(vec![sq::Ident::new("first_value")]);
 }
 
-/// The DuckDB spellings a statement may use that the dialect rewrites to DataFusion's own. A test
-/// holds that each is rewritten, so a name here is one the engine answers.
+/// The DuckDB spellings the dialect rewrites to DataFusion's own and the demo offers the model. A
+/// test in burrmill-wasm runs each against a table, so a name here is one the engine answers.
 pub const DUCKDB_SPELLINGS: &[&str] = &[
     "if",
     "ifnull",
@@ -876,9 +876,6 @@ pub const DUCKDB_SPELLINGS: &[&str] = &[
     "millisecond",
     "microsecond",
     "isodow",
-    "decade",
-    "century",
-    "millennium",
     "dayofweek",
     "dayofyear",
     "dayofmonth",

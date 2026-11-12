@@ -27,9 +27,17 @@ pub const RESULT_ROWS: usize = 5000;
 const MEMORY_BYTES: usize = 256 * 1024 * 1024;
 const TABLE: &str = "t";
 
-/// Registered functions the checked arithmetic refuses over DECIMAL, the type a money column
-/// is read as, so the model is not offered them.
-const REFUSED_OVER_DECIMAL: &[&str] = &["median", "ceil", "floor", "trunc", "gcd", "lcm"];
+/// Registered functions the checked arithmetic refuses over DECIMAL, the type a money column is
+/// read as. They answer over integers and DOUBLE, so the grammar offers them with that caveat.
+const REFUSED_OVER_DECIMAL: &[&str] = &[
+    "any_value",
+    "median",
+    "ceil",
+    "floor",
+    "trunc",
+    "gcd",
+    "lcm",
+];
 
 /// DuckDB spellings the engine refuses and says so by name (docs/sql.md, Refused by name).
 const REFUSED_BY_NAME: &[&str] = &[
@@ -224,14 +232,13 @@ impl Session {
             .engine
             .function_names()
             .into_iter()
-            .filter(|f| {
-                !REFUSED_OVER_DECIMAL.contains(&f.as_str()) && !spellings.contains(&f.as_str())
-            })
+            .filter(|f| !spellings.contains(&f.as_str()))
             .collect();
         format!(
-            "burrmill subset v1\nDuckDB dialect. SELECT and WITH only. The uploaded table is {TABLE}. No files, no catalogue, no DDL.\nDuckDB spellings admitted: {}\nRefused by name: {}\nFunctions: {}",
+            "burrmill subset v1\nDuckDB dialect. SELECT and WITH only. The uploaded table is {TABLE}. No files, no catalogue, no DDL.\nDuckDB spellings admitted: {}\nRefused by name: {}\nRefused over DECIMAL, the type of a money column: {}\nFunctions: {}",
             spellings.join(", "),
             REFUSED_BY_NAME.join(", "),
+            REFUSED_OVER_DECIMAL.join(", "),
             functions.join(", ")
         )
     }
@@ -919,11 +926,40 @@ posted,merchant,amount
             .unwrap();
         let listed: Vec<&str> = functions["Functions: ".len()..].split(", ").collect();
         assert!(listed.contains(&"coalesce"), "{functions}");
+        assert!(listed.contains(&"median"), "{functions}");
+        let caveat = grammar
+            .lines()
+            .find(|l| l.starts_with("Refused over DECIMAL"))
+            .unwrap();
         for name in REFUSED_OVER_DECIMAL {
-            assert!(!listed.contains(name), "{name} is offered");
+            assert!(caveat.contains(name), "{name} missing from {caveat}");
         }
     }
 
+    #[test]
+    fn every_duckdb_spelling_answers() {
+        let s = session();
+        for name in Engine::duckdb_spellings() {
+            let sql = match *name {
+                "if" => "SELECT if(amount < 0, 1, 2) FROM t".to_string(),
+                "ifnull" => "SELECT ifnull(amount, 0) FROM t".to_string(),
+                "arg_max" | "arg_min" | "max_by" | "min_by" => {
+                    format!("SELECT {name}(merchant, amount) FROM t")
+                }
+                "struct_pack" => "SELECT struct_pack(a := amount) FROM t".to_string(),
+                "first" | "last" => format!("SELECT {name}(amount) FROM t"),
+                "list_reverse_sort" | "array_reverse_sort" => format!("SELECT {name}([3, 1, 2])"),
+                "regexp_matches" | "regexp_full_match" => {
+                    format!("SELECT {name}(merchant, 'CANARY.*') FROM t")
+                }
+                _ => format!("SELECT {name}(posted) FROM t"),
+            };
+            let out = s
+                .query(&sql)
+                .unwrap_or_else(|e| panic!("{sql}: {}", e.local));
+            assert!(!out.rows.is_empty(), "{sql} answers no rows");
+        }
+    }
     #[test]
     fn the_functions_left_out_are_refused_over_decimal() {
         let s = session();

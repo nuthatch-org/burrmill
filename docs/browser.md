@@ -28,7 +28,7 @@ Each request to the model (`promptText` and `requestBody` in `demo/app.js`) carr
   column and reason. No cell value.
   For a column the user ticks as a sign, one word for its sign; for one ticked as a date, its
   minimum and maximum;
-- the grammar (`Session::grammar`): the dialect (DuckDB), the admitted statement kinds, the DuckDB spellings the engine rewrites (`Engine::duckdb_spellings`), the few it refuses by name, and the registered function names that answer over exact types;
+- the grammar (`Session::grammar`): the dialect (DuckDB), the admitted statement kinds, the DuckDB spellings the engine rewrites (`Engine::duckdb_spellings`), the few it refuses by name, the functions refused over DECIMAL, and the registered function names;
 - the question, and on a retry the model's own previous statement with that attempt's feedback.
 
 Feedback after a query that ran is its shape (`feedback_shape`): row count, column names and types,
