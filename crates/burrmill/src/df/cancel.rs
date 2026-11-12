@@ -24,7 +24,6 @@ use arrow::record_batch::RecordBatch;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{DataFusionError, Result};
-use datafusion_execution::memory_pool::MemoryConsumer;
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::PhysicalExpr;
@@ -182,11 +181,11 @@ impl ExecutionPlan for CancelExec {
             let _ = slot.set(token.clone());
         }
         if let Some(opened) = &self.opened {
-            let r = MemoryConsumer::new(format!("SegmentScan[{partition}]"))
-                .register(ctx.memory_pool());
-            // The plan's file lists are already built: recorded, not asked for.
-            r.grow(super::catalog::listed(&self.inner, partition));
-            opened.running(partition, r);
+            opened.running(
+                partition,
+                ctx.memory_pool(),
+                super::catalog::listed(&self.inner, partition),
+            )?;
         }
         let mut stream = self.inner.execute(partition, ctx)?;
         if let Some(cpu) = self

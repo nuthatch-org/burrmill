@@ -20,6 +20,8 @@ members = [
     "crates/burrmill-size",
     "crates/burrmill-wasm",
 ]
+# Carried with one change; see vendor/README.md.
+exclude = ["vendor/datafusion-datasource-parquet"]
 
 [workspace.package]
 edition = "2021"
@@ -51,3 +53,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+[patch.crates-io]
+datafusion-datasource-parquet = { path = "vendor/datafusion-datasource-parquet" }

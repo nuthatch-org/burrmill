@@ -1,7 +1,8 @@
-//! burrmill#86: what a scan holds for each segment it opens is charged to the pool, so a statement's
-//! heap less what the pool holds stays small however many segments it reads. burrmill#156: it is
-//! charged as the segment opens, not for the whole table before the first row. The live heap is
-//! counted by this binary's allocator, so the file holds one test.
+//! burrmill#86: what a scan holds for its segments is charged to the pool, so a statement's heap less
+//! what the pool holds stays small however many segments it reads. With DataFusion's per-file
+//! metrics folded into one set a partition (vendor/README.md), what is left is the plan's file lists,
+//! about 1.4 KB a segment, held from the start. The live heap is counted by this binary's allocator,
+//! so the file holds one test.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::PathBuf;
@@ -137,9 +138,9 @@ fn a_scan_holds_its_segments_bookkeeping_inside_the_pool() {
         "{outside} bytes outside the pool during a scan of {SEGMENTS} segments (pool held {held_then})"
     );
 
-    // burrmill#156: the charge follows the segments opened. A batch per segment here, so the pool
-    // is read while the scan is part-way through the table. A text column puts `CompactViews`
-    // between the scan and its wrapper, which once left such a scan charged nothing.
+    // A batch per segment here, so the pool is read while the scan is part-way through the table.
+    // A text column puts `CompactViews` between the scan and its wrapper, which once left such a
+    // scan charged nothing.
     let mut held = Vec::new();
     e.sql_for_each("SELECT block_number, who FROM t", |_| {
         let live = LIVE
@@ -155,19 +156,25 @@ fn a_scan_holds_its_segments_bookkeeping_inside_the_pool() {
     })
     .unwrap();
     let whole = *held.last().unwrap();
-    assert!(whole > SEGMENTS as usize * 5_632, "{whole}");
+    assert!(whole > SEGMENTS as usize * 1_024, "{whole}");
+    // Opening a segment adds nothing that lasts: about 4.6 KB a segment before the fold.
     assert!(
-        held[0] * 3 < whole,
-        "the first batch came with {} of {whole} already held",
-        held[0]
+        whole < SEGMENTS as usize * 2_048,
+        "{whole} held for {SEGMENTS} segments"
     );
-    // Two scans of the table: the build side is read and dropped before the probe side has opened
-    // much, so the statement never holds for both whole.
+    assert_eq!(
+        held[0], whole,
+        "the plan's file lists are held from the start"
+    );
+    // Two scans of the table, each with its own lists in the plan until it drops.
     e.take_memory_peak();
     e.sql("SELECT count(*) FROM t a JOIN t b ON a.block_number = b.block_number")
         .unwrap();
     let peak = e.take_memory_peak();
-    assert!(peak < whole + whole / 2, "{peak} against {whole} a scan");
+    assert!(
+        peak < 2 * whole + whole / 4,
+        "{peak} against {whole} a scan"
+    );
 
     // Four partitions, each ending in its own time, over one scan and over three, one of them a
     // join's build side that ends before the rest. A scan's metrics live until its last reader goes,
@@ -212,8 +219,8 @@ fn a_scan_holds_its_segments_bookkeeping_inside_the_pool() {
         }
     }
 
-    // A recursive statement runs its scan again at every step, on a copy of the plan that keeps its
-    // own file lists and metrics. Ten steps more cost as much again as they charge.
+    // A recursive statement runs its scan again at every step. A run adds no file list and, with
+    // its metrics folded into the partition's, nothing else that lasts, and is charged nothing more.
     let recursive = |steps: usize| {
         let e = four(256 << 20);
         let base = LIVE.load(Ordering::Relaxed);
@@ -239,7 +246,7 @@ fn a_scan_holds_its_segments_bookkeeping_inside_the_pool() {
     let ((live2, held2), (live12, held12)) = (recursive(2), recursive(12));
     let (live, held) = (live12 - live2, held12 - held2);
     assert!(
-        held.abs_diff(live) < live / 10,
+        held.abs_diff(live) < OUTSIDE,
         "ten more steps charged {held} for {live} they held"
     );
 }
