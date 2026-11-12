@@ -185,7 +185,7 @@ pub fn apply_schema_text(tables: &mut Vec<NestTable>, raw: &str) -> crate::Resul
 /// `tests/df_scanpool.rs` measures both.
 const PER_SEGMENT: usize = 5_632;
 const LISTED: usize = 1_024;
-const FOOTERS_IN_FLIGHT: usize = 32;
+const FOOTERS_IN_FLIGHT: usize = 1;
 
 /// The bytes the segment scan under `plan` holds for listing the segments of `partition`.
 pub(super) fn listed(plan: &Arc<dyn ExecutionPlan>, partition: usize) -> usize {
