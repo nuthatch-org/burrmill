@@ -120,9 +120,7 @@ if (!second.includes('\\"dropped\\":\\"0-9\\"') && !second.includes('"dropped":"
   bad('dropped count missing');
 }
 if (!second.includes('KEPT_GROUP')) bad('kept group missing');
-if (!second.includes('\\"total\\":\\"80\\"') && !second.includes('"total":"80"')) {
-  bad('kept total missing');
-}
+if (!second.includes('80.00')) bad('kept total missing');
 if (!second.includes('\\"k\\":10') && !second.includes('"k":10')) bad('k missing');
 for (const body of bodies) {
   for (const word of forbidden) {

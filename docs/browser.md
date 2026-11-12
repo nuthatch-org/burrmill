@@ -64,12 +64,9 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
   asks. An answer with no row and one whose groups were all dropped send the same thing, the
   groups go in one order whatever `ORDER BY` said, and a `HAVING` over a count or a limit after
   `ORDER BY` a count is not applied to what is sent (`not_applied` says so), since either would
-  pick groups by an exact count. Every output that holds a `sum` or `avg`, and arithmetic over
-  them such as `sum(x) / avg(x)`, is sent to two significant figures (`two_figures`), so `253.00`
-  goes as `250`; `min` and `max` are refused outright, as above. This is not a guarantee. One
-  member still changes what is sent whenever it carries a figure across a rounding edge, and two
-  figures are exact for anything under 100, so `sum(x) / avg(x)` still gives the exact size of a
-  group of 10 to 99. A statement that fails while reading rows sends only that it failed, with no kind, and
+  pick groups by an exact count. `sum` and `avg` are sent exact: they move with one member, so
+  `sum(amount)` of a group chosen by a key over one person still answers a question about that
+  person, and `sum(x) / avg(x)` is the exact count. The buckets close only the count. A statement that fails while reading rows sends only that it failed, with no kind, and
   one `measure_sql` refuses gets its refusal whether it failed or not. Once the groups have been
   sent, a later attempt that fails or finds no rows ends the question on the page. Whether a
   passed statement fails is still one bit per attempt about the data, and can be about one member:
