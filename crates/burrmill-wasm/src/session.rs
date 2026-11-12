@@ -813,6 +813,26 @@ posted,merchant,amount
     }
 
     #[test]
+    fn an_error_raised_from_a_cell_is_a_failure_while_reading_rows_whatever_it_says() {
+        let s = session();
+        for sql in [
+            "SELECT CASE WHEN amount < -95 THEN error('no table ' || merchant) END FROM t",
+            "SELECT error('not yet implemented ' || merchant || ' ' || CAST(amount AS VARCHAR)) FROM t",
+            "SELECT error('table function ' || merchant || ' is not supported here') FROM t",
+            "SELECT error('Error during planning: ' || merchant) FROM t",
+        ] {
+            let failed = s.query(sql).unwrap_err();
+            assert!(!failed.before_rows, "{sql}: {}", failed.local);
+            assert_clean(sql, &failed.feedback);
+            assert!(
+                !failed.feedback.to_lowercase().contains("canary"),
+                "{sql}: {}",
+                failed.feedback
+            );
+        }
+    }
+
+    #[test]
     fn the_card_has_no_cell_and_a_sign_has_no_magnitude() {
         let s = session();
         let card = s.card(&[], &[]).unwrap();

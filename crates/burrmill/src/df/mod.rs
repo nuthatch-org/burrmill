@@ -725,7 +725,7 @@ impl Engine {
             .with_extension(Arc::new(token.clone()));
         let ctx = ctx.with_session_config(config);
         let Some(metrics) = metrics else {
-            let stream = sequential::execute_stream(physical, Arc::new(ctx)).map_err(df_err)?;
+            let stream = sequential::execute_stream(physical, Arc::new(ctx)).map_err(run_err)?;
             return self.drain(stream, token, f, &mut 0).await;
         };
         // Its own recorder over the engine's pool, so a peak is this statement's and not a neighbour's.
@@ -749,7 +749,7 @@ impl Engine {
         catalog::sealed_counters(&physical, &mut counters);
         let mut cpu = Vec::new();
         cancel::arm_scan_cpu(&physical, &mut cpu);
-        let stream = sequential::execute_stream(physical, ctx).map_err(df_err)?;
+        let stream = sequential::execute_stream(physical, ctx).map_err(run_err)?;
         let mut rows = 0u64;
         let r = self.drain(stream, token, f, &mut rows).await;
         #[cfg(not(target_arch = "wasm32"))]
@@ -810,7 +810,7 @@ impl Engine {
                     Ok(b) => b,
                     // A scan stopped by the token surfaces here as its error; say what it was.
                     Err(_) if token.is_cancelled() => return Err(BurrmillError::Cancelled),
-                    Err(e) => return Err(df_err(e)),
+                    Err(e) => return Err(run_err(e)),
                 };
                 *rows += b.num_rows() as u64;
                 f(dialect::strip_dup_suffix(b))?;
@@ -1232,6 +1232,13 @@ fn plan_err(e: datafusion_common::DataFusionError) -> BurrmillError {
         BurrmillError::Substrate(s) => BurrmillError::Plan(s),
         e => e,
     }
+}
+
+/// `df_err` for a failure while running: its text can be built from cells (`error(text)`), so it
+/// never chooses a variant that says the statement read no row.
+fn run_err(e: datafusion_common::DataFusionError) -> BurrmillError {
+    let s = clipped(errors::restate(e.to_string()));
+    errors::typed(&e, &s).unwrap_or(BurrmillError::Substrate(s))
 }
 
 fn df_err(e: datafusion_common::DataFusionError) -> BurrmillError {
