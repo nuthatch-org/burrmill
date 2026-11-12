@@ -87,6 +87,11 @@ same(
   [right, wrong],
 );
 
+const literal = (guess) => "SELECT merchant, '" + guess + "' AS x FROM t";
+const tokened = await ask(people, 'pseudonymised', literal(right));
+same('a literal that guesses a value', tokened, await ask(people, 'pseudonymised', literal(wrong)), [right, wrong]);
+if (tokened.some((body) => /CUSTOMER_\d/.test(body))) bad('a literal came back as a token');
+
 await browser.close();
 if (failed) process.exit(1);
 console.log('guesses ok');

@@ -3,6 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{ControlFlow, Range};
 
+use std::sync::Arc;
+
+use arrow::array::{ArrayRef, StringArray};
+use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use burrmill_ingest::InferredType;
 use serde::Serialize;
@@ -74,8 +78,7 @@ impl TokenMap {
         &self.back
     }
 
-    /// A cell that merely contains a tokenised value still carries it.
-    /// An exact hit is replaced by the caller and is not withheld here.
+    /// A cell that contains a tokenised value without being one.
     fn hides(&self, text: &str) -> bool {
         self.scan(text, 8, |at| at != (0..text.len()))
     }
@@ -220,7 +223,12 @@ pub fn shuffled(numbers: &mut [u64]) {
 #[cfg(test)]
 pub fn row_order(_: &mut [u64]) {}
 
-pub fn projection_allows(sql: &str, marked: &BTreeSet<String>) -> Result<(), &'static str> {
+/// `withheld` are the unmarked columns that hold identifier values (`withheld`), refused anywhere.
+pub fn projection_allows(
+    sql: &str,
+    marked: &BTreeSet<String>,
+    withheld: &BTreeSet<String>,
+) -> Result<(), &'static str> {
     let mut statements = Parser::parse_sql(&DuckDbDialect {}, sql).map_err(|_| NOT_ONE)?;
     if statements.len() != 1 {
         return Err(NOT_ONE);
@@ -240,19 +248,69 @@ pub fn projection_allows(sql: &str, marked: &BTreeSet<String>) -> Result<(), &'s
     if mentions(&held, &marked) {
         return Err(EXPR);
     }
+    if reaches(&query, withheld) {
+        return Err(UNTOKENISED);
+    }
     Ok(())
 }
 
-pub fn mask(out: &QueryOut, tokens: &TokenMap, bound: bool) -> Result<Vec<Value>, &'static str> {
-    let mut rows = Vec::with_capacity(out.rows.len());
-    for row in &out.rows {
-        let mut obj = serde_json::Map::new();
-        for (column, cell) in out.columns.iter().zip(row) {
-            obj.insert(column.name.clone(), mask_cell(cell, tokens, bound)?);
-        }
-        rows.push(Value::Object(obj));
+/// Unmarked columns with a cell that is, contains or looks like an identifier value. Decided from
+/// the table alone, so no literal in a statement can ask whether its text is one of the values.
+pub fn withheld(
+    names: &[String],
+    marked: &BTreeSet<String>,
+    batches: &[RecordBatch],
+    tokens: &TokenMap,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    if marked.is_empty() {
+        return out;
     }
-    Ok(rows)
+    for (i, name) in names.iter().enumerate() {
+        if marked.contains(name) {
+            continue;
+        }
+        let holds = batches.iter().any(|batch| {
+            (0..batch.num_rows()).any(|r| {
+                cell_string(batch.column(i), r).is_some_and(|text| {
+                    tokens.token(&text).is_some() || kind_of(&text).is_some() || tokens.hides(&text)
+                })
+            })
+        });
+        if holds {
+            out.insert(name.to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+/// The batch with each marked value replaced by its token. Feedback runs over this, so a token in
+/// an answer came from the table, and a literal in the statement stays the literal it was.
+pub fn tokenise(
+    batch: &RecordBatch,
+    names: &[String],
+    marked: &BTreeSet<String>,
+    tokens: &TokenMap,
+) -> Result<RecordBatch, String> {
+    let mut fields = Vec::with_capacity(names.len());
+    let mut columns = Vec::with_capacity(names.len());
+    for (i, name) in names.iter().enumerate() {
+        let column = batch.column(i);
+        if marked.contains(name) {
+            let swapped: StringArray = (0..batch.num_rows())
+                .map(|r| {
+                    cell_string(column, r)
+                        .map(|text| tokens.token(&text).map_or(text.clone(), str::to_string))
+                })
+                .collect();
+            fields.push(Field::new(name, DataType::Utf8, true));
+            columns.push(Arc::new(swapped) as ArrayRef);
+        } else {
+            fields.push(Field::new(name, column.data_type().clone(), true));
+            columns.push(column.clone());
+        }
+    }
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).map_err(|e| e.to_string())
 }
 
 pub fn omitted(identifiers: &[String], reason: &str) -> String {
@@ -264,7 +322,23 @@ pub fn omitted(identifiers: &[String], reason: &str) -> String {
     .to_string()
 }
 
-pub fn payload(identifiers: &[String], out: &QueryOut, rows: Vec<Value>) -> String {
+pub fn payload(identifiers: &[String], out: &QueryOut) -> String {
+    let rows: Vec<Value> = out
+        .rows
+        .iter()
+        .map(|row| {
+            let obj = out
+                .columns
+                .iter()
+                .zip(row)
+                .map(|(column, cell)| {
+                    let value = cell.clone().map_or(Value::Null, Value::String);
+                    (column.name.clone(), value)
+                })
+                .collect();
+            Value::Object(obj)
+        })
+        .collect();
     let columns: Vec<_> = out
         .columns
         .iter()
@@ -277,19 +351,6 @@ pub fn payload(identifiers: &[String], out: &QueryOut, rows: Vec<Value>) -> Stri
         "truncated": out.truncated,
     })
     .to_string()
-}
-
-fn mask_cell(cell: &Option<String>, tokens: &TokenMap, bound: bool) -> Result<Value, &'static str> {
-    let Some(text) = cell else {
-        return Ok(Value::Null);
-    };
-    if let Some(token) = tokens.token(text) {
-        return Ok(Value::String(token.to_string()));
-    }
-    if bound && kind_of(text).is_some() || tokens.hides(text) {
-        return Err(UNTOKENISED);
-    }
-    Ok(Value::String(text.clone()))
 }
 
 fn column_kind(batches: &[RecordBatch], idx: usize) -> Option<Kind> {
@@ -646,28 +707,7 @@ fn check_select(select: &Select, marked: &mut BTreeSet<String>) -> Result<bool, 
 }
 
 fn check_join(op: &JoinOperator, marked: &BTreeSet<String>) -> Result<(), &'static str> {
-    let (condition, constraint) = match op {
-        JoinOperator::AsOf {
-            match_condition,
-            constraint,
-        } => (Some(match_condition), Some(constraint)),
-        JoinOperator::Join(c)
-        | JoinOperator::Inner(c)
-        | JoinOperator::Left(c)
-        | JoinOperator::LeftOuter(c)
-        | JoinOperator::Right(c)
-        | JoinOperator::RightOuter(c)
-        | JoinOperator::FullOuter(c)
-        | JoinOperator::CrossJoin(c)
-        | JoinOperator::Semi(c)
-        | JoinOperator::LeftSemi(c)
-        | JoinOperator::RightSemi(c)
-        | JoinOperator::Anti(c)
-        | JoinOperator::LeftAnti(c)
-        | JoinOperator::RightAnti(c)
-        | JoinOperator::StraightJoin(c) => (None, Some(c)),
-        _ => (None, None),
-    };
+    let (condition, constraint) = join_parts(op);
     if condition.is_some_and(|e| mentions(e, marked)) {
         return Err(FILTER);
     }
@@ -688,6 +728,31 @@ fn check_join(op: &JoinOperator, marked: &BTreeSet<String>) -> Result<(), &'stat
         // A natural join can match on an identifier without naming it.
         Some(JoinConstraint::Natural) => Err(FILTER),
         _ => Ok(()),
+    }
+}
+
+fn join_parts(op: &JoinOperator) -> (Option<&Expr>, Option<&JoinConstraint>) {
+    match op {
+        JoinOperator::AsOf {
+            match_condition,
+            constraint,
+        } => (Some(match_condition), Some(constraint)),
+        JoinOperator::Join(c)
+        | JoinOperator::Inner(c)
+        | JoinOperator::Left(c)
+        | JoinOperator::LeftOuter(c)
+        | JoinOperator::Right(c)
+        | JoinOperator::RightOuter(c)
+        | JoinOperator::FullOuter(c)
+        | JoinOperator::CrossJoin(c)
+        | JoinOperator::Semi(c)
+        | JoinOperator::LeftSemi(c)
+        | JoinOperator::RightSemi(c)
+        | JoinOperator::Anti(c)
+        | JoinOperator::LeftAnti(c)
+        | JoinOperator::RightAnti(c)
+        | JoinOperator::StraightJoin(c) => (None, Some(c)),
+        _ => (None, None),
     }
 }
 
@@ -722,6 +787,10 @@ fn check_item(item: &SelectItem, marked: &mut BTreeSet<String>) -> Result<bool, 
 
 fn check_factor(factor: &TableFactor, marked: &mut BTreeSet<String>) -> Result<(), &'static str> {
     match factor {
+        // `t AS s(a, b)` renames by position, which a walk by name cannot follow.
+        TableFactor::Table {
+            alias: Some(alias), ..
+        } if !alias.columns.is_empty() => Err(EXPR),
         TableFactor::Derived {
             subquery, alias, ..
         } => {
@@ -768,6 +837,105 @@ fn check_expr_queries(expr: &Expr, marked: &mut BTreeSet<String>) -> Result<(), 
         Some(reason) => Err(reason),
         None => Ok(()),
     }
+}
+
+/// Whether the statement names a withheld column, or could reach one by position: a star, a column
+/// alias list, or a `USING` or `NATURAL` join.
+fn reaches(query: &Query, withheld: &BTreeSet<String>) -> bool {
+    struct Reach<'a> {
+        withheld: &'a BTreeSet<String>,
+        hit: bool,
+    }
+    impl Reach<'_> {
+        fn flow(&mut self, hit: bool) -> ControlFlow<()> {
+            self.hit |= hit;
+            if self.hit {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        }
+    }
+    impl Visitor for Reach<'_> {
+        type Break = ();
+
+        fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
+            let listed = query.with.as_ref().is_some_and(|with| {
+                with.cte_tables
+                    .iter()
+                    .any(|cte| !cte.alias.columns.is_empty())
+            });
+            self.flow(listed)
+        }
+
+        fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<()> {
+            let star = select.projection.iter().any(|item| {
+                matches!(
+                    item,
+                    SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..)
+                )
+            });
+            let natural = select
+                .from
+                .iter()
+                .flat_map(|table| &table.joins)
+                .any(|join| {
+                    matches!(
+                        join_parts(&join.join_operator).1,
+                        Some(JoinConstraint::Natural)
+                    )
+                });
+            self.flow(star || natural)
+        }
+
+        fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<()> {
+            let alias = match factor {
+                TableFactor::Table { alias, .. } | TableFactor::Derived { alias, .. } => {
+                    alias.as_ref()
+                }
+                _ => None,
+            };
+            self.flow(alias.is_some_and(|a| !a.columns.is_empty()))
+        }
+
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+            let hit = mentions(expr, self.withheld);
+            self.flow(hit)
+        }
+    }
+    if withheld.is_empty() {
+        return false;
+    }
+    let mut reach = Reach {
+        withheld,
+        hit: false,
+    };
+    let _ = query.visit(&mut reach);
+    // `USING (merchant)` names a column outside any expression.
+    reach.hit || using_names(query).iter().any(|n| withheld.contains(n))
+}
+
+fn using_names(query: &Query) -> Vec<String> {
+    struct Using(Vec<String>);
+    impl Visitor for Using {
+        type Break = ();
+
+        fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<()> {
+            for join in select.from.iter().flat_map(|table| &table.joins) {
+                if let (_, Some(JoinConstraint::Using(names))) = join_parts(&join.join_operator) {
+                    for name in names {
+                        if let Some(ObjectNamePart::Identifier(id)) = name.0.last() {
+                            self.0.push(id.value.to_ascii_lowercase());
+                        }
+                    }
+                }
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let mut using = Using(Vec::new());
+    let _ = query.visit(&mut using);
+    using.0
 }
 
 fn is_bare(expr: &Expr) -> bool {
@@ -880,6 +1048,7 @@ OTHER_MERCHANT,canary.two@example.com,DE89370400440532013000,+359 888 100002,-3.
             "WITH x AS (SELECT merchant AS m FROM t UNION ALL SELECT email FROM t) SELECT replace(m, '@', ' at ') FROM x",
             "SELECT * REPLACE (replace(email, '@', ' at ') AS email) FROM t",
             "WITH x AS (SELECT * RENAME (email AS e) FROM t) SELECT replace(e, '@', ' at ') FROM x",
+            "SELECT replace(b, '@', ' at ') AS b FROM t AS s(a, b, c, d, e, f, g)",
         ];
         for sql in leaks {
             let payload = s.pseudonym_feedback(sql).unwrap();
@@ -1028,6 +1197,81 @@ OTHER_MERCHANT,canary.two@example.com,DE89370400440532013000,+359 888 100002,-3.
         }
         assert_eq!(seen[0], seen[1]);
         assert!(!session().admits("pseudonym", "SELECT merchant FROM t"));
+    }
+
+    #[test]
+    fn a_literal_is_never_tokenised_whatever_it_guesses() {
+        let s = bound();
+        let shapes = [
+            "SELECT 'GUESS' AS x FROM t",
+            "SELECT 'GUESS' AS email FROM t",
+            "SELECT 'GUESS' AS x",
+            "SELECT column1 FROM (VALUES ('GUESS'), ('other'))",
+            "SELECT x FROM (SELECT 'GUESS' AS x UNION ALL SELECT 'other') AS v",
+            "SELECT CASE WHEN amount < 0 THEN 'GUESS' ELSE 'no' END AS x FROM t",
+            "SELECT email FROM t UNION ALL SELECT 'GUESS'",
+            "SELECT 'GUESS' AS email UNION ALL SELECT email FROM t",
+            "SELECT 'xx ' || 'GUESS' || ' yy' AS x FROM t",
+            "SELECT merchant, 'GUESS ' AS x FROM t",
+        ];
+        for shape in shapes {
+            let mut seen = Vec::new();
+            for guess in ["canary.one@example.com", "nobody.at.all@example.com"] {
+                let sql = shape.replace("GUESS", guess);
+                let payload = s.pseudonym_feedback(&sql).unwrap();
+                assert!(!payload.contains("canary.two"), "{sql}: {payload}");
+                let value: Value = serde_json::from_str(&payload).unwrap();
+                if value["omitted"].is_null() {
+                    assert!(payload.contains(guess), "{sql}: {payload}");
+                }
+                // `UNION ALL` gives its arms in either order.
+                let mut rows: Vec<String> = serde_json::from_str::<Value>(
+                    &payload.replace(guess, "GUESS"),
+                )
+                .unwrap()["rows"]
+                    .as_array()
+                    .map(|rows| rows.iter().map(Value::to_string).collect())
+                    .unwrap_or_default();
+                rows.sort();
+                seen.push((value["omitted"].clone(), value["columns"].clone(), rows));
+            }
+            assert_eq!(seen[0], seen[1], "{shape}");
+        }
+    }
+
+    #[test]
+    fn a_column_holding_identifier_values_is_withheld_from_every_clause() {
+        let s = bound();
+        for sql in [
+            "SELECT mixed FROM t",
+            "SELECT lower(mixed) AS m FROM t",
+            "SELECT amount FROM t WHERE mixed LIKE 'canary.one%'",
+            "SELECT * FROM t",
+            "SELECT * EXCLUDE (email) FROM t",
+            "SELECT b FROM (SELECT merchant, amount FROM t) AS s(a, b)",
+            "WITH x(a, b, c, d, e, f, g) AS (SELECT * FROM t) SELECT f FROM x",
+            "SELECT u.amount FROM t JOIN t AS u USING (mixed)",
+        ] {
+            let payload = s.pseudonym_feedback(sql).unwrap();
+            assert_no(sql, &payload);
+            let value: Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(value["omitted"], UNTOKENISED, "{sql}: {payload}");
+            assert!(!s.admits("pseudonym", sql), "{sql}");
+        }
+        let fine = s
+            .pseudonym_feedback("SELECT merchant, email, amount FROM t")
+            .unwrap();
+        assert!(fine.contains("KEPT_MERCHANT"), "{fine}");
+    }
+
+    #[test]
+    fn a_rename_unbinds() {
+        let mut s = bound();
+        s.rename("email", "mail").unwrap();
+        let payload = s.pseudonym_feedback("SELECT mail FROM t").unwrap();
+        assert_no("renamed", &payload);
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["omitted"], NONE_MARKED, "{payload}");
     }
 
     #[test]
@@ -1231,25 +1475,26 @@ prefix-canary.one@example.com-suffix,canary.one@example.com,1
     }
 
     #[test]
-    fn a_large_map_masks_a_full_answer_quickly() {
+    fn a_large_map_scans_a_column_quickly() {
         let map = map_of(
             (0..200_000)
                 .map(|i| format!("person.{i}@mail.example"))
                 .collect(),
         );
-        let out = QueryOut {
-            columns: vec![crate::session::Column {
-                name: "merchant".into(),
-                type_name: "VARCHAR".into(),
-                numeric: false,
-            }],
-            rows: (0..crate::session::RESULT_ROWS)
-                .map(|i| vec![Some(format!("merchant number {i} of the answer"))])
-                .collect(),
-            truncated: false,
-        };
+        let column: arrow::array::ArrayRef = Arc::new(arrow::array::StringArray::from(
+            (0..crate::session::RESULT_ROWS)
+                .map(|i| format!("merchant number {i} of the answer"))
+                .collect::<Vec<_>>(),
+        ));
+        let batch = RecordBatch::try_from_iter([("merchant", column)]).unwrap();
         let started = std::time::Instant::now();
-        assert!(mask(&out, &map, false).is_ok());
+        let held = withheld(
+            &["merchant".to_string()],
+            &BTreeSet::from(["email".to_string()]),
+            &[batch],
+            &map,
+        );
+        assert!(held.is_empty(), "{held:?}");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "{:?}",

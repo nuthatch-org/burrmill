@@ -67,10 +67,15 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
   anywhere else, by name in an expression, `WHERE`, `HAVING`, `QUALIFY`, a join condition,
   `ORDER BY` (also by position or `ALL`) and `DISTINCT ON`, and by a closing scan in any other clause
   (`LIMIT`, a named window). It also refuses a `NATURAL` join, a set operation other than `UNION ALL`
-  over a marked column, and `* REPLACE`, `* RENAME` and a star alias. If allowed, the rows go with marked values as tokens;
-  a cell that still looks like an identifier, or contains a marked value of eight characters or
-  more, sends no rows (`mask`). With
-  nothing marked, no rows are sent. Only a statement `projection_allows` passes is told that it
+  over a marked column, `* REPLACE`, `* RENAME`, a star alias and a column list on the table
+  (`t AS s(a, b)`). If allowed, the statement runs again over a copy of `t` in which each marked
+  value is its token (`pseudonym::tokenise`), and those rows go: a token in them came from a marked
+  column, and a literal in the statement goes as it was written, whatever it is. An unmarked column
+  with a cell that is, contains (eight characters or more) or looks like an identifier is withheld
+  (`pseudonym::withheld`): while one is, a statement that names it anywhere, or uses a star, a
+  column list or a `USING` or `NATURAL` join, sends no rows. That is decided from the table, not the
+  answer, so a literal cannot ask whether it is one of the values. Renaming a column clears the
+  marks. With nothing marked, no rows are sent. Only a statement `projection_allows` passes is told that it
   failed while reading rows or found no rows (`Session::admits`); a refused one gets its refusal
   either way, and the page asks nothing more about it.
 - **Local model**. Every failure and empty answer is sent. Requests go to `http://127.0.0.1:<port>/v1/messages` with no key, and carry

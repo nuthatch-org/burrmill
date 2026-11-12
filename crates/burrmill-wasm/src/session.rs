@@ -88,6 +88,9 @@ pub struct Session {
     report: IngestReport,
     marked: BTreeSet<String>,
     tokens: TokenMap,
+    withheld: BTreeSet<String>,
+    /// `t` with marked values as their tokens, which pseudonymised feedback reads.
+    tokenised: Option<Engine>,
     pub(crate) order: fn(&mut [u64]),
 }
 
@@ -112,6 +115,8 @@ impl Session {
             report,
             marked: BTreeSet::new(),
             tokens: TokenMap::default(),
+            withheld: BTreeSet::new(),
+            tokenised: None,
             #[cfg(not(test))]
             order: pseudonym::shuffled,
             #[cfg(test)]
@@ -173,6 +178,8 @@ impl Session {
             return Err("column already exists".into());
         }
         self.names[idx] = to.to_string();
+        // The marks are by name, so a rename unbinds rather than leave a marked column unmarked.
+        self.bind(&[]);
         self.reregister()
     }
 
@@ -245,17 +252,27 @@ impl Session {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn query(&self, sql: &str) -> Result<QueryOut, Failure> {
+        self.query_on(&self.engine, sql)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn query_on(&self, engine: &Engine, sql: &str) -> Result<QueryOut, Failure> {
         self.guard(sql)?;
         let mut out = Packed::default();
-        let r = self.engine.sql_for_each(sql, |b| out.take(&b));
+        let r = engine.sql_for_each(sql, |b| out.take(&b));
         self.packed(out, r)
     }
 
     #[cfg(target_arch = "wasm32")]
     pub async fn query(&self, sql: &str) -> Result<QueryOut, Failure> {
+        self.query_on(&self.engine, sql).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn query_on(&self, engine: &Engine, sql: &str) -> Result<QueryOut, Failure> {
         self.guard(sql)?;
         let mut out = Packed::default();
-        let r = self.engine.sql_async_for_each(sql, |b| out.take(&b)).await;
+        let r = engine.sql_async_for_each(sql, |b| out.take(&b)).await;
         self.packed(out, r)
     }
 
@@ -301,6 +318,30 @@ impl Session {
             .cloned()
             .collect();
         self.tokens = pseudonym::assign(&self.names, &self.marked, &self.batches, self.order);
+        self.withheld = pseudonym::withheld(&self.names, &self.marked, &self.batches, &self.tokens);
+        self.tokenised = None;
+        if !self.marked.is_empty() {
+            // Without the copy pseudonymised feedback refuses, so a failure here sends nothing.
+            self.tokenised = self.tokenised_engine().ok();
+        }
+    }
+
+    fn tokenised_engine(&self) -> Result<Engine, String> {
+        let mut out = Vec::with_capacity(self.batches.len());
+        for batch in &self.batches {
+            let batch = rename_batch(batch, &self.names)?;
+            out.push(pseudonym::tokenise(
+                &batch,
+                &self.names,
+                &self.marked,
+                &self.tokens,
+            )?);
+        }
+        let mut engine = Engine::open_empty_within(MEMORY_BYTES).map_err(|e| e.to_string())?;
+        engine
+            .register_batch(TABLE, out)
+            .map_err(|e| e.to_string())?;
+        Ok(engine)
     }
 
     pub fn proposals(&self) -> Vec<pseudonym::Proposal> {
@@ -320,11 +361,14 @@ impl Session {
         if self.marked.is_empty() {
             return Ok(pseudonym::omitted(&identifiers, pseudonym::NONE_MARKED));
         }
-        if let Err(reason) = pseudonym::projection_allows(sql, &self.marked) {
+        if let Err(reason) = pseudonym::projection_allows(sql, &self.marked, &self.withheld) {
             return Ok(pseudonym::omitted(&identifiers, reason));
         }
-        match self.query(sql) {
-            Ok(out) => self.masked(&identifiers, out),
+        let Some(tokenised) = &self.tokenised else {
+            return Ok(pseudonym::omitted(&identifiers, pseudonym::NONE_MARKED));
+        };
+        match self.query_on(tokenised, sql) {
+            Ok(out) => Ok(pseudonym::payload(&identifiers, &out)),
             Err(f) => Ok(f.feedback),
         }
     }
@@ -336,11 +380,14 @@ impl Session {
         if self.marked.is_empty() {
             return Ok(pseudonym::omitted(&identifiers, pseudonym::NONE_MARKED));
         }
-        if let Err(reason) = pseudonym::projection_allows(sql, &self.marked) {
+        if let Err(reason) = pseudonym::projection_allows(sql, &self.marked, &self.withheld) {
             return Ok(pseudonym::omitted(&identifiers, reason));
         }
-        match self.query(sql).await {
-            Ok(out) => self.masked(&identifiers, out),
+        let Some(tokenised) = &self.tokenised else {
+            return Ok(pseudonym::omitted(&identifiers, pseudonym::NONE_MARKED));
+        };
+        match self.query_on(tokenised, sql).await {
+            Ok(out) => Ok(pseudonym::payload(&identifiers, &out)),
             Err(f) => Ok(f.feedback),
         }
     }
@@ -369,7 +416,8 @@ impl Session {
         match mode {
             "aggregates" => measure_sql(sql).is_ok(),
             "pseudonym" => {
-                !self.marked.is_empty() && pseudonym::projection_allows(sql, &self.marked).is_ok()
+                !self.marked.is_empty()
+                    && pseudonym::projection_allows(sql, &self.marked, &self.withheld).is_ok()
             }
             _ => false,
         }
@@ -381,13 +429,6 @@ impl Session {
             .filter(|name| self.marked.contains(*name))
             .cloned()
             .collect()
-    }
-
-    fn masked(&self, identifiers: &[String], out: QueryOut) -> Result<String, String> {
-        match pseudonym::mask(&out, &self.tokens, !self.marked.is_empty()) {
-            Ok(rows) => Ok(pseudonym::payload(identifiers, &out, rows)),
-            Err(reason) => Ok(pseudonym::omitted(identifiers, reason)),
-        }
     }
 
     fn guard(&self, sql: &str) -> Result<(), Failure> {
