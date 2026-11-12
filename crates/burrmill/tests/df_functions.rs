@@ -751,3 +751,56 @@ fn built_values_answer_as_before_under_their_bound() {
             .is_ok()
     );
 }
+
+#[test]
+fn pivot_after_from_is_refused_by_name_not_dumped() {
+    let engine = Engine::open_empty().unwrap();
+    for (sql, word) in [
+        (
+            "SELECT * FROM (SELECT 1 AS a, 'x' AS k) t PIVOT (sum(a) FOR k IN ('x'))",
+            "PIVOT is not supported here; write one aggregate per value",
+        ),
+        (
+            "SELECT * FROM (SELECT 1 AS a) t UNPIVOT (v FOR k IN (a))",
+            "UNPIVOT is not supported here; write one SELECT per column",
+        ),
+    ] {
+        let e = engine.sql(sql).expect_err(sql).to_string();
+        assert!(e.contains(word), "{sql}: {e}");
+        assert!(e.len() < 300 && !e.contains("Unsupported ast node"), "{e}");
+    }
+}
+
+#[test]
+fn a_parse_error_is_the_parsers_words_without_debug_output() {
+    let engine = Engine::open_empty().unwrap();
+    let e = engine
+        .sql("SELECT x FROM (VALUES (1)) t(x)\n SELEC x")
+        .unwrap_err();
+    assert!(matches!(e, BurrmillError::Parse(_)), "{e:?}");
+    let e = e.to_string();
+    assert!(e.contains("syntax error at or near \"SELEC\""), "{e}");
+    for debug in ["Diagnostic", "span:", "Location("] {
+        assert!(!e.contains(debug), "{e}");
+    }
+}
+
+#[test]
+fn median_over_decimal_says_what_to_write() {
+    let engine = Engine::open_empty().unwrap();
+    let e = engine
+        .sql("SELECT median(CAST(x AS DECIMAL(5,2))) m FROM (VALUES (1), (2)) t(x)")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("CAST(x AS DOUBLE)") && e.contains("quantile_cont"),
+        "{e}"
+    );
+    for sql in [
+        "SELECT median(CAST(x AS DOUBLE)) m FROM (VALUES (1), (2)) t(x)",
+        "SELECT quantile_cont(CAST(x AS DECIMAL(5,2)), 0.5) m FROM (VALUES (1), (2)) t(x)",
+        "SELECT approx_median(CAST(x AS DECIMAL(5,2))) m FROM (VALUES (1), (2)) t(x)",
+    ] {
+        assert_eq!(engine.sql(sql).unwrap()[0].num_rows(), 1, "{sql}");
+    }
+}

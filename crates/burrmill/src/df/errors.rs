@@ -177,9 +177,10 @@ pub fn duckdb_phrase(msg: &str) -> Option<String> {
             duck_type(to)
         ));
     }
-    if msg.contains("ParserError(") {
+    if msg.contains("ParserError(") || msg.contains("sql parser error: ") {
         if let Some(why) = after(msg, "ParserError(\"")
             .and_then(|r| r.split('"').next())
+            .or_else(|| after(msg, "sql parser error: ").and_then(|r| r.lines().next()))
             .filter(|w| w.contains(" is not supported here"))
         {
             return Some(format!("Parser Error: {why}"));
@@ -238,12 +239,16 @@ pub fn duckdb_phrase(msg: &str) -> Option<String> {
     if let Some(rest) = after(msg, "Resources exhausted: ") {
         let first = rest.lines().next().unwrap_or(rest);
         // DuckDB names the setting a spill ran out of, and nuthatch's hint keys on the name.
-        let setting = if first.contains("during the spilling process") {
-            "\nThis limit was set by the 'max_temp_directory_size' setting."
-        } else {
-            ""
-        };
-        return Some(format!("Out of Memory Error: {first}{setting}"));
+        if first.contains("during the spilling process") {
+            return Some(format!(
+                "Out of Memory Error: {first}\nThis limit was set by the 'max_temp_directory_size' setting."
+            ));
+        }
+        return Some(
+            "Out of Memory Error: the statement needs more than the engine's memory budget; \
+             raise Budget.memory_bytes or give the Budget a spill directory"
+                .into(),
+        );
     }
     None
 }
@@ -262,10 +267,24 @@ pub fn restate(msg: String) -> String {
     match duckdb_phrase(&msg) {
         Some(p) => format!(
             "{p}\n{}",
-            msg.replace("No function matches", "no function matches")
+            without_settings_advice(&msg).replace("No function matches", "no function matches")
         ),
         None => msg,
     }
+}
+
+/// DataFusion's out-of-memory text tells the reader to change two of its settings; neither is
+/// reachable through `Engine`, so the sentence goes and the restated line says what is.
+fn without_settings_advice(msg: &str) -> String {
+    const START: &str = "Consider increasing the memory limit config";
+    let Some(at) = msg.find(START) else {
+        return msg.to_string();
+    };
+    let tail = &msg[at..];
+    let end = tail.find("'. ").map_or(tail.len(), |i| i + 3);
+    format!("{} {}", msg[..at].trim_end(), &tail[end..])
+        .trim_end()
+        .to_string()
 }
 
 #[cfg(test)]

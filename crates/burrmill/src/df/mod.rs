@@ -36,6 +36,11 @@ mod outerorder;
 pub use depth::check_expr_bounds;
 mod builder;
 pub use builder::EngineBuilder;
+
+/// The dialect statements parse with, for a walk that must read what the engine reads.
+pub(crate) fn duck_dialect() -> dialect::Duck {
+    dialect::Duck
+}
 mod buildside;
 mod distinct;
 mod distinctrows;

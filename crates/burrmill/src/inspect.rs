@@ -36,10 +36,25 @@ pub struct Reach {
     pub surveys: bool,
 }
 
+/// What a nest's statement may name; the tab's is the one table it was given.
+const NEST: &str = "this nest's tables and views";
+
 fn refused(why: String) -> BurrmillError {
-    BurrmillError::NotAllowed(format!(
-        "{why} - the SQL surface serves this nest's tables and views only"
-    ))
+    BurrmillError::NotAllowed(why)
+}
+
+/// A refusal of what the statement reaches, with what the surface serves instead.
+fn unreachable(why: String, serves: &str) -> BurrmillError {
+    BurrmillError::NotAllowed(format!("{why} - the SQL surface serves {serves} only"))
+}
+
+/// The statements `sql` holds. The engine's own dialect where there is one, so a form it refuses by
+/// name is refused by that name here and not as a syntax error.
+fn parse(sql: &str) -> std::result::Result<Vec<Statement>, sqlparser::parser::ParserError> {
+    #[cfg(feature = "datafusion")]
+    return Parser::parse_sql(&crate::df::duck_dialect(), sql);
+    #[cfg(not(feature = "datafusion"))]
+    Parser::parse_sql(&DuckDbDialect {}, sql)
 }
 
 fn parts(name: &ObjectName) -> Vec<String> {
@@ -157,11 +172,14 @@ pub(crate) fn hidden_name(sql: &str) -> Option<String> {
 
 /// The tables `sql` reaches, or why it is refused.
 pub fn reach(sql: &str) -> Result<Reach> {
+    reach_serving(sql, NEST)
+}
+
+fn reach_serving(sql: &str, serves: &str) -> Result<Reach> {
     // The same rewrite `Engine` parses with, so a comprehension does not hide the tables in it.
     let expanded = crate::listcomp::before_parse(sql);
     let sql = expanded.as_str();
-    let stmts = Parser::parse_sql(&DuckDbDialect {}, sql)
-        .map_err(|e| BurrmillError::Parse(format!("Parser Error: {e}")))?;
+    let stmts = parse(sql).map_err(|e| BurrmillError::Parse(format!("Parser Error: {e}")))?;
     let [stmt] = stmts.as_slice() else {
         return Err(refused(format!(
             "{} statements where one is allowed",
@@ -177,7 +195,7 @@ pub fn reach(sql: &str) -> Result<Reach> {
     };
     let _ = crate::walk::walk(stmt, &mut w);
     match w.bad {
-        Some(why) => Err(refused(why)),
+        Some(why) => Err(unreachable(why, serves)),
         None => Ok(w.reach),
     }
 }
@@ -256,10 +274,12 @@ pub fn base_tables(sql: &str) -> Option<BTreeSet<String>> {
 /// `WITH other AS (SELECT * FROM t) SELECT * FROM other` reaches `t`, and
 /// `WITH t AS (SELECT * FROM other)` reaches `other`. A schema other than `main` is refused.
 pub fn reach_uploads(sql: &str, allowed: &BTreeSet<String>) -> Result<()> {
-    let got = reach(sql)?;
+    const UPLOADS: &str = "the uploaded tables";
+    let got = reach_serving(sql, UPLOADS)?;
     if got.surveys {
-        return Err(refused(
+        return Err(unreachable(
             "a schema other than main surveys the catalogue".into(),
+            UPLOADS,
         ));
     }
     let Some(bases) = base_tables(sql) else {
@@ -268,7 +288,10 @@ pub fn reach_uploads(sql: &str, allowed: &BTreeSet<String>) -> Result<()> {
     let allow: BTreeSet<String> = allowed.iter().map(|n| n.to_ascii_lowercase()).collect();
     for name in &bases {
         if hidden_table(name) || !allow.contains(name) {
-            return Err(refused(format!("`{name}` is not an uploaded table")));
+            return Err(unreachable(
+                format!("`{name}` is not an uploaded table"),
+                UPLOADS,
+            ));
         }
     }
     Ok(())
@@ -528,6 +551,37 @@ mod tests {
         assert!(reach_uploads("SELECT * FROM information_schema.tables", &allow).is_err());
         assert!(reach_uploads("SELECT * FROM t__raw", &allow).is_err());
         assert!(reach_uploads("COPY (SELECT 1) TO '/tmp/x'", &allow).is_err());
+    }
+
+    #[test]
+    fn only_a_reachability_refusal_names_the_surface() {
+        let say = |e: BurrmillError| e.to_string();
+        let count = say(reach("SELECT 1; SELECT 2").unwrap_err());
+        assert!(
+            count.contains("2 statements where one is allowed"),
+            "{count}"
+        );
+        assert!(!count.contains("serves"), "{count}");
+        let file = say(reach("SELECT * FROM read_csv('x')").unwrap_err());
+        assert!(
+            file.ends_with("serves this nest's tables and views only"),
+            "{file}"
+        );
+        let allow = std::collections::BTreeSet::from(["t".to_string()]);
+        let other = say(reach_uploads("SELECT * FROM u", &allow).unwrap_err());
+        assert!(other.contains("`u` is not an uploaded table"), "{other}");
+        assert!(
+            other.ends_with("serves the uploaded tables only"),
+            "{other}"
+        );
+    }
+
+    #[cfg(feature = "datafusion")]
+    #[test]
+    fn a_form_the_engine_refuses_by_name_is_refused_by_that_name() {
+        let e = reach("SELECT a FROM t WHERE a GLOB 'S*'").unwrap_err();
+        assert!(matches!(e, BurrmillError::Parse(_)), "{e:?}");
+        assert!(e.to_string().contains("GLOB is not supported here"), "{e}");
     }
 
     #[test]

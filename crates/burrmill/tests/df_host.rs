@@ -423,6 +423,14 @@ fn a_bounded_engine_refuses_what_an_unbounded_one_answers() {
     let err = bounded.sql(sql).unwrap_err();
     assert!(matches!(err, BurrmillError::LimitExceeded(_)), "{err:?}");
     assert!(err.to_string().contains("Resources exhausted"), "{err}");
+    assert!(
+        err.to_string().contains("raise Budget.memory_bytes"),
+        "{err}"
+    );
+    assert!(
+        !err.to_string().contains("datafusion.runtime.memory_limit"),
+        "{err}"
+    );
     assert_eq!(
         rows(&bounded, "SELECT count(*) AS n FROM t"),
         vec![json!({"n": 200000})]
