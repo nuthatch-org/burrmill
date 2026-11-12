@@ -603,9 +603,12 @@ impl ExecutionPlan for OwnedFoldExec {
     fn execute(
         &self,
         _partition: usize,
-        _ctx: Arc<TaskContext>,
+        ctx: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let bytes = self.bytes.clone();
+        // A blocking task outlives its handle, so a dropped stream stops the fold through its token.
+        let cancel = crate::CancelToken::under(&[&super::cancel::statement_token(&ctx)], None);
+        let stop = StopOnDrop(cancel.clone());
         let (fold, schema, tables) = (
             self.fold.clone(),
             Arc::clone(&self.schema),
@@ -615,8 +618,9 @@ impl ExecutionPlan for OwnedFoldExec {
         // One chunk at a time, so what is live is the fold's own rows plus a chunk, not the rows
         // plus a copy of the whole answer.
         let stream = futures::stream::once(async move {
+            let _stop = stop;
             let rows = tokio::task::spawn_blocking(move || {
-                let (rows, read) = fold_rows(&fold, &tables)?;
+                let (rows, read) = fold_rows(&fold, &tables, cancel)?;
                 bytes.add(read as usize);
                 Ok::<_, DataFusionError>((Arc::new(rows), fold))
             })
@@ -640,9 +644,33 @@ impl ExecutionPlan for OwnedFoldExec {
 
 const CHUNK: usize = 8192;
 
+struct StopOnDrop(crate::CancelToken);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+pub(super) static RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+struct Running;
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        RUNNING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Runs the fold and checks every sum against 38 digits before a single row is emitted, so a
 /// consumer never sees part of an answer followed by a refusal.
-fn fold_rows(fold: &SignedFold, tables: &FoldTables) -> Result<(Rows, u64)> {
+fn fold_rows(
+    fold: &SignedFold,
+    tables: &FoldTables,
+    cancel: crate::CancelToken,
+) -> Result<(Rows, u64)> {
+    RUNNING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _running = Running;
     // Every value here is read strictly, `TRY_CAST` included, so the owned fold's "the query used
     // CAST" would be wrong about half of them.
     let ext = |e: crate::BurrmillError| match e {
@@ -659,7 +687,11 @@ fn fold_rows(fold: &SignedFold, tables: &FoldTables) -> Result<(Rows, u64)> {
         .collect();
     let (rows, metrics) = tables
         .pool
-        .install(|| SignedFoldExec::new(fold, &segments, Limits::default()).run())
+        .install(|| {
+            SignedFoldExec::new(fold, &segments, Limits::default())
+                .with_cancel(cancel)
+                .run()
+        })
         .map_err(ext)?;
     for i in 0..rows.len() {
         let v = rows.sum(i);

@@ -121,6 +121,12 @@ pub fn file_lists_built() -> u64 {
     host::LISTS_BUILT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Owned folds running in this process, for a test that a stopped statement's fold stops with it.
+#[doc(hidden)]
+pub fn folds_running() -> usize {
+    fold::RUNNING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Local segment footers read in this process, for a test that a second engine reads none again.
 #[doc(hidden)]
 pub fn footer_reads() -> u64 {
