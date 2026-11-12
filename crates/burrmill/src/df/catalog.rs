@@ -176,6 +176,7 @@ pub fn apply_schema_text(tables: &mut Vec<NestTable>, raw: &str) -> crate::Resul
 /// `tests/df_scanpool.rs` measures both.
 const PER_SEGMENT: usize = 5_632;
 const LISTED: usize = 1_024;
+const FOOTERS_IN_FLIGHT: usize = 32;
 
 /// The bytes the segment scan under `plan` holds for listing the segments of `partition`.
 pub(super) fn listed(plan: &Arc<dyn ExecutionPlan>, partition: usize) -> usize {
@@ -388,39 +389,55 @@ pub(super) async fn selected_bytes(scans: Vec<Selection>) -> DFResult<u64> {
     use datafusion_datasource_parquet::{
         ParquetAccessPlan, ParquetFileMetrics, RowGroupAccessPlanFilter,
     };
+    use futures::{StreamExt, TryStreamExt};
     use parquet::arrow::ProjectionMask;
 
-    let unread = ParquetFileMetrics::new(0, "selected", &ExecutionPlanMetricsSet::new());
-    let mut total = 0u64;
-    for s in scans {
-        for f in s.files {
-            let meta = DFParquetMetadata::new(s.store.as_ref(), &f)
-                .with_file_metadata_cache(Some(Arc::clone(&s.footers)))
-                .with_page_index_policy(Some(parquet::file::metadata::PageIndexPolicy::Skip))
-                .fetch_metadata()
-                .await?;
-            let groups = meta.row_groups();
-            let descr = meta.file_metadata().schema_descr();
-            let mut keep = RowGroupAccessPlanFilter::new(ParquetAccessPlan::new_all(groups.len()));
-            if let Some(p) = &s.pruning {
-                keep.prune_by_statistics(&s.schema, descr, groups, p, &unread);
+    let unread = Arc::new(ParquetFileMetrics::new(
+        0,
+        "selected",
+        &ExecutionPlanMetricsSet::new(),
+    ));
+    let files = scans.into_iter().map(Arc::new).flat_map(|s| {
+        let files = s.files.clone();
+        files.into_iter().map(move |f| (Arc::clone(&s), f))
+    });
+    // Several footers in flight: a statement that stops after one segment waits on this pass.
+    futures::stream::iter(files)
+        .map(|(s, f)| {
+            let unread = Arc::clone(&unread);
+            async move {
+                let meta = DFParquetMetadata::new(s.store.as_ref(), &f)
+                    .with_file_metadata_cache(Some(Arc::clone(&s.footers)))
+                    .with_page_index_policy(Some(parquet::file::metadata::PageIndexPolicy::Skip))
+                    .fetch_metadata()
+                    .await?;
+                let groups = meta.row_groups();
+                let descr = meta.file_metadata().schema_descr();
+                let mut keep =
+                    RowGroupAccessPlanFilter::new(ParquetAccessPlan::new_all(groups.len()));
+                if let Some(p) = &s.pruning {
+                    keep.prune_by_statistics(&s.schema, descr, groups, p, &unread);
+                }
+                let mask = s
+                    .columns
+                    .as_ref()
+                    .map(|n| ProjectionMask::columns(descr, n.iter().map(String::as_str)));
+                let mut bytes = 0u64;
+                for g in keep.row_group_indexes() {
+                    bytes += groups[g]
+                        .columns()
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| mask.as_ref().is_none_or(|m| m.leaf_included(*i)))
+                        .map(|(_, c)| c.compressed_size().max(0) as u64)
+                        .sum::<u64>();
+                }
+                DFResult::Ok(bytes)
             }
-            let mask = s
-                .columns
-                .as_ref()
-                .map(|n| ProjectionMask::columns(descr, n.iter().map(String::as_str)));
-            for g in keep.row_group_indexes() {
-                total += groups[g]
-                    .columns()
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| mask.as_ref().is_none_or(|m| m.leaf_included(*i)))
-                    .map(|(_, c)| c.compressed_size().max(0) as u64)
-                    .sum::<u64>();
-            }
-        }
-    }
-    Ok(total)
+        })
+        .buffer_unordered(FOOTERS_IN_FLIGHT)
+        .try_fold(0u64, |total, bytes| async move { Ok(total + bytes) })
+        .await
 }
 
 /// Counts the byte ranges a scan reads. Footers come through `get_metadata` and the footer cache,
