@@ -169,12 +169,16 @@ fn a_scan_holds_its_segments_bookkeeping_inside_the_pool() {
     let peak = e.take_memory_peak();
     assert!(peak < whole + whole / 2, "{peak} against {whole} a scan");
 
-    // Three scans, one of them a join's build side that ends before the rest: what each holds
-    // is charged until its memory goes, so the heap beside the pool stays small whether the
-    // statement fits the budget or is refused for its scans' bookkeeping.
-    let three = "SELECT a.block_number, b.who FROM t a JOIN t b ON a.block_number = b.block_number \
-                 UNION ALL SELECT block_number, who FROM t";
-    for memory_bytes in [8 << 20, 64 << 20] {
+    // Four partitions, each ending in its own time, over one scan and over three, one of them a
+    // join's build side that ends before the rest. A scan's metrics live until its last reader goes,
+    // so the charge must too: the heap beside the pool stays small whether the statement fits the
+    // budget or is refused for its scans' bookkeeping.
+    let statements = [
+        "SELECT block_number, who FROM t",
+        "SELECT a.block_number, b.who FROM t a JOIN t b ON a.block_number = b.block_number \
+         UNION ALL SELECT block_number, who FROM t",
+    ];
+    let four = |memory_bytes| {
         let mut e = Engine::open_empty_budgeted(burrmill::Budget {
             memory_bytes,
             threads: 4,
@@ -183,22 +187,59 @@ fn a_scan_holds_its_segments_bookkeeping_inside_the_pool() {
         .unwrap();
         e.register_facts("t", &declared, segments(), &[], (None, None))
             .unwrap();
-        let base = LIVE.load(Ordering::Relaxed);
-        let mut outside = 0usize;
-        let r = e.sql_for_each(three, |_| {
-            let live = LIVE
-                .load(Ordering::Relaxed)
-                .saturating_sub(base)
-                .saturating_sub(e.footer_cache_bytes());
-            outside = outside.max(live.saturating_sub(e.memory_reserved()));
-            Ok(())
-        });
-        if let Err(err) = r {
-            assert!(err.to_string().contains("a scan's bookkeeping"), "{err}");
+        e
+    };
+    for memory_bytes in [8 << 20, 64 << 20] {
+        let e = four(memory_bytes);
+        for sql in statements {
+            let base = LIVE.load(Ordering::Relaxed);
+            let mut outside = 0usize;
+            let r = e.sql_for_each(sql, |_| {
+                let live = LIVE
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(base)
+                    .saturating_sub(e.footer_cache_bytes());
+                outside = outside.max(live.saturating_sub(e.memory_reserved()));
+                Ok(())
+            });
+            if let Err(err) = r {
+                assert!(err.to_string().contains("a scan's bookkeeping"), "{err}");
+            }
+            assert!(
+                outside < OUTSIDE,
+                "{outside} bytes outside the pool at {memory_bytes}: {sql}"
+            );
         }
-        assert!(
-            outside < OUTSIDE,
-            "{outside} bytes outside the pool over three scans at {memory_bytes}"
-        );
     }
+
+    // A recursive statement runs its scan again at every step, on a copy of the plan that keeps its
+    // own file lists and metrics. Ten steps more cost as much again as they charge.
+    let recursive = |steps: usize| {
+        let e = four(256 << 20);
+        let base = LIVE.load(Ordering::Relaxed);
+        let (mut live, mut held) = (0usize, 0usize);
+        e.sql_for_each(
+            &format!(
+                "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT r.n + 1 FROM r, \
+                 (SELECT count(*) AS c FROM t) s WHERE r.n < {steps} AND s.c > 0) \
+                 SELECT max(n) AS m FROM r"
+            ),
+            |_| {
+                live = LIVE
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(base)
+                    .saturating_sub(e.footer_cache_bytes());
+                held = e.memory_reserved();
+                Ok(())
+            },
+        )
+        .unwrap();
+        (live, held)
+    };
+    let ((live2, held2), (live12, held12)) = (recursive(2), recursive(12));
+    let (live, held) = (live12 - live2, held12 - held2);
+    assert!(
+        held.abs_diff(live) < live / 10,
+        "ten more steps charged {held} for {live} they held"
+    );
 }
