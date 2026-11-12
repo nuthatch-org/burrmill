@@ -181,17 +181,13 @@ impl ExecutionPlan for CancelExec {
         if let Some(slot) = &self.filter {
             let _ = slot.set(token.clone());
         }
-        let held = self.opened.as_ref().map(|opened| {
-            let r = Arc::new(super::catalog::Bookkeeping::new(
-                MemoryConsumer::new(format!("SegmentScan[{partition}]"))
-                    .register(ctx.memory_pool()),
-                Arc::clone(ctx.memory_pool()),
-                super::catalog::headroom(&ctx),
-            ));
-            r.charge(super::catalog::listed(&self.inner, partition));
-            opened.running(partition, &r);
-            r
-        });
+        if let Some(opened) = &self.opened {
+            let r = MemoryConsumer::new(format!("SegmentScan[{partition}]"))
+                .register(ctx.memory_pool());
+            // The plan's file lists are already built: recorded, not asked for.
+            r.grow(super::catalog::listed(&self.inner, partition));
+            opened.running(partition, r);
+        }
         let mut stream = self.inner.execute(partition, ctx)?;
         if let Some(cpu) = self
             .cpu
@@ -205,7 +201,6 @@ impl ExecutionPlan for CancelExec {
         }
         let schema = stream.schema();
         let checked = stream.map(move |item| {
-            let _held = &held;
             if token.is_cancelled() {
                 return Err(DataFusionError::Execution("cancelled".into()));
             }

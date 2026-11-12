@@ -168,4 +168,37 @@ fn a_scan_holds_its_segments_bookkeeping_inside_the_pool() {
         .unwrap();
     let peak = e.take_memory_peak();
     assert!(peak < whole + whole / 2, "{peak} against {whole} a scan");
+
+    // Three scans, one of them a join's build side that ends before the rest: what each holds
+    // is charged until its memory goes, so the heap beside the pool stays small whether the
+    // statement fits the budget or is refused for its scans' bookkeeping.
+    let three = "SELECT a.block_number, b.who FROM t a JOIN t b ON a.block_number = b.block_number \
+                 UNION ALL SELECT block_number, who FROM t";
+    for memory_bytes in [8 << 20, 64 << 20] {
+        let mut e = Engine::open_empty_budgeted(burrmill::Budget {
+            memory_bytes,
+            threads: 4,
+            spill: None,
+        })
+        .unwrap();
+        e.register_facts("t", &declared, segments(), &[], (None, None))
+            .unwrap();
+        let base = LIVE.load(Ordering::Relaxed);
+        let mut outside = 0usize;
+        let r = e.sql_for_each(three, |_| {
+            let live = LIVE
+                .load(Ordering::Relaxed)
+                .saturating_sub(base)
+                .saturating_sub(e.footer_cache_bytes());
+            outside = outside.max(live.saturating_sub(e.memory_reserved()));
+            Ok(())
+        });
+        if let Err(err) = r {
+            assert!(err.to_string().contains("a scan's bookkeeping"), "{err}");
+        }
+        assert!(
+            outside < OUTSIDE,
+            "{outside} bytes outside the pool over three scans at {memory_bytes}"
+        );
+    }
 }

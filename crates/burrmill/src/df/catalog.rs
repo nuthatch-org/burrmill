@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
@@ -211,105 +211,53 @@ pub(super) fn listed(plan: &Arc<dyn ExecutionPlan>, partition: usize) -> usize {
         })
 }
 
-/// The pool reservations of one scan's running partitions. Its reader factory charges a segment
-/// to its partition's as the segment opens, so a scan holds for what it has opened and not for
-/// every segment of the table before its first row (#156).
+/// The pool reservations of one scan's partition runs. Its reader factory charges a segment to its
+/// partition's run as the segment opens, so a scan holds for what it has opened and not for every
+/// segment of the table before its first row (#156).
+///
+/// A run's charge lasts as long as this does. DataFusion registers each opened segment's metrics in
+/// the scan's one metrics set, which the plan and every partition's reader hold, as they hold this:
+/// the bytes are freed with the last of them, not as each segment or partition finishes.
 #[derive(Debug, Default)]
 pub(super) struct Opened(Mutex<HashMap<usize, Vec<Running>>>);
 
-/// What one running partition of a scan holds against the pool for its segments.
-///
-/// Its bytes cannot be spilled or given back before the scan ends, so they are charged only while
-/// the pool keeps `headroom` free beside them: a sort that can spill must still find room to reserve
-/// its merge and its next batch. Past that they go uncounted, as they were before they were charged.
-#[derive(Debug)]
-pub(super) struct Bookkeeping {
-    held: datafusion_execution::memory_pool::MemoryReservation,
-    pool: Arc<dyn datafusion_execution::memory_pool::MemoryPool>,
-    headroom: usize,
-}
-
-impl Bookkeeping {
-    pub(super) fn new(
-        held: datafusion_execution::memory_pool::MemoryReservation,
-        pool: Arc<dyn datafusion_execution::memory_pool::MemoryPool>,
-        headroom: usize,
-    ) -> Self {
-        Self {
-            held,
-            pool,
-            headroom,
-        }
-    }
-
-    pub(super) fn charge(&self, bytes: usize) {
-        use datafusion_execution::memory_pool::MemoryLimit;
-        match self.pool.memory_limit() {
-            MemoryLimit::Finite(limit) => {
-                if self.pool.reserved() + bytes + self.headroom <= limit {
-                    let _ = self.held.try_grow(bytes);
-                }
-            }
-            _ => self.held.grow(bytes),
-        }
-    }
-
-    #[cfg(test)]
-    fn size(&self) -> usize {
-        self.held.size()
-    }
-}
-
-/// The pool a statement's spilling sorts need free to go on: each partition's merge reservation
-/// and about as much again for the batch it is taking in. A quarter of the pool at the least.
-pub(super) fn headroom(ctx: &datafusion_execution::TaskContext) -> usize {
-    use datafusion_execution::memory_pool::MemoryLimit;
-    let options = ctx.session_config().options();
-    let sorts =
-        2 * options.execution.target_partitions * options.execution.sort_spill_reservation_bytes;
-    match ctx.memory_pool().memory_limit() {
-        MemoryLimit::Finite(limit) => sorts.max(limit / 4).min(limit),
-        _ => 0,
-    }
-}
+type Held = datafusion_execution::memory_pool::MemoryReservation;
 
 #[derive(Debug)]
 struct Running {
-    held: Weak<Bookkeeping>,
+    held: Held,
     /// A segment's bloom filters are read through a second reader, which must not charge it twice.
     charged: HashSet<u64>,
 }
 
 impl Opened {
-    /// `held` is what `partition` charges from here on, until its stream drops it.
-    pub(super) fn running(&self, partition: usize, held: &Arc<Bookkeeping>) {
+    /// `held` is what `partition` charges from here on.
+    pub(super) fn running(&self, partition: usize, held: Held) {
         let mut all = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        let runs = all.entry(partition).or_default();
-        runs.retain(|r| r.held.strong_count() > 0);
-        runs.push(Running {
-            held: Arc::downgrade(held),
+        all.entry(partition).or_default().push(Running {
+            held,
             charged: HashSet::new(),
         });
     }
 
-    fn opened(&self, partition: usize, file: &PartitionedFile) {
+    fn opened(&self, partition: usize, file: &PartitionedFile) -> DFResult<()> {
         let location = file.object_meta.location.as_ref();
         let mut all = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        // A plan run again while its first run is still read charges the newer run.
-        let Some((run, held)) = all
-            .get_mut(&partition)
-            .into_iter()
-            .flatten()
-            .rev()
-            .find_map(|r| r.held.upgrade().map(|h| (r, h)))
-        else {
-            return;
+        // A plan run again charges its newer run.
+        let Some(run) = all.get_mut(&partition).and_then(|runs| runs.last_mut()) else {
+            return Ok(());
         };
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hash::hash(location, &mut h);
         if run.charged.insert(std::hash::Hasher::finish(&h)) {
-            held.charge(PER_SEGMENT - LISTED);
+            run.held.try_grow(PER_SEGMENT - LISTED).map_err(|e| {
+                e.context(format!(
+                    "a scan's bookkeeping for the segments it has opened ({} so far in this partition)",
+                    run.charged.len()
+                ))
+            })?;
         }
+        Ok(())
     }
 }
 
@@ -330,7 +278,7 @@ impl ParquetFileReaderFactory for Unmetered {
         metadata_size_hint: Option<usize>,
         _metrics: &ExecutionPlanMetricsSet,
     ) -> DFResult<Box<dyn AsyncFileReader + Send>> {
-        self.2.opened(partition_index, &file);
+        self.2.opened(partition_index, &file)?;
         let unread = ExecutionPlanMetricsSet::new();
         let inner = self
             .0
@@ -848,39 +796,36 @@ mod tests {
     #[test]
     fn a_segment_is_charged_once_to_the_run_that_opens_it() {
         use datafusion_execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
-        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
-        let run = |name: &str| {
-            Arc::new(Bookkeeping::new(
-                MemoryConsumer::new(name).register(&pool),
-                Arc::clone(&pool),
-                0,
-            ))
-        };
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(4 * PER_SEGMENT));
+        let run = |name: &str| MemoryConsumer::new(name).register(&pool);
         let opened = Opened::default();
         let (a, b) = (
             PartitionedFile::new("/s/a.parquet", 1),
             PartitionedFile::new("/s/b.parquet", 1),
         );
         // No partition is running: nothing to charge.
-        opened.opened(0, &a);
+        opened.opened(0, &a).unwrap();
         assert_eq!(pool.reserved(), 0);
-        let first = run("first");
-        opened.running(0, &first);
-        opened.opened(0, &a);
+        opened.running(0, run("first"));
+        opened.opened(0, &a).unwrap();
         // The reader its bloom filters are read through.
-        opened.opened(0, &a);
-        opened.opened(1, &b);
-        assert_eq!(first.size(), PER_SEGMENT - LISTED);
-        opened.opened(0, &b);
-        assert_eq!(first.size(), 2 * (PER_SEGMENT - LISTED));
-        // The plan run again: the newer run is charged, and the older again once that has gone.
-        let second = run("second");
-        opened.running(0, &second);
-        opened.opened(0, &a);
-        assert_eq!(second.size(), PER_SEGMENT - LISTED);
-        drop(second);
-        assert_eq!(pool.reserved(), first.size());
-        opened.opened(0, &PartitionedFile::new("/s/c.parquet", 1));
-        assert_eq!(first.size(), 3 * (PER_SEGMENT - LISTED));
+        opened.opened(0, &a).unwrap();
+        opened.opened(1, &b).unwrap();
+        assert_eq!(pool.reserved(), PER_SEGMENT - LISTED);
+        opened.opened(0, &b).unwrap();
+        assert_eq!(pool.reserved(), 2 * (PER_SEGMENT - LISTED));
+        // The plan run again: the newer run is charged, and the older run's charge stays.
+        opened.running(0, run("second"));
+        opened.opened(0, &a).unwrap();
+        assert_eq!(pool.reserved(), 3 * (PER_SEGMENT - LISTED));
+        // Past the pool the scan is refused by name, not charged over it.
+        let e = opened
+            .opened(0, &PartitionedFile::new("/s/c.parquet", 1))
+            .and_then(|_| opened.opened(0, &PartitionedFile::new("/s/d.parquet", 1)))
+            .unwrap_err();
+        assert!(e.to_string().contains("a scan's bookkeeping"), "{e}");
+        assert!(pool.reserved() <= 4 * PER_SEGMENT);
+        drop(opened);
+        assert_eq!(pool.reserved(), 0);
     }
 }

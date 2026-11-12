@@ -79,59 +79,80 @@ fn engine(memory_bytes: usize, spill: &std::path::Path, pool: Option<&SharedPool
 
 const SORT: &str = "SELECT amount, who FROM t ORDER BY amount, who";
 
-fn answer(e: &Engine) -> Vec<RecordBatch> {
-    e.sql(SORT).unwrap_or_else(|err| panic!("refused: {err}"))
+fn rows(b: &[RecordBatch]) -> Vec<String> {
+    b.iter()
+        .flat_map(|b| burrmill::df::encode::rows(b).unwrap())
+        .map(|r| r.to_string())
+        .collect()
 }
 
-fn same(got: &[RecordBatch], want: &[RecordBatch]) {
-    let rows = |b: &[RecordBatch]| -> Vec<String> {
-        b.iter()
-            .flat_map(|b| burrmill::df::encode::rows(b).unwrap())
-            .map(|r| r.to_string())
-            .collect()
-    };
-    assert_eq!(rows(got), rows(want));
-}
-
-/// At this budget the scan's segments, charged whole, take the pool before the sort has reserved
-/// anything, and the sort could not go on even after spilling.
+/// A scan charges what it holds for its segments, and at a budget that holds both, the sort above
+/// it still answers. At one that does not, the scan is refused by name rather than charged past the
+/// pool, which once left the refusal to whichever sort asked next.
 #[test]
-fn a_spilling_sort_over_a_scan_of_many_segments_answers() {
+fn a_spilling_sort_answers_beside_its_scans_charge_or_the_scan_is_refused() {
     let spill = tempfile::tempdir().unwrap();
-    let want = answer(&engine(256 << 20, spill.path(), None));
-    assert_eq!(want.iter().map(|b| b.num_rows()).sum::<usize>(), 3_000);
-    same(&answer(&engine(5 << 19, spill.path(), None)), &want);
+    let want = rows(&engine(256 << 20, spill.path(), None).sql(SORT).unwrap());
+    assert_eq!(want.len(), 3_000);
+
+    let e = engine(24 << 20, spill.path(), None);
+    e.take_memory_peak();
+    let got = e.sql(SORT).unwrap_or_else(|err| panic!("refused: {err}"));
+    assert_eq!(rows(&got), want);
+    let peak = e.take_memory_peak();
+    assert!(
+        peak > SEGMENTS as usize * 5_000,
+        "the scan was not charged: peak {peak}"
+    );
+
+    let err = engine(4 << 20, spill.path(), None)
+        .sql(SORT)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("a scan's bookkeeping"), "{err}");
 }
 
 /// Two engines on one pool, as nuthatch's `/sql` runs them: the other engine's scan is paused part
 /// way through, holding what it has charged, while this one sorts.
 #[test]
-fn a_sort_answers_beside_another_engines_scan_on_the_same_pool() {
+fn a_sort_beside_another_engines_scan_on_the_same_pool() {
     let spill = tempfile::tempdir().unwrap();
-    let want = answer(&engine(256 << 20, spill.path(), None));
-    let budget = 4 << 20;
-    let pool = SharedPool::new(budget);
-    let other = engine(budget, spill.path(), Some(&pool));
-    let ours = engine(budget, spill.path(), Some(&pool));
-    let (paused, wait) = std::sync::mpsc::channel();
-    let (resume, resumed) = std::sync::mpsc::channel::<()>();
-    std::thread::scope(|s| {
-        let other = &other;
-        let scan = s.spawn(move || {
-            let mut first = true;
-            other.sql_for_each("SELECT block_number, who FROM t", |_| {
-                if std::mem::take(&mut first) {
-                    paused.send(()).unwrap();
-                    resumed.recv().unwrap();
+    let want = rows(&engine(256 << 20, spill.path(), None).sql(SORT).unwrap());
+    for (budget, fits) in [(48 << 20, true), (8 << 20, false)] {
+        let pool = SharedPool::new(budget);
+        let other = engine(budget, spill.path(), Some(&pool));
+        let ours = engine(budget, spill.path(), Some(&pool));
+        let (paused, wait) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|s| {
+            let other = &other;
+            let scan = s.spawn(move || {
+                let mut first = true;
+                other.sql_for_each("SELECT block_number, who FROM t", |_| {
+                    if std::mem::take(&mut first) {
+                        paused.send(()).unwrap();
+                        resumed.recv().unwrap();
+                    }
+                    Ok(())
+                })
+            });
+            wait.recv().unwrap();
+            assert!(pool.reserved() > 0, "the paused scan holds nothing");
+            let got = ours.sql(SORT);
+            assert!(
+                pool.reserved() <= budget,
+                "the pool was charged past its bound"
+            );
+            resume.send(()).unwrap();
+            let _ = scan.join().unwrap();
+            match got {
+                Ok(b) if fits => assert_eq!(rows(&b), want),
+                Err(err) if !fits => {
+                    let err = err.to_string();
+                    assert!(err.contains("a scan's bookkeeping"), "{err}");
                 }
-                Ok(())
-            })
+                other => panic!("at {budget}: {:?}", other.map(|b| b.len())),
+            }
         });
-        wait.recv().unwrap();
-        assert!(pool.reserved() > 0, "the paused scan holds nothing");
-        let got = ours.sql(SORT);
-        resume.send(()).unwrap();
-        scan.join().unwrap().unwrap();
-        same(&got.unwrap_or_else(|err| panic!("refused: {err}")), &want);
-    });
+    }
 }
