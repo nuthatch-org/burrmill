@@ -78,8 +78,10 @@ does; the refusals and their messages are held by `duckdb_answers_still_refused_
 | `try_strptime(s, fmt)` | for ISO 8601 text, `TRY_CAST(s AS TIMESTAMP)` |
 | `COLUMNS(...)` | the columns by name, or `* EXCLUDE (...)` |
 | `a GLOB p` | `a LIKE p`, with `%` for `*` and `_` for `?` |
-| `PIVOT` | one aggregate per value, `sum(a) FILTER (WHERE k = 'x')` or `CASE`, under `GROUP BY` |
-| `UNPIVOT` | one `SELECT` per column, joined by `UNION ALL` |
+| `PIVOT`, also after `FROM` | one aggregate per value, `sum(a) FILTER (WHERE k = 'x')` or `CASE`, under `GROUP BY` |
+| `UNPIVOT`, also after `FROM` | one `SELECT` per column, joined by `UNION ALL` |
+| `median(x)` over a `DECIMAL` | `median(CAST(x AS DOUBLE))`, `quantile_cont(x, 0.5)` or `approx_median(x)` |
+| `ASOF JOIN` | none: it fails as a syntax error, not by name |
 | `LIKE ... ESCAPE 'c'` over a pattern that is not a literal | a literal pattern, or `ESCAPE '\'` |
 | `UHUGEINT` | none: `DECIMAL(38,0)` stops short of 2^128 |
 | `unnest` in `FROM` | `unnest` in the select list |
