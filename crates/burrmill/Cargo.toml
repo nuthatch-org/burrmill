@@ -147,6 +147,11 @@ path = "tests/df_fold.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_foldbudget"
+path = "tests/df_foldbudget.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_lambda"
 path = "tests/df_lambda.rs"
 required-features = ["datafusion"]

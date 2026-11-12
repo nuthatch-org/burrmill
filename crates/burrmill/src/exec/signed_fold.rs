@@ -117,6 +117,9 @@ pub struct SignedFoldExec<'a> {
     /// The pinned seam, when a hot tip is registered. See [`crate::seam`] for why the watermark and
     /// the rows arrive together rather than as two reads.
     seam: Option<&'a Seam<'a>>,
+    /// Told the aggregation's live bytes wherever the budget is checked, so a host may hold them
+    /// in a pool of its own and refuse where that pool does.
+    charge: Option<&'a (dyn Fn(usize) -> Result<()> + Sync)>,
 }
 
 /// The pinned boundary a query reads against.
@@ -136,6 +139,7 @@ impl<'a> SignedFoldExec<'a> {
             cancel: CancelToken::new(),
             degree: None,
             seam: None,
+            charge: None,
         }
     }
 
@@ -177,6 +181,11 @@ impl<'a> SignedFoldExec<'a> {
 
     pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    pub fn with_charge(mut self, charge: &'a (dyn Fn(usize) -> Result<()> + Sync)) -> Self {
+        self.charge = Some(charge);
         self
     }
 
@@ -667,6 +676,9 @@ impl<'a> SignedFoldExec<'a> {
                 bytes >> 20,
                 self.limits.mem_pool_bytes >> 20
             )));
+        }
+        if let Some(charge) = self.charge {
+            charge(bytes)?;
         }
         if started.elapsed() > self.limits.timeout {
             return Err(BurrmillError::Timeout);
