@@ -89,6 +89,10 @@ impl WasmSession {
             .map_err(|e| JsError::new(&e))
     }
 
+    pub fn admits(&self, mode: &str, sql: &str) -> bool {
+        self.inner.admits(mode, sql)
+    }
+
     pub fn present_answer(
         &self,
         answer_json: &str,

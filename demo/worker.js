@@ -62,6 +62,9 @@ async function handle(msg) {
   if (msg.op === 'pseudonym') {
     return session.pseudonym_feedback(msg.sql);
   }
+  if (msg.op === 'admits') {
+    return session.admits(msg.mode, msg.sql);
+  }
   if (msg.op === 'present') {
     return JSON.parse(
       session.present_answer(

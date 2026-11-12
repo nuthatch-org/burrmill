@@ -949,8 +949,7 @@ async function ask() {
     let feedback = '';
     let previousSql = '';
     let lastError = '';
-    let fedGroups = false;
-    let fedTokens = false;
+    let fed = false;
     for (let attempt = 0; attempt < 4; attempt++) {
       const body = requestBody(
         model,
@@ -995,24 +994,38 @@ async function ask() {
         status(queried.error);
         return;
       }
-      if (queried.error) {
+      if (queried.error && (queried.before_rows || mode === 'local-model')) {
         feedback = queried.feedback;
         status(queried.error);
         continue;
       }
-      if (mode === 'aggregates' && !fedGroups && attempt < 3) {
-        feedback = await call('aggregates', { sql: reply.sql });
-        fedGroups = true;
-        status(dropStatus(feedback));
-        continue;
-      }
-      if (mode === 'pseudonymised' && !fedTokens && attempt < 3) {
-        feedback = await call('pseudonym', { sql: reply.sql });
-        fedTokens = true;
-        status(tokenStatus(feedback));
-        continue;
-      }
-      if (queried.answer.rows.length === 0 && attempt < 3 && mode !== 'schema') {
+      if (mode === 'aggregates' || mode === 'pseudonymised') {
+        const op = mode === 'aggregates' ? 'aggregates' : 'pseudonym';
+        // From here the model hears only the mode's answer, and what the run did only when the
+        // mode passes the statement: a refused one is answered alike whether it failed or not.
+        const admitted = await call('admits', { mode: op, sql: reply.sql });
+        if (queried.error) status(queried.error);
+        if (!fed && attempt < 3) {
+          feedback = await call(op, { sql: reply.sql });
+          if (!(queried.error && admitted)) fed = true;
+          if (!queried.error) status(op === 'aggregates' ? dropStatus(feedback) : tokenStatus(feedback));
+          continue;
+        }
+        // An aggregate's failure or empty answer can turn on one member, so it is not asked about.
+        const told = admitted && mode === 'pseudonymised' && attempt < 3;
+        if (queried.error) {
+          if (told) {
+            feedback = await call(op, { sql: reply.sql });
+            continue;
+          }
+          return;
+        }
+        if (queried.answer.rows.length === 0 && told) {
+          feedback = queried.feedback;
+          status('No rows. Asking again.');
+          continue;
+        }
+      } else if (queried.answer.rows.length === 0 && attempt < 3 && mode !== 'schema') {
         feedback = queried.feedback;
         status('No rows. Asking again.');
         continue;

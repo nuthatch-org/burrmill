@@ -31,11 +31,12 @@ Each request to the model (`promptText` and `requestBody` in `demo/app.js`) carr
 - the grammar (`Session::grammar`): the dialect (DuckDB), the admitted statement kinds, the DuckDB spellings the engine rewrites (`Engine::duckdb_spellings`), the few it refuses by name, the functions refused over DECIMAL, and the registered function names;
 - the question, and on a retry the model's own previous statement with that attempt's feedback.
 
-Feedback after a query that ran is its shape (`feedback_shape`): row count, column names and types,
-and whether it was truncated. A query that failed before reading a row sends its message through
-`redact`, which replaces stored cell strings and quoted spans of four characters or more; one that failed while reading rows sends only a
-fixed kind (`cast_failed`, `divide_by_zero`, `overflow`, `too_big`, `stopped`, `failed`), from
-`Session::failure`. Every statement is first held to table `t` by `inspect::reach_uploads`.
+A query that failed before reading a row sends its message through `redact`, which replaces stored
+cell strings and quoted spans of four characters or more. Whether a failure while reading rows, or
+an answer with no rows, is sent depends on the mode below. A failure that is sent is a fixed kind
+taken from the error's variant, never from its text (`overflow`, `too_big`, `stopped`, `failed`),
+from `Session::failure`; an empty answer that is sent is its shape (`feedback_shape`): row count,
+column names and types, and whether it was truncated. Every statement is first held to table `t` by `inspect::reach_uploads`.
 
 The answer is run, charted and narrated in the tab (`Session::present_bound`); its rows are not sent.
 Its statement can be edited and run again with "Run here", which queries the tab and sends nothing;
@@ -54,7 +55,11 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
   column with arithmetic, `CAST` and `round` over them; `DISTINCT` only in `count`; `FILTER` and
   `CASE` inside an aggregate are refused, as is a CTE named `t`. The feedback (`filter_payload`) is
   the groups with `group_n` of at least k and the number dropped. Anything else sends no group and
-  a reason.
+  a reason. A statement that fails while reading rows sends only that it failed, with no kind, and
+  one `measure_sql` refuses gets its refusal whether it failed or not. Once the groups have been
+  sent, a later attempt that fails or finds no rows ends the question on the page. Whether a
+  passed statement fails is still one bit per attempt about the data, and can be about one member:
+  `error()`, an overflow or a failed cast in a `WHERE` or a key can turn on one value.
 - **Pseudonymised**. The user marks identifier columns (`Session::bind`; `Session::proposals` offers
   them). Each distinct marked value is a token such as `CUSTOMER_3`; the map stays in the tab
   (`pseudonym::assign`) and narration restores values locally. A marked column (or a name renamed from one)
@@ -65,8 +70,10 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
   over a marked column, and `* REPLACE`, `* RENAME` and a star alias. If allowed, the rows go with marked values as tokens;
   a cell that still looks like an identifier, or contains a marked value of eight characters or
   more, sends no rows (`mask`). With
-  nothing marked, no rows are sent.
-- **Local model**. Requests go to `http://127.0.0.1:<port>/v1/messages` with no key, and carry
+  nothing marked, no rows are sent. Only a statement `projection_allows` passes is told that it
+  failed while reading rows or found no rows (`Session::admits`); a refused one gets its refusal
+  either way, and the page asks nothing more about it.
+- **Local model**. Every failure and empty answer is sent. Requests go to `http://127.0.0.1:<port>/v1/messages` with no key, and carry
   `SELECT * FROM t` as JSON, up to the row cap. The model field holds a name the local server has
   (it starts empty in this mode), and the server must allow the page's origin: for Ollama, set
   `OLLAMA_ORIGINS`. A server that does not shows as a failed fetch.

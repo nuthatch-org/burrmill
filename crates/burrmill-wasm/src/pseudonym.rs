@@ -1008,6 +1008,29 @@ OTHER_MERCHANT,canary.two@example.com,DE89370400440532013000,+359 888 100002,-3.
     }
 
     #[test]
+    fn a_failure_is_told_only_for_a_statement_the_mode_passes() {
+        let s = bound();
+        let admitted = "SELECT email, CAST(merchant AS INT) AS m FROM t";
+        assert!(s.admits("pseudonym", admitted));
+        let payload = s.pseudonym_feedback(admitted).unwrap();
+        assert_no(admitted, &payload);
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["kind"], "failed", "{payload}");
+        // Right guess or wrong, the statement is refused before it runs, so the answer is the same.
+        let mut seen = Vec::new();
+        for guess in ["canary.one@example.com", "nobody@example.com"] {
+            let sql = format!(
+                "SELECT CASE WHEN email = '{guess}' THEN error('overflow') END AS a FROM t"
+            );
+            assert!(!s.admits("pseudonym", &sql));
+            assert!(s.query(&sql).is_err() || guess.starts_with("nobody"));
+            seen.push(s.pseudonym_feedback(&sql).unwrap());
+        }
+        assert_eq!(seen[0], seen[1]);
+        assert!(!session().admits("pseudonym", "SELECT merchant FROM t"));
+    }
+
+    #[test]
     fn nothing_marked_sends_no_rows() {
         let s = session();
         let payload = s.pseudonym_feedback("SELECT * FROM t").unwrap();

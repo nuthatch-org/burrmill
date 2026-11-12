@@ -11,7 +11,7 @@ use burrmill_ingest::{IngestReport, Issue, Locale, RowIssue, Table};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::aggregates::{filter_payload, measure_sql, skipped};
+use crate::aggregates::{filter_payload, measure_sql, ran_and_failed, skipped};
 use crate::chart::{Chart, check_chart};
 use crate::format::{
     cell_string, format_date, format_number, format_timestamp, is_ident, is_numeric,
@@ -265,9 +265,14 @@ impl Session {
             Ok(measured) => measured,
             Err(reason) => return Ok(skipped(reason)),
         };
-        let dropped = self.query(&measured.dropped).map_err(|f| f.local)?;
-        let answer = self.query(&measured.answer).map_err(|f| f.local)?;
-        Ok(filter_payload(&answer, &dropped))
+        let dropped = match self.query(&measured.dropped) {
+            Ok(out) => out,
+            Err(f) => return Ok(ran_and_failed(&f)),
+        };
+        Ok(match self.query(&measured.answer) {
+            Ok(answer) => filter_payload(&answer, &dropped),
+            Err(f) => ran_and_failed(&f),
+        })
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -276,9 +281,14 @@ impl Session {
             Ok(measured) => measured,
             Err(reason) => return Ok(skipped(reason)),
         };
-        let dropped = self.query(&measured.dropped).await.map_err(|f| f.local)?;
-        let answer = self.query(&measured.answer).await.map_err(|f| f.local)?;
-        Ok(filter_payload(&answer, &dropped))
+        let dropped = match self.query(&measured.dropped).await {
+            Ok(out) => out,
+            Err(f) => return Ok(ran_and_failed(&f)),
+        };
+        Ok(match self.query(&measured.answer).await {
+            Ok(answer) => filter_payload(&answer, &dropped),
+            Err(f) => ran_and_failed(&f),
+        })
     }
 
     /// Replace the token map. An empty list clears it, so a later schema or
@@ -313,8 +323,10 @@ impl Session {
         if let Err(reason) = pseudonym::projection_allows(sql, &self.marked) {
             return Ok(pseudonym::omitted(&identifiers, reason));
         }
-        let out = self.query(sql).map_err(|f| f.local)?;
-        self.masked(&identifiers, out)
+        match self.query(sql) {
+            Ok(out) => self.masked(&identifiers, out),
+            Err(f) => Ok(f.feedback),
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -327,8 +339,10 @@ impl Session {
         if let Err(reason) = pseudonym::projection_allows(sql, &self.marked) {
             return Ok(pseudonym::omitted(&identifiers, reason));
         }
-        let out = self.query(sql).await.map_err(|f| f.local)?;
-        self.masked(&identifiers, out)
+        match self.query(sql).await {
+            Ok(out) => self.masked(&identifiers, out),
+            Err(f) => Ok(f.feedback),
+        }
     }
 
     pub fn present_bound(
@@ -347,6 +361,18 @@ impl Session {
             decimal,
             self.tokens.restorations(),
         )
+    }
+
+    /// Whether the mode's check passes `sql`, from the statement and the marks alone. Only then may
+    /// the model hear that it failed or found no rows.
+    pub fn admits(&self, mode: &str, sql: &str) -> bool {
+        match mode {
+            "aggregates" => measure_sql(sql).is_ok(),
+            "pseudonym" => {
+                !self.marked.is_empty() && pseudonym::projection_allows(sql, &self.marked).is_ok()
+            }
+            _ => false,
+        }
     }
 
     fn identifier_names(&self) -> Vec<String> {
@@ -394,7 +420,7 @@ impl Session {
         } else {
             json!({
                 "error": "the statement planned and then failed while reading rows",
-                "kind": runtime_kind(&e.to_string()),
+                "kind": runtime_kind(e),
                 "note": "the message is not sent, since it can quote a cell",
             })
             .to_string()
@@ -472,21 +498,14 @@ pub struct Failure {
     pub before_rows: bool,
 }
 
-/// A fixed word chosen from the message, so the message itself stays here.
-fn runtime_kind(message: &str) -> &'static str {
-    let m = message.to_ascii_lowercase();
-    if m.contains("overflow") {
-        "overflow"
-    } else if m.contains("divide by zero") || m.contains("division by zero") {
-        "divide_by_zero"
-    } else if m.contains("cast") || m.contains("convert") {
-        "cast_failed"
-    } else if m.contains("cancel") || m.contains("timeout") {
-        "stopped"
-    } else if m.contains("resources exhausted") || m.contains("limit") {
-        "too_big"
-    } else {
-        "failed"
+/// A fixed word for the error's variant. Never its text: `error(text)` writes that from cells.
+fn runtime_kind(e: &burrmill::BurrmillError) -> &'static str {
+    use burrmill::BurrmillError as E;
+    match e {
+        E::Overflow(_) => "overflow",
+        E::LimitExceeded(_) => "too_big",
+        E::Timeout | E::Cancelled => "stopped",
+        _ => "failed",
     }
 }
 
@@ -798,7 +817,7 @@ posted,merchant,amount
                 failed.feedback
             );
             let value: Value = serde_json::from_str(&failed.feedback).unwrap();
-            assert_eq!(value["kind"], "cast_failed", "{sql}: {}", failed.local);
+            assert_eq!(value["kind"], "failed", "{sql}: {}", failed.local);
         }
         let unplanned = s.query("SELECT nosuch FROM t").unwrap_err();
         assert!(
@@ -848,6 +867,28 @@ posted,merchant,amount
                 failed.feedback
             );
         }
+    }
+
+    #[test]
+    fn a_failure_while_reading_rows_is_named_by_its_variant_not_its_text() {
+        let s = session();
+        for sql in [
+            "SELECT CASE WHEN merchant = 'CANARY_MERCHANT_AAA' AND amount < -50 THEN error('overflow') END FROM t",
+            "SELECT CASE WHEN amount < -95 THEN error('division by zero') END FROM t",
+            "SELECT CASE WHEN amount < -95 THEN error('cannot cast') END FROM t",
+            "SELECT CASE WHEN amount < -95 THEN error('resources exhausted, limit') END FROM t",
+            "SELECT CASE WHEN amount < -95 THEN error('query cancelled, timeout') END FROM t",
+        ] {
+            let failed = s.query(sql).unwrap_err();
+            assert!(!failed.before_rows, "{sql}: {}", failed.local);
+            let value: Value = serde_json::from_str(&failed.feedback).unwrap();
+            assert_eq!(value["kind"], "failed", "{sql}: {}", failed.local);
+        }
+        let overflow = s
+            .query("SELECT CAST(-amount AS BIGINT) + 9223372036854775807 FROM t WHERE amount > -2")
+            .unwrap_err();
+        let value: Value = serde_json::from_str(&overflow.feedback).unwrap();
+        assert_eq!(value["kind"], "overflow", "{}", overflow.local);
     }
 
     #[test]

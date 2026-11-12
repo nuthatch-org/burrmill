@@ -11,7 +11,7 @@ use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
 use std::ops::ControlFlow;
 
-use crate::session::QueryOut;
+use crate::session::{Failure, QueryOut};
 use serde_json::{Value, json};
 
 /// The smallest group that leaves (`docs/browser.md`).
@@ -22,6 +22,7 @@ const TAINTED: &str = "a subquery or window is not a group";
 const UNMEASURED: &str = "group size was not measured";
 const NOT_SUMMARY: &str = "only grouping keys and count, sum or avg of a column leave";
 const SHADOWED: &str = "a CTE named t is not the upload";
+const FAILED: &str = "the statement failed while reading rows";
 
 pub(crate) struct Measured {
     /// The statement as written, with `count(*) AS group_n` added to each group.
@@ -58,6 +59,16 @@ pub(crate) fn measure_sql(sql: &str) -> Result<Measured, &'static str> {
         "SELECT count(*) AS dropped FROM ({query}) AS measured WHERE group_n < {AGGREGATE_K}"
     );
     Ok(Measured { answer, dropped })
+}
+
+/// Whether a grouped read failed can turn on one member (`WHERE amount / (amount - 5) > 0`), so
+/// nothing of how it failed goes with it.
+pub(crate) fn ran_and_failed(failure: &Failure) -> String {
+    skipped(if failure.before_rows {
+        UNMEASURED
+    } else {
+        FAILED
+    })
 }
 
 pub(crate) fn skipped(reason: &str) -> String {
@@ -689,6 +700,27 @@ mod tests {
         let payload = s.aggregate_feedback(&probe).unwrap();
         let value: Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["omitted"], NOT_SUMMARY, "{payload}");
+    }
+
+    #[test]
+    fn a_grouped_read_that_fails_says_only_that_it_failed() {
+        let (s, forbidden) = grouped_file();
+        let mut seen = Vec::new();
+        for sql in [
+            "SELECT CAST(amount AS BIGINT) * 2305843009213693952 AS g, count(*) AS n FROM t GROUP BY 1",
+            "SELECT merchant, count(*) AS n FROM t WHERE CASE WHEN merchant = 'CANARY_SMALL_05' THEN error('overflow') ELSE true END GROUP BY merchant",
+            "SELECT CAST(merchant AS INT) AS m, count(*) AS n FROM t GROUP BY 1",
+        ] {
+            assert!(s.admits("aggregates", sql), "{sql}");
+            let payload = s.aggregate_feedback(sql).unwrap();
+            assert_no(sql, &payload, &forbidden);
+            let value: Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(value["omitted"], FAILED, "{sql}: {payload}");
+            assert!(value.get("kind").is_none(), "{sql}: {payload}");
+            seen.push(payload);
+        }
+        assert!(seen.windows(2).all(|w| w[0] == w[1]), "{seen:?}");
+        assert!(!s.admits("aggregates", "SELECT merchant FROM t"));
     }
 
     #[test]
