@@ -37,7 +37,9 @@ impl Engine {
         }
     }
 
-    /// Open every table under a `segments/` directory.
+    /// Open every table under a `segments/` directory. Files are read as `<table>-<hash>.parquet`:
+    /// the text before the last hyphen names the table (quote it in SQL if it holds one), and a
+    /// `.parquet` file with no hyphen is skipped.
     pub fn open_segments(segments: &Path) -> Result<Self> {
         Self::builder().segments(segments).open()
     }
@@ -68,7 +70,8 @@ impl Engine {
 }
 
 impl EngineBuilder {
-    /// Every table under a `segments/` directory.
+    /// Every table under a `segments/` directory, read as `<table>-<hash>.parquet`: the text before
+    /// the last hyphen names the table, and a `.parquet` file with no hyphen is skipped.
     pub fn segments(mut self, dir: &Path) -> Self {
         self.source = Source::Segments(dir.to_path_buf());
         self
@@ -116,7 +119,7 @@ impl EngineBuilder {
             Source::Segments(dir) => segment_tables(dir)?,
             Source::Nest(root) => nest_tables(root)?,
             Source::Store(..) => {
-                return Err(BurrmillError::NotAllowed(
+                return Err(BurrmillError::Config(
                     "an engine over a store opens with open_async".into(),
                 ));
             }
@@ -138,7 +141,7 @@ impl EngineBuilder {
     fn open_over(self, tables: Vec<NestTable>) -> Result<Engine> {
         // Silently unbounded is worse than refused: the host asked for its statements to be held.
         if self.pool.is_some() && self.budget.is_none() {
-            return Err(BurrmillError::NotAllowed(
+            return Err(BurrmillError::Config(
                 "a shared pool needs a budget beside it".into(),
             ));
         }
@@ -149,9 +152,10 @@ impl EngineBuilder {
 fn segment_tables(segments: &Path) -> Result<Vec<NestTable>> {
     let tables = discover_tables(segments)?;
     if tables.is_empty() {
-        return Err(BurrmillError::NoSegments(format!(
-            "no parquet tables under {}",
-            segments.display()
+        return Err(BurrmillError::NoSegments(none_found(
+            "parquet tables",
+            segments,
+            segments,
         )));
     }
     Ok(tables)
@@ -164,12 +168,41 @@ fn nest_tables(root: &Path) -> Result<Vec<NestTable>> {
         apply_schema_json(&mut tables, &schema)?;
     }
     if tables.is_empty() {
-        return Err(BurrmillError::NoSegments(format!(
-            "no tables under {}",
-            root.display()
+        return Err(BurrmillError::NoSegments(none_found(
+            "tables",
+            root,
+            &root.join("segments"),
         )));
     }
     Ok(tables)
+}
+
+/// `no <what> under <shown>`, and when the scan skipped `.parquet` files for lacking a hyphen, which
+/// they were and what name a table file takes.
+fn none_found(what: &str, shown: &Path, scanned: &Path) -> String {
+    let mut skipped: Vec<String> = std::fs::read_dir(scanned)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|f| f.strip_suffix(".parquet").is_some_and(|s| !s.contains('-')))
+        .collect();
+    skipped.sort();
+    if skipped.is_empty() {
+        return format!("no {what} under {}", shown.display());
+    }
+    let more = skipped.len().saturating_sub(5);
+    skipped.truncate(5);
+    format!(
+        "no {what} under {}: files are read as <table>-<hash>.parquet, and {}{} have no hyphen",
+        shown.display(),
+        skipped.join(", "),
+        if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        }
+    )
 }
 
 async fn store_tables(

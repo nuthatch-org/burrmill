@@ -12,6 +12,11 @@
 //!
 //! - **Open.** `Engine::open_nest` reads a nest root (`segments/` and an optional `schema.json`),
 //!   `Engine::open_segments` a bare segments directory, `Engine::open_store` an object store.
+//!   Files are read as `<table>-<hash>.parquet`: the text before the last hyphen is the table, and a
+//!   `.parquet` file with no hyphen is skipped.
+//! - **Dialect.** What `Engine::sql` admits and refuses, by name, is in
+//!   [docs/sql.md](https://github.com/nuthatch-org/burrmill/blob/main/docs/sql.md); the browser tab is in
+//!   [docs/browser.md](https://github.com/nuthatch-org/burrmill/blob/main/docs/browser.md).
 //! - **Budget.** `Engine::open_nest_budgeted` holds every statement to a `Budget`: memory, threads,
 //!   and where to spill. Engines opened on one `SharedPool` share its bound.
 //! - **Cancel.** `Engine::cancel_token` gives a [`CancelToken`] that stops the statement in flight
