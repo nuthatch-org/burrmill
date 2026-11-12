@@ -194,7 +194,9 @@ impl sqlparser::dialect::Dialect for Duck {
         use sqlparser::dialect::Precedence;
         match &parser.peek_token().token {
             sqlparser::tokenizer::Token::CaretAt => Some(Ok(self.prec_value(Precedence::Like))),
-            sqlparser::tokenizer::Token::Word(w) if w.value.eq_ignore_ascii_case("glob") => {
+            sqlparser::tokenizer::Token::Word(w)
+                if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("glob") =>
+            {
                 Some(Ok(self.prec_value(Precedence::Like)))
             }
             _ => None,
@@ -219,7 +221,9 @@ impl sqlparser::dialect::Dialect for Duck {
                         .map(|b| call("starts_with", vec![expr.clone(), b])),
                 );
             }
-            sqlparser::tokenizer::Token::Word(w) if w.value.eq_ignore_ascii_case("glob") => {
+            sqlparser::tokenizer::Token::Word(w)
+                if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("glob") =>
+            {
                 return Some(Err(sqlparser::parser::ParserError::ParserError(
                     "GLOB is not supported here; LIKE is, with % for * and _ for ?".into(),
                 )));

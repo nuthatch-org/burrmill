@@ -38,6 +38,21 @@ pub(super) fn arithmetic(e: arrow::error::ArrowError) -> DataFusionError {
 /// there is to know it by.
 const DISK_CAP: &str = "The used disk space during the spilling process has exceeded";
 
+/// The restated first line of a statement that outgrew the memory pool.
+pub(super) const POOL_EXHAUSTED: &str =
+    "Out of Memory Error: the statement needed more than the engine's memory budget";
+
+/// `line` with the one thing a host can do about a pool refusal when the engine has no spill
+/// directory.
+pub(super) fn with_spill_hint(line: &str) -> String {
+    match line.split_once('\n') {
+        Some((first, rest)) => {
+            format!("{first}; a spill directory would let operators that can spill do so\n{rest}")
+        }
+        None => format!("{line}; a spill directory would let operators that can spill do so"),
+    }
+}
+
 /// The variant a marker or a refusal under `e` names, wherever in its chain it sits.
 pub(super) fn typed(e: &DataFusionError, text: &str) -> Option<BurrmillError> {
     let mut at: Option<&(dyn std::error::Error + 'static)> = Some(e);
@@ -244,11 +259,18 @@ pub fn duckdb_phrase(msg: &str) -> Option<String> {
                 "Out of Memory Error: {first}\nThis limit was set by the 'max_temp_directory_size' setting."
             ));
         }
-        return Some(
-            "Out of Memory Error: the statement needs more than the engine's memory budget; \
-             raise Budget.memory_bytes or give the Budget a spill directory"
-                .into(),
-        );
+        // A value past its own limit is not helped by a larger budget; its sentence says so.
+        if first.contains("would build a value of") {
+            return Some(format!("Out of Memory Error: {first}"));
+        }
+        let of = after(msg, "pool_size: ")
+            .map(|r| {
+                let mut words = r.split_whitespace();
+                let (n, unit) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+                format!(" of {n} {}", unit.trim_end_matches(['.', ')', ',']))
+            })
+            .unwrap_or_default();
+        return Some(format!("{POOL_EXHAUSTED}{of}"));
     }
     None
 }
@@ -281,10 +303,15 @@ fn without_settings_advice(msg: &str) -> String {
         return msg.to_string();
     };
     let tail = &msg[at..];
-    let end = tail.find("'. ").map_or(tail.len(), |i| i + 3);
-    format!("{} {}", msg[..at].trim_end(), &tail[end..])
-        .trim_end()
-        .to_string()
+    // The sentence ends at the first quoted name followed by a full stop; what follows is kept.
+    let end = tail.find("'.").map_or(tail.len(), |i| i + 2);
+    let rest = &tail[end..];
+    let gap = if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+        ""
+    } else {
+        " "
+    };
+    format!("{}{gap}{rest}", msg[..at].trim_end())
 }
 
 #[cfg(test)]
@@ -404,6 +431,29 @@ mod tests {
             p("Schema error: No field named \"T x\".valu. Did you mean '\"T x\".value'?").unwrap(),
             "Binder Error: Table \"T x\" does not have a column named \"valu\""
         );
+    }
+
+    #[test]
+    fn only_the_settings_sentence_is_cut_from_a_pool_refusal() {
+        let sort = "Resources exhausted: Failed to allocate additional 1.0 MB for ExternalSorter[0] with 0.0 B already allocated for this reservation - 5.2 MB remain available for the total memory pool: greedy(used: 0.0 B, pool_size: 5.2 MB). Not enough memory to continue external sort. Consider increasing the memory limit config: 'datafusion.runtime.memory_limit', or decreasing the config: 'datafusion.execution.sort_spill_reservation_bytes'.\ncaused by\nResources exhausted: Failed to allocate additional 1.0 MB for ExternalSorterMerge[0] with pool_size: 5.2 MB";
+        let hash = "Resources exhausted: Failed to allocate additional 1.0 MB for GroupedHashAggregateStream[0] with pool_size: 5.2 MB. Consider increasing the memory limit config: 'datafusion.runtime.memory_limit'. Done.";
+        for said in [super::restate(sort.into()), super::restate(hash.into())] {
+            assert!(said.starts_with("Out of Memory Error: the statement needed more than the engine's memory budget of 5.2 MB\n"), "{said}");
+            assert!(
+                !said.contains("datafusion.runtime.memory_limit")
+                    && !said.contains("sort_spill_reservation_bytes"),
+                "{said}"
+            );
+            assert!(!said.contains("Consider increasing"), "{said}");
+            assert!(said.contains("pool_size: 5.2 MB"), "{said}");
+        }
+        let said = super::restate(sort.into());
+        assert!(said.contains("caused by\nResources exhausted: Failed to allocate additional 1.0 MB for ExternalSorterMerge[0]"), "{said}");
+        assert!(
+            said.contains("Not enough memory to continue external sort."),
+            "{said}"
+        );
+        assert!(super::restate(hash.into()).ends_with("Done."));
     }
 
     #[test]

@@ -804,3 +804,17 @@ fn median_over_decimal_says_what_to_write() {
         assert_eq!(engine.sql(sql).unwrap()[0].num_rows(), 1, "{sql}");
     }
 }
+
+#[test]
+fn an_alias_spelled_glob_is_an_alias_and_the_operator_still_refuses() {
+    let engine = Engine::open_empty().unwrap();
+    for sql in [
+        r#"SELECT a "glob" FROM (SELECT 1 AS a) t"#,
+        "SELECT a AS glob FROM (SELECT 1 AS a) t",
+        r#"SELECT "glob" FROM (SELECT 1 AS "glob") t"#,
+    ] {
+        assert_eq!(engine.sql(sql).unwrap()[0].num_rows(), 1, "{sql}");
+    }
+    let e = engine.sql("SELECT 'a' GLOB 'a*'").unwrap_err().to_string();
+    assert!(e.contains("GLOB is not supported here"), "{e}");
+}

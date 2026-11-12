@@ -20,7 +20,6 @@ use std::ops::ControlFlow;
 use sqlparser::ast::{
     Expr, Ident, ObjectName, ObjectNamePart, Query, Statement, TableFactor, Visitor, VisitorMut,
 };
-use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
 
 use crate::error::{BurrmillError, Result};
@@ -54,7 +53,7 @@ fn parse(sql: &str) -> std::result::Result<Vec<Statement>, sqlparser::parser::Pa
     #[cfg(feature = "datafusion")]
     return Parser::parse_sql(&crate::df::duck_dialect(), sql);
     #[cfg(not(feature = "datafusion"))]
-    Parser::parse_sql(&DuckDbDialect {}, sql)
+    Parser::parse_sql(&sqlparser::dialect::DuckDbDialect {}, sql)
 }
 
 fn parts(name: &ObjectName) -> Vec<String> {
@@ -159,7 +158,7 @@ pub(crate) fn hidden_name(sql: &str) -> Option<String> {
         }
     }
     let expanded = crate::listcomp::before_parse(sql);
-    let stmts = Parser::parse_sql(&DuckDbDialect {}, &expanded).ok()?;
+    let stmts = parse(&expanded).ok()?;
     let mut find = Find(None);
     for stmt in &stmts {
         let _ = crate::walk::walk(stmt, &mut find);
@@ -242,7 +241,7 @@ impl Visitor for Collect {
 
 pub fn refs(sql: &str) -> Option<Refs> {
     let expanded = crate::listcomp::before_parse(sql);
-    let stmts = Parser::parse_sql(&DuckDbDialect {}, &expanded).ok()?;
+    let stmts = parse(&expanded).ok()?;
     let [stmt @ Statement::Query(_)] = stmts.as_slice() else {
         return None;
     };
@@ -257,7 +256,7 @@ pub fn refs(sql: &str) -> Option<Refs> {
 /// nuthatch's `walk_base_table_refs` over DuckDB's AST. `None` as for [`refs`].
 pub fn base_tables(sql: &str) -> Option<BTreeSet<String>> {
     let expanded = crate::listcomp::before_parse(sql);
-    let stmts = Parser::parse_sql(&DuckDbDialect {}, &expanded).ok()?;
+    let stmts = parse(&expanded).ok()?;
     let [stmt @ Statement::Query(_)] = stmts.as_slice() else {
         return None;
     };
@@ -358,7 +357,7 @@ impl Visitor for Scoped {
 /// anything but one parseable statement.
 pub fn canonical(sql: &str) -> Option<String> {
     let expanded = crate::listcomp::before_parse(sql);
-    let mut stmts = Parser::parse_sql(&DuckDbDialect {}, &expanded).ok()?;
+    let mut stmts = parse(&expanded).ok()?;
     let [stmt] = stmts.as_mut_slice() else {
         return None;
     };
@@ -574,6 +573,76 @@ mod tests {
             other.ends_with("serves the uploaded tables only"),
             "{other}"
         );
+    }
+
+    /// Engine-only syntax, one statement each. `reach` must read whatever the engine reads, or an
+    /// embedder that lets a parse failure through would run a statement the walk never saw.
+    #[cfg(feature = "datafusion")]
+    const ENGINE_ONLY: &[&str] = &[
+        "SELECT 'a' ^@ (SELECT max(a) FROM e__raw)",
+        "SELECT last_value(a IGNORE NULLS) OVER () AS x FROM e__raw",
+        "FROM e__raw SELECT a",
+        "FROM e__raw",
+        "SELECT list_transform([1, 2], x -> x + (SELECT max(a) FROM e__raw))",
+        "SELECT list_transform([1, 2], lambda x: x + (SELECT max(a) FROM e__raw))",
+        "SELECT [x * 2 FOR x IN [1, 2, 3] IF x > 1] FROM e__raw",
+        "SELECT {'a': 1, 'b': (SELECT max(a) FROM e__raw)}",
+        "SELECT MAP {'a': 1}, a FROM e__raw",
+        "SELECT * FROM e__raw POSITIONAL JOIN t",
+        "SELECT * FROM e__raw ASOF JOIN t USING (k)",
+        "SELECT * FROM e__raw ASOF JOIN t ON e__raw.k >= t.k",
+        "SELECT * FROM e__raw PIVOT (sum(a) FOR k IN ('x'))",
+        "SELECT * FROM e__raw UNPIVOT (v FOR k IN (a))",
+        "SELECT a FROM e__raw QUALIFY row_number() OVER () = 1",
+        "SELECT * EXCLUDE (a) FROM e__raw",
+        "SELECT a IS DISTINCT FROM b FROM e__raw",
+        "SELECT a // b FROM e__raw",
+        "SELECT CAST(a AS UBIGINT) FROM e__raw",
+        "SELECT a FROM e__raw WHERE a GLOB 'x*'",
+    ];
+
+    #[cfg(feature = "datafusion")]
+    #[test]
+    fn reach_parses_with_the_engines_dialect_so_what_the_engine_reads_is_walked() {
+        let mut read = 0;
+        for sql in ENGINE_ONLY {
+            if !crate::df::engine_parses(sql) {
+                continue;
+            }
+            read += 1;
+            let got = reach(sql);
+            assert!(
+                !matches!(got, Err(BurrmillError::Parse(_))),
+                "{sql}: {got:?}"
+            );
+            assert!(hidden_name(sql).is_some(), "{sql}");
+            assert!(base_tables(sql).is_some(), "{sql}");
+            assert!(refs(sql).is_some(), "{sql}");
+            assert!(canonical(sql).is_some(), "{sql}");
+        }
+        assert!(
+            read >= 15,
+            "the corpus stopped being read by the engine: {read}"
+        );
+    }
+
+    #[cfg(feature = "datafusion")]
+    #[test]
+    fn a_hidden_table_behind_engine_only_syntax_is_refused() {
+        for sql in [
+            "SELECT 'a' ^@ (SELECT max(a) FROM e__raw)",
+            "SELECT last_value(a IGNORE NULLS) OVER () AS x FROM e__raw",
+        ] {
+            let e = reach(sql).unwrap_err();
+            assert!(matches!(e, BurrmillError::NotAllowed(_)), "{sql}: {e:?}");
+            assert!(
+                e.to_string()
+                    .contains("`e__raw` is not a table this surface serves"),
+                "{e}"
+            );
+        }
+        let allow = std::collections::BTreeSet::from(["t".to_string()]);
+        assert!(reach_uploads("SELECT a ^@ 'x' FROM t", &allow).is_ok());
     }
 
     #[cfg(feature = "datafusion")]
