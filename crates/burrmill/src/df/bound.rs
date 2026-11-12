@@ -13,11 +13,12 @@
 //!   past the pool across rows, columns or a recursive CTE's iterations.
 //! - **Series.** `range` and `generate_series` in a FROM clause are charged the same way.
 
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use arrow::array::{Array, ArrayData, ArrayRef, AsArray, BooleanArray, make_array};
 use arrow::buffer::Buffer;
@@ -144,14 +145,22 @@ impl Limits {
         };
         let data = array.to_data();
         let (mut fresh, mut seen, mut biggest) = (0usize, Vec::new(), (0usize, std::ptr::null()));
-        new_buffers(&data, inputs, &mut seen, &mut fresh, &mut biggest);
+        let mut built = Vec::new();
+        new_buffers(
+            &data,
+            inputs,
+            &mut seen,
+            &mut built,
+            &mut fresh,
+            &mut biggest,
+        );
         if fresh < CHARGE_FLOOR {
             return Ok(array);
         }
         let r = held.unwrap_or_else(|| charge.new_empty());
         r.try_resize(fresh)?;
-        let mut r = Some(r);
-        Ok(match attach(&data, biggest.1, &mut r) {
+        let mut charged = Some(Charged::new(built, r));
+        Ok(match attach(&data, biggest.1, &mut charged) {
             Some(d) => make_array(d),
             None => array,
         })
@@ -163,6 +172,7 @@ fn new_buffers(
     d: &ArrayData,
     inputs: &[*const u8],
     seen: &mut Vec<*const u8>,
+    built: &mut Vec<Buffer>,
     fresh: &mut usize,
     biggest: &mut (usize, *const u8),
 ) {
@@ -172,13 +182,14 @@ fn new_buffers(
             continue;
         }
         seen.push(p);
+        built.push(b.clone());
         *fresh += b.capacity();
         if b.capacity() > biggest.0 {
             *biggest = (b.capacity(), p);
         }
     }
     for c in d.child_data() {
-        new_buffers(c, inputs, seen, fresh, biggest);
+        new_buffers(c, inputs, seen, built, fresh, biggest);
     }
 }
 
@@ -189,23 +200,59 @@ fn input_buffers(d: &ArrayData, out: &mut Vec<*const u8>) {
     }
 }
 
+/// The buffers built values have charged to the pool, by address, while the charge lasts. Whoever
+/// holds rows that reach them, as a shared definition does, does not charge them again.
+static CHARGED: LazyLock<Mutex<HashMap<usize, usize>>> = LazyLock::new(Default::default);
+
+/// Whether `b` is a buffer a built value has already charged to the pool.
+pub(super) fn charged(b: &Buffer) -> bool {
+    CHARGED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains_key(&(b.data_ptr().as_ptr() as usize))
+}
+
+/// Every buffer the charge covers, kept while it lasts, so no address it names is reused meanwhile.
 struct Charged {
-    _bytes: Buffer,
+    bytes: Vec<Buffer>,
     _charge: MemoryReservation,
 }
 
+impl Charged {
+    fn new(bytes: Vec<Buffer>, charge: MemoryReservation) -> Self {
+        let mut set = CHARGED.lock().unwrap_or_else(|p| p.into_inner());
+        // By allocation, which every slice of the bytes shares.
+        for b in &bytes {
+            *set.entry(b.data_ptr().as_ptr() as usize).or_default() += 1;
+        }
+        drop(set);
+        Self {
+            bytes,
+            _charge: charge,
+        }
+    }
+}
+
+impl Drop for Charged {
+    fn drop(&mut self) {
+        let mut set = CHARGED.lock().unwrap_or_else(|p| p.into_inner());
+        for b in &self.bytes {
+            let p = b.data_ptr().as_ptr() as usize;
+            if let Some(n) = set.get_mut(&p) {
+                *n -= 1;
+                if *n == 0 {
+                    set.remove(&p);
+                }
+            }
+        }
+    }
+}
+
 /// `d` with the buffer at `target` owned by `charge` as well, which then lasts as long as the bytes.
-fn attach(
-    d: &ArrayData,
-    target: *const u8,
-    charge: &mut Option<MemoryReservation>,
-) -> Option<ArrayData> {
+fn attach(d: &ArrayData, target: *const u8, charge: &mut Option<Charged>) -> Option<ArrayData> {
     if let Some(k) = d.buffers().iter().position(|b| b.as_ptr() == target) {
         let b = &d.buffers()[k];
-        let owner = Arc::new(AssertUnwindSafe(Charged {
-            _bytes: b.clone(),
-            _charge: charge.take()?,
-        }));
+        let owner = Arc::new(AssertUnwindSafe(charge.take()?));
         // SAFETY: the owner holds the original buffer, so the bytes stay valid as long as it does.
         let held = unsafe {
             Buffer::from_custom_allocation(NonNull::new(b.as_ptr() as *mut u8)?, b.len(), owner)
