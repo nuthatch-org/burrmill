@@ -72,6 +72,36 @@ fn pivot_refusal(pivot: bool) -> String {
     format!("{word} is not supported here; write {instead}")
 }
 
+const ASOF_REFUSAL: &str = "ASOF JOIN is not supported here; join on the inequality and keep the nearest row with row_number() OVER (PARTITION BY ... ORDER BY ... DESC) = 1";
+
+/// `ASOF [LEFT|RIGHT|FULL|INNER|OUTER] JOIN` anywhere in the statement. sqlparser has no hook in a
+/// join, and reads only Snowflake's `MATCH_CONDITION` form, so DuckDB's `ON` fails as a syntax error.
+fn has_asof_join(parser: &sqlparser::parser::Parser) -> bool {
+    use sqlparser::keywords::Keyword::{AS, ASOF, FULL, INNER, JOIN, LEFT, OUTER, RIGHT};
+    use sqlparser::tokenizer::Token;
+    let word = |n: usize| match parser.peek_nth_token(n).token {
+        Token::Word(w) if w.quote_style.is_none() => Some(w.keyword),
+        Token::EOF => None,
+        _ => Some(sqlparser::keywords::Keyword::NoKeyword),
+    };
+    let mut n = 0;
+    let mut prev = None;
+    while let Some(k) = word(n) {
+        if k == ASOF
+            && prev != Some(AS)
+            && matches!(
+                word(n + 1),
+                Some(JOIN | LEFT | RIGHT | FULL | INNER | OUTER)
+            )
+        {
+            return true;
+        }
+        prev = Some(k);
+        n += 1;
+    }
+    false
+}
+
 /// Parse with DuckDB's dialect and rewrite into what DataFusion plans. The result columns' DuckDB
 /// names come back too, taken from the statement as written, before any rewrite.
 pub fn parse(sql: &str, known: &Known) -> Result<(DfStatement, Vec<Option<String>>)> {
@@ -168,12 +198,17 @@ impl sqlparser::dialect::Dialect for Duck {
         true
     }
 
-    /// `PIVOT` and `UNPIVOT` are refused by name rather than as a syntax error.
+    /// `PIVOT`, `UNPIVOT` and `ASOF JOIN` are refused by name rather than as a syntax error.
     fn parse_statement(
         &self,
         parser: &mut sqlparser::parser::Parser,
     ) -> Option<std::result::Result<sq::Statement, sqlparser::parser::ParserError>> {
         use sqlparser::keywords::Keyword;
+        if has_asof_join(parser) {
+            return Some(Err(sqlparser::parser::ParserError::ParserError(
+                ASOF_REFUSAL.into(),
+            )));
+        }
         match &parser.peek_token().token {
             sqlparser::tokenizer::Token::Word(w)
                 if matches!(w.keyword, Keyword::PIVOT | Keyword::UNPIVOT) =>

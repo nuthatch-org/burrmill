@@ -818,3 +818,28 @@ fn an_alias_spelled_glob_is_an_alias_and_the_operator_still_refuses() {
     let e = engine.sql("SELECT 'a' GLOB 'a*'").unwrap_err().to_string();
     assert!(e.contains("GLOB is not supported here"), "{e}");
 }
+
+#[test]
+fn asof_join_is_refused_by_name_and_the_word_stays_usable() {
+    let engine = Engine::open_empty().unwrap();
+    for sql in [
+        "SELECT * FROM (SELECT 1 AS k) a ASOF JOIN (SELECT 2 AS k) b ON a.k >= b.k",
+        "SELECT * FROM (SELECT 1 AS k) a ASOF LEFT JOIN (SELECT 2 AS k) b USING (k)",
+        "SELECT (SELECT count(*) FROM (SELECT 1 AS k) a ASOF JOIN (SELECT 2 AS k) b ON a.k >= b.k)",
+    ] {
+        let e = engine.sql(sql).expect_err(sql);
+        assert!(matches!(e, BurrmillError::Parse(_)), "{sql}: {e:?}");
+        let e = e.to_string();
+        assert!(
+            e.contains("ASOF JOIN is not supported here; join on the inequality"),
+            "{sql}: {e}"
+        );
+    }
+    for sql in [
+        "SELECT 1 AS asof",
+        r#"SELECT 'x' AS "asof", 'asof join' AS s"#,
+        "SELECT asof FROM (SELECT 1 AS asof) t",
+    ] {
+        assert_eq!(engine.sql(sql).expect(sql)[0].num_rows(), 1, "{sql}");
+    }
+}
