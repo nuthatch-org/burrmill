@@ -13,6 +13,11 @@ const SEGMENTS: u64 = 1_500;
 const ROWS: u64 = 2;
 
 fn segments() -> Vec<(PathBuf, u64)> {
+    static WRITTEN: std::sync::OnceLock<Vec<(PathBuf, u64)>> = std::sync::OnceLock::new();
+    WRITTEN.get_or_init(write).clone()
+}
+
+fn write() -> Vec<(PathBuf, u64)> {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("df_scansort/data2/0123456789abcdef0123456789abcdef/segments");
     std::fs::create_dir_all(&dir).unwrap();
