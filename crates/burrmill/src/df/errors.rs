@@ -44,6 +44,7 @@ pub(super) const POOL_EXHAUSTED: &str =
 
 /// `line` with the one thing a host can do about a pool refusal when the engine has no spill
 /// directory.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn with_spill_hint(line: &str) -> String {
     match line.split_once('\n') {
         Some((first, rest)) => {
