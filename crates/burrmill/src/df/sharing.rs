@@ -1320,9 +1320,20 @@ async fn hold(plan: Arc<dyn ExecutionPlan>, ctx: Arc<TaskContext>) -> Result<Arc
     let reservation = MemoryConsumer::new("SharedExec").register(ctx.memory_pool());
     let mut stream = execute_stream(plan, ctx)?;
     let mut batches = Vec::new();
+    let mut seen = HashSet::new();
     while let Some(b) = stream.next().await {
-        let b = b?;
-        if reservation.try_grow(b.get_array_memory_size()).is_err() {
+        let b = match b {
+            Ok(b) => b,
+            // Holding must not refuse the definition itself; each reader builds it instead.
+            Err(e)
+                if !batches.is_empty()
+                    && matches!(e.find_root(), DataFusionError::ResourcesExhausted(_)) =>
+            {
+                return Ok(Arc::new(Held::TooBig));
+            }
+            Err(e) => return Err(e),
+        };
+        if reservation.try_grow(unseen_bytes(&b, &mut seen)).is_err() {
             return Ok(Arc::new(Held::TooBig));
         }
         batches.push(b);
@@ -1331,6 +1342,23 @@ async fn hold(plan: Arc<dyn ExecutionPlan>, ctx: Arc<TaskContext>) -> Result<Arc
         batches,
         _charged: reservation,
     }))
+}
+
+/// The capacity of each buffer under `b` not already in `seen`. An aggregate hands its one output
+/// on in slices, and each slice reports the whole of the buffers it shares.
+fn unseen_bytes(b: &RecordBatch, seen: &mut HashSet<usize>) -> usize {
+    fn walk(d: &arrow::array::ArrayData, seen: &mut HashSet<usize>) -> usize {
+        let nulls = d.nulls().map(|n| n.buffer());
+        let own: usize = d
+            .buffers()
+            .iter()
+            .chain(nulls)
+            .filter(|buf| seen.insert(buf.data_ptr().as_ptr() as usize))
+            .map(|buf| buf.capacity())
+            .sum();
+        own + d.child_data().iter().map(|c| walk(c, seen)).sum::<usize>()
+    }
+    b.columns().iter().map(|c| walk(&c.to_data(), seen)).sum()
 }
 
 #[cfg(test)]
@@ -1369,16 +1397,18 @@ mod tests {
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
             arrow::datatypes::Field::new("v", arrow::datatypes::DataType::UInt64, false),
         ]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(arrow::array::UInt64Array::from_iter_values(
-                0..10_000,
-            ))],
-        )
-        .unwrap();
+        let batch = || {
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(arrow::array::UInt64Array::from_iter_values(
+                    0..10_000,
+                ))],
+            )
+            .unwrap()
+        };
         let plan: Arc<dyn ExecutionPlan> =
             datafusion_datasource::memory::MemorySourceConfig::try_new_exec(
-                &[vec![batch.clone(), batch]],
+                &[vec![batch(), batch()]],
                 Arc::clone(&schema),
                 None,
             )

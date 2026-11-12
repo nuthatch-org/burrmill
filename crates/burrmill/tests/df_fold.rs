@@ -331,3 +331,45 @@ fn a_composite_key_with_a_literal_tag() {
     .collect();
     assert_eq!(got, want);
 }
+
+/// The fold runs on a blocking task, which a statement that returns does not stop; its token does.
+#[test]
+fn a_fold_past_its_deadline_stops_with_its_statement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let segs = tmp.path().join("segments");
+    std::fs::create_dir(&segs).unwrap();
+    for s in 0..80 {
+        let addrs: Vec<String> = (0..10_000).map(|i| format!("0x{s:04x}{i:036x}")).collect();
+        let from: Vec<Option<&str>> = addrs.iter().map(|a| Some(a.as_str())).collect();
+        let to: Vec<Option<&str>> = addrs.iter().rev().map(|a| Some(a.as_str())).collect();
+        let value: Vec<Option<&str>> = vec![Some("7"); addrs.len()];
+        write(
+            &segs,
+            "transfer",
+            s,
+            &[("from", from), ("to", to), ("value", value)],
+        );
+    }
+    let e = Engine::open_segments(&segs).unwrap();
+    let sql = fold("");
+    assert!(explain(&e, &sql).contains("OwnedSignedFold"));
+    let started = std::time::Instant::now();
+    e.sql_for_each(&sql, |_| Ok(())).unwrap();
+    let alone = started.elapsed();
+
+    let stop = burrmill::Stop {
+        cancel: burrmill::CancelToken::new(),
+        deadline: Some(std::time::Instant::now() + alone / 10),
+    };
+    let r = e.sql_for_each_stoppable(&sql, &[], &stop, None, |_| Ok(()));
+    assert!(matches!(r, Err(BurrmillError::Timeout)), "{r:?}");
+    let returned = std::time::Instant::now();
+    while burrmill::df::folds_running() > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let lingered = returned.elapsed();
+    assert!(
+        lingered < alone / 2,
+        "the fold ran on {lingered:?} after its statement returned, of {alone:?}"
+    );
+}

@@ -57,10 +57,12 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
   a reason.
 - **Pseudonymised**. The user marks identifier columns (`Session::bind`; `Session::proposals` offers
   them). Each distinct marked value is a token such as `CUSTOMER_3`; the map stays in the tab
-  (`pseudonym::assign`) and narration restores values locally. `projection_allows` refuses an
-  expression over a marked column, a marked column (or a name renamed from one) in `WHERE`,
-  `HAVING`, `QUALIFY`, a join condition or a `NATURAL` join, anything but a bare key in `GROUP BY`,
-  and `* REPLACE`, `* RENAME` and a star alias. If allowed, the rows go with marked values as tokens;
+  (`pseudonym::assign`) and narration restores values locally. A marked column (or a name renamed from one)
+  may stand only as a bare output column or a bare `GROUP BY` key: `projection_allows` refuses it
+  anywhere else, by name in an expression, `WHERE`, `HAVING`, `QUALIFY`, a join condition,
+  `ORDER BY` (also by position or `ALL`) and `DISTINCT ON`, and by a closing scan in any other clause
+  (`LIMIT`, a named window). It also refuses a `NATURAL` join, a set operation other than `UNION ALL`
+  over a marked column, and `* REPLACE`, `* RENAME` and a star alias. If allowed, the rows go with marked values as tokens;
   a cell that still looks like an identifier, or contains a marked value of eight characters or
   more, sends no rows (`mask`). With
   nothing marked, no rows are sent.
