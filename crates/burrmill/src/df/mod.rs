@@ -106,9 +106,16 @@ pub struct Budget {
 pub struct SharedPool(Arc<dyn datafusion_execution::memory_pool::MemoryPool>);
 
 impl SharedPool {
-    /// The pool a budget of `memory_bytes` gives its statements, as one budgeted engine builds.
+    /// The pool a budget of `memory_bytes` with no spill directory gives its statements, as one
+    /// budgeted engine builds.
     pub fn new(memory_bytes: usize) -> Self {
-        Self(session::budget_pool(memory_bytes))
+        Self(session::budget_pool(memory_bytes, false))
+    }
+
+    /// As [`SharedPool::new`], for engines whose budgets have a spill directory: operators that can
+    /// spill share what the others leave rather than the first taking it all.
+    pub fn spilling(memory_bytes: usize) -> Self {
+        Self(session::budget_pool(memory_bytes, true))
     }
 
     /// Bytes the statements of every engine on it hold.
