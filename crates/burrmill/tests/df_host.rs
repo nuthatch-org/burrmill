@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use burrmill::{BurrmillError, Engine};
+use burrmill::{Budget, BurrmillError, Engine};
 use serde_json::{Value, json};
 
 fn segment(dir: &std::path::Path, n: u64, rows: &[(u64, &str, &str)]) -> (std::path::PathBuf, u64) {
@@ -1125,6 +1125,8 @@ fn a_hidden_name_is_refused_whatever_comes_before_it() {
         "SELECT * FROM generate_series(1, 2) g, (SELECT * FROM 'x.parquet') p, e__raw",
         "EXPLAIN SELECT * FROM e__raw",
         "EXPLAIN ANALYZE SELECT a FROM e__raw",
+        "SELECT 'a' ^@ (SELECT max(a) FROM e__raw)",
+        "SELECT last_value(a IGNORE NULLS) OVER () AS x FROM e__raw",
     ] {
         let err = engine.sql(sql).unwrap_err();
         assert!(
@@ -1376,4 +1378,71 @@ fn a_budgeted_sort_over_repartitioned_text_is_charged_for_its_rows_not_their_buf
         ),
         Err(e) => panic!("the budgeted sort over views refused: {e}"),
     }
+}
+
+fn refused_at(budget: Budget, sql: &str) -> String {
+    let e = Engine::open_empty_budgeted(budget).unwrap();
+    match e.sql(sql) {
+        Err(BurrmillError::LimitExceeded(m)) => m,
+        other => panic!("{sql}: {:?}", other.err()),
+    }
+}
+
+#[test]
+fn a_pool_refusal_names_the_budget_and_keeps_the_detail() {
+    let sql = "SELECT CAST(x AS VARCHAR) k, count(*) c FROM range(2000000) t(x) GROUP BY k";
+    let none = refused_at(
+        Budget {
+            memory_bytes: 6 << 20,
+            threads: 2,
+            spill: None,
+        },
+        sql,
+    );
+    assert!(
+        none.starts_with(
+            "Out of Memory Error: the statement needed more than the engine's memory budget of "
+        ),
+        "{none}"
+    );
+    assert!(
+        none.lines().next().unwrap().contains("a spill directory"),
+        "{none}"
+    );
+    assert!(none.contains("pool_size"), "{none}");
+    let dir = tempfile::tempdir().unwrap();
+    let with = refused_at(
+        Budget {
+            memory_bytes: 6 << 20,
+            threads: 2,
+            spill: Some((dir.path().to_path_buf(), 1 << 30)),
+        },
+        sql,
+    );
+    assert!(!with.contains("spill directory"), "{with}");
+    assert!(with.contains("pool_size"), "{with}");
+    for said in [&none, &with] {
+        assert!(!said.contains("Budget.memory_bytes"), "{said}");
+        assert!(!said.contains("datafusion.runtime.memory_limit"), "{said}");
+    }
+}
+
+#[test]
+fn a_value_past_its_own_limit_keeps_its_sentence() {
+    let said = refused_at(
+        Budget {
+            memory_bytes: 256 << 20,
+            threads: 2,
+            spill: None,
+        },
+        "SELECT repeat('abcdefghij', 2000000) r",
+    );
+    assert!(
+        said.starts_with("Out of Memory Error: repeat would build a value of 20000000 bytes, past the limit of 16777216 bytes on one value"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("memory budget") && !said.contains("spill"),
+        "{said}"
+    );
 }

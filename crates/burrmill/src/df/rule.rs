@@ -701,6 +701,13 @@ fn check_whitelist(e: &Expr, schema: &DFSchema) -> Result<()> {
                     f.func.name()
                 );
             }
+            Expr::AggregateFunction(f) if f.func.name() == "median" && exact() => {
+                return plan_err!(
+                    "refusing plan: median over an exact type (DECIMAL) is not admitted, its \
+                     midpoint of an even count being unchecked; write median(CAST(x AS DOUBLE)), \
+                     quantile_cont(x, 0.5) or approx_median(x)"
+                );
+            }
             Expr::AggregateFunction(f)
                 if !SAFE_AGGREGATES.contains(&f.func.name())
                     && !matches!(f.func.name(), "sum" | "avg")

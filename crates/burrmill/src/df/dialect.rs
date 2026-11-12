@@ -48,7 +48,28 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
     super::depth::refuse_set_op_tokens(&expanded)?;
     DFParser::parse_sql_with_dialect(expanded.as_str(), &Duck)
         .map(|stmts| stmts.into_iter().collect())
-        .map_err(|e| BurrmillError::Parse(super::errors::restate(format!("SQL error: {e:?}"))))
+        .map_err(|e| BurrmillError::Parse(super::errors::restate(parser_text(&e))))
+}
+
+/// The parser's own words, without the span and diagnostic DataFusion wraps around them.
+fn parser_text(e: &datafusion_common::DataFusionError) -> String {
+    match e.find_root() {
+        datafusion_common::DataFusionError::SQL(p, _) => format!("SQL error: {p}"),
+        other => other.to_string(),
+    }
+}
+
+/// `PIVOT` and `UNPIVOT`, as a statement or after `FROM`, are refused by this name.
+fn pivot_refusal(pivot: bool) -> String {
+    let (word, instead) = if pivot {
+        (
+            "PIVOT",
+            "one aggregate per value, with FILTER (WHERE ...) or CASE, under GROUP BY",
+        )
+    } else {
+        ("UNPIVOT", "one SELECT per column, joined by UNION ALL")
+    };
+    format!("{word} is not supported here; write {instead}")
 }
 
 /// Parse with DuckDB's dialect and rewrite into what DataFusion plans. The result columns' DuckDB
@@ -157,16 +178,9 @@ impl sqlparser::dialect::Dialect for Duck {
             sqlparser::tokenizer::Token::Word(w)
                 if matches!(w.keyword, Keyword::PIVOT | Keyword::UNPIVOT) =>
             {
-                let instead = match w.keyword {
-                    Keyword::PIVOT => {
-                        "one aggregate per value, with FILTER (WHERE ...) or CASE, under GROUP BY"
-                    }
-                    _ => "one SELECT per column, joined by UNION ALL",
-                };
-                Some(Err(sqlparser::parser::ParserError::ParserError(format!(
-                    "{} is not supported here; write {instead}",
-                    w.value.to_ascii_uppercase()
-                ))))
+                Some(Err(sqlparser::parser::ParserError::ParserError(
+                    pivot_refusal(w.keyword == Keyword::PIVOT),
+                )))
             }
             _ => None,
         }
@@ -180,7 +194,9 @@ impl sqlparser::dialect::Dialect for Duck {
         use sqlparser::dialect::Precedence;
         match &parser.peek_token().token {
             sqlparser::tokenizer::Token::CaretAt => Some(Ok(self.prec_value(Precedence::Like))),
-            sqlparser::tokenizer::Token::Word(w) if w.value.eq_ignore_ascii_case("glob") => {
+            sqlparser::tokenizer::Token::Word(w)
+                if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("glob") =>
+            {
                 Some(Ok(self.prec_value(Precedence::Like)))
             }
             _ => None,
@@ -205,7 +221,9 @@ impl sqlparser::dialect::Dialect for Duck {
                         .map(|b| call("starts_with", vec![expr.clone(), b])),
                 );
             }
-            sqlparser::tokenizer::Token::Word(w) if w.value.eq_ignore_ascii_case("glob") => {
+            sqlparser::tokenizer::Token::Word(w)
+                if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("glob") =>
+            {
                 return Some(Err(sqlparser::parser::ParserError::ParserError(
                     "GLOB is not supported here; LIKE is, with % for * and _ for ?".into(),
                 )));
@@ -1544,6 +1562,16 @@ impl VisitorMut for Rewriter {
     fn post_visit_query(&mut self, q: &mut sq::Query) -> ControlFlow<()> {
         super::subqueries::distinct_aggregate_names(q);
         ControlFlow::Continue(())
+    }
+
+    fn pre_visit_table_factor(&mut self, t: &mut sq::TableFactor) -> ControlFlow<()> {
+        let pivot = match t {
+            sq::TableFactor::Pivot { .. } => true,
+            sq::TableFactor::Unpivot { .. } => false,
+            _ => return ControlFlow::Continue(()),
+        };
+        self.refused = Some(pivot_refusal(pivot));
+        ControlFlow::Break(())
     }
 
     fn pre_visit_query(&mut self, q: &mut sq::Query) -> ControlFlow<()> {

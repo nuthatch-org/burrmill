@@ -36,6 +36,16 @@ mod outerorder;
 pub use depth::check_expr_bounds;
 mod builder;
 pub use builder::EngineBuilder;
+
+/// The dialect statements parse with, for a walk that must read what the engine reads.
+#[cfg(test)]
+pub(crate) fn engine_parses(sql: &str) -> bool {
+    dialect::parse_statements(sql).is_ok()
+}
+
+pub(crate) fn duck_dialect() -> dialect::Duck {
+    dialect::Duck
+}
 mod buildside;
 mod distinct;
 mod distinctrows;
@@ -545,7 +555,7 @@ impl Engine {
             {
                 Err(BurrmillError::Timeout)
             }
-            r => r,
+            r => self.with_spill_hint(r),
         }
     }
 
@@ -620,6 +630,20 @@ impl Engine {
             m.exec_nanos += started.elapsed().as_nanos() as u64;
         }
         r
+    }
+
+    /// A pool refusal on an engine with no spill directory says that one would help.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn with_spill_hint(&self, r: Result<()>) -> Result<()> {
+        match r {
+            Err(BurrmillError::LimitExceeded(m))
+                if m.starts_with(errors::POOL_EXHAUSTED)
+                    && !self.session.runtime_env().disk_manager.tmp_files_enabled() =>
+            {
+                Err(BurrmillError::LimitExceeded(errors::with_spill_hint(&m)))
+            }
+            r => r,
+        }
     }
 
     /// Run a query on the caller's event loop, for a host with one thread and no runtime: a

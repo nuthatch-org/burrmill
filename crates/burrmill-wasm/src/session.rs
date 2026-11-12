@@ -1021,4 +1021,26 @@ posted,merchant,amount
         assert_eq!(shown.narration.as_deref(), Some("The total is -194.50."));
         assert_eq!(shown.chart.kind, ChartKind::Number);
     }
+
+    #[test]
+    fn the_guard_refuses_glob_by_name_and_describes_the_tab_not_a_nest() {
+        let s = session();
+        let glob = s
+            .query("SELECT merchant FROM t WHERE merchant GLOB 'S*'")
+            .unwrap_err();
+        assert!(
+            glob.local.contains("GLOB is not supported here; LIKE is"),
+            "{}",
+            glob.local
+        );
+        let other = s.query("SELECT * FROM u").unwrap_err();
+        assert!(
+            other.local.contains("serves the uploaded tables only"),
+            "{}",
+            other.local
+        );
+        assert!(!other.local.contains("nest"), "{}", other.local);
+        let two = s.query("SELECT 1; SELECT 2").unwrap_err();
+        assert!(!two.local.contains("serves"), "{}", two.local);
+    }
 }
