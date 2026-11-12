@@ -109,6 +109,7 @@ if (bodies.length !== sentSpent) bad('an ask past the budget sent ' + (bodies.le
 
 if (bodies.length < 2) bad('expected two requests, got ' + bodies.length);
 if (!blurb.includes('Groups of 10')) bad('blurb: ' + blurb);
+if (!blurb.includes('single row')) bad('blurb does not state the limit: ' + blurb);
 if (stored.local) bad('key landed in localStorage');
 if (stored.session) bad('key landed in sessionStorage');
 if (hosts.length) bad('unexpected hosts ' + hosts.join(' '));

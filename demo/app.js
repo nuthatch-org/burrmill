@@ -182,7 +182,12 @@ function describeMode() {
   const mode = document.getElementById('mode').value;
   const blurb = document.getElementById('blurb');
   if (mode === 'aggregates') {
-    blurb.textContent = 'Groups of ' + AGGREGATE_K + ' or more can leave. Smaller groups stay.';
+    blurb.textContent =
+      'Groups of ' +
+      AGGREGATE_K +
+      ' or more can leave, with their counts as ranges. Rows and smaller groups stay. A model that ' +
+      'sets out to can still learn about a single row from a run of questions, so do not use this ' +
+      'mode on data whose single rows must stay secret.';
   } else if (mode === 'pseudonymised') {
     blurb.textContent = 'Identifier columns leave as tokens. The values stay here.';
   } else if (mode === 'local-model') {

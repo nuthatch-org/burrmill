@@ -64,9 +64,12 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
   asks. An answer with no row and one whose groups were all dropped send the same thing, the
   groups go in one order whatever `ORDER BY` said, and a `HAVING` over a count or a limit after
   `ORDER BY` a count is not applied to what is sent (`not_applied` says so), since either would
-  pick groups by an exact count. `sum` and `avg` are sent exact: they move with one member, so
-  `sum(amount)` of a group chosen by a key over one person still answers a question about that
-  person, and `sum(x) / avg(x)` is the exact count. The buckets close only the count. A statement that fails while reading rows sends only that it failed, with no kind, and
+  pick groups by an exact count. `sum` and `avg` are sent exact.
+  **The limit.** Aggregates mode keeps rows from leaving and coarsens counts, but a model that sets
+  out to can learn about a single row from a run of questions: a key or `WHERE` that singles out
+  one person still moves an exact `sum`, `sum(flag)` is that group's exact size, and one member
+  at the edge of k moves a group between sent and dropped. Do not use it on data whose single rows
+  must stay secret. The page says so where the mode is chosen. A statement that fails while reading rows sends only that it failed, with no kind, and
   one `measure_sql` refuses gets its refusal whether it failed or not. Once the groups have been
   sent, a later attempt that fails or finds no rows ends the question on the page. Whether a
   passed statement fails is still one bit per attempt about the data, and can be about one member:
@@ -85,7 +88,8 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
   with a cell that is, contains (eight characters or more) or looks like an identifier is withheld
   (`pseudonym::withheld`): while one is, a statement that names it anywhere, or uses a star, a
   column list or a `USING` or `NATURAL` join, sends no rows. That is decided from the table, not the
-  answer, so a literal cannot ask whether it is one of the values. Renaming a column clears the
+  answer, so a literal cannot ask whether it is one of the values. A copy in another spelling, such
+  as `user20 at mail` in an unmarked column, is not recognised and goes as it is. Renaming a column clears the
   marks. With nothing marked, no rows are sent. Only a statement `projection_allows` passes is told that it
   failed while reading rows or found no rows (`Session::admits`); a refused one gets its refusal
   either way, and the page asks nothing more about it.
