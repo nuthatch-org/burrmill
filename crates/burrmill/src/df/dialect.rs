@@ -848,6 +848,40 @@ fn arg_extreme(f: &mut sq::Function, max: bool) {
     f.name = sq::ObjectName::from(vec![sq::Ident::new("first_value")]);
 }
 
+/// The DuckDB spellings the dialect rewrites to DataFusion's own and the demo offers the model. A
+/// test in burrmill-wasm runs each against a table, so a name here is one the engine answers.
+pub const DUCKDB_SPELLINGS: &[&str] = &[
+    "if",
+    "ifnull",
+    "arg_max",
+    "arg_min",
+    "max_by",
+    "min_by",
+    "struct_pack",
+    "first",
+    "last",
+    "list_reverse_sort",
+    "array_reverse_sort",
+    "regexp_matches",
+    "regexp_full_match",
+    "year",
+    "month",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "quarter",
+    "week",
+    "epoch",
+    "millisecond",
+    "microsecond",
+    "isodow",
+    "dayofweek",
+    "dayofyear",
+    "dayofmonth",
+    "weekofyear",
+];
+
 /// DuckDB's names for functions DataFusion has under another: the date-part shorthands
 /// (`year(t)` is `date_part('year', t)`), `regexp_matches`, which is `regexp_like`, and the
 /// aggregates `first` and `last`, which are `first_value` and `last_value`, NULLs included.
@@ -3889,5 +3923,23 @@ mod tests {
         ]);
         assert_eq!(*k.base, *rebuilt.base);
         assert_eq!(k.columns("bets"), Some(cols(&["Id", "amount"])));
+    }
+
+    /// Each name the grammar offers the model is one the dialect rewrites: none survives a parse
+    /// as the call the model wrote.
+    #[test]
+    fn every_duckdb_spelling_is_rewritten() {
+        for name in super::DUCKDB_SPELLINGS {
+            let rewritten = (1..=3).any(|n| {
+                let args = ["a", "b", "c"][..n].join(", ");
+                let sql = format!("SELECT {name}({args}) FROM t");
+                let (stmt, _) = super::parse(&sql, &Known::default()).unwrap();
+                !stmt
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains(&format!("{name}("))
+            });
+            assert!(rewritten, "{name} reaches the planner as written");
+        }
     }
 }

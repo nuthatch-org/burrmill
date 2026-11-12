@@ -46,7 +46,6 @@ if (window.trustedTypes && window.trustedTypes.createPolicy) {
   });
 }
 
-const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
 let seq = 0;
 const pending = new Map();
 const fields = [];
@@ -55,21 +54,66 @@ let fileOpen = false;
 let held = null;
 let heldName = '';
 
-worker.onmessage = (event) => {
-  const msg = event.data;
-  const wait = pending.get(msg.id);
-  if (!wait) return;
-  pending.delete(msg.id);
-  if (msg.ok) wait.resolve(msg.result);
-  else wait.reject(new Error(msg.error || 'worker failed'));
-};
+// A statement that runs past this is stopped. A join does not yield, so stopping one means
+// ending the worker and opening the held file in a new one.
+const QUERY_MS = 60000;
+const QUERY_OPS = new Set(['query', 'aggregates', 'pseudonym']);
+let worker = spawn();
+let running = 0;
+let renames = [];
+let restoring = Promise.resolve();
 
-function call(op, extra, transfer) {
+function spawn() {
+  const next = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+  next.onmessage = (event) => {
+    const msg = event.data;
+    const wait = pending.get(msg.id);
+    if (!wait) return;
+    pending.delete(msg.id);
+    if (msg.ok) wait.resolve(msg.result);
+    else wait.reject(new Error(msg.error || 'worker failed'));
+  };
+  return next;
+}
+
+function dispatch(op, extra, transfer) {
   const id = ++seq;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
     worker.postMessage(Object.assign({ id, op }, extra || {}), transfer || []);
   });
+}
+
+async function restore() {
+  if (!held) return;
+  const bytes = await held.arrayBuffer();
+  await dispatch('open', { bytes }, [bytes]);
+  for (const step of renames) await dispatch('rename', step);
+}
+
+function restart(reason) {
+  worker.terminate();
+  for (const wait of pending.values()) wait.reject(new Error(reason));
+  pending.clear();
+  worker = spawn();
+  restoring = restore().catch((err) => status(err.message || String(err)));
+}
+
+async function call(op, extra, transfer) {
+  await restoring;
+  if (!QUERY_OPS.has(op)) return dispatch(op, extra, transfer);
+  running++;
+  document.getElementById('stop').hidden = false;
+  const timer = setTimeout(
+    () => restart('The query ran past ' + QUERY_MS / 1000 + ' s and was stopped. Ask for less.'),
+    QUERY_MS,
+  );
+  try {
+    return await dispatch(op, extra, transfer);
+  } finally {
+    clearTimeout(timer);
+    if (--running === 0) document.getElementById('stop').hidden = true;
+  }
 }
 
 function status(text) {
@@ -84,14 +128,14 @@ function separators() {
   };
 }
 
-function promptText(question, card, grammar, feedback, mode, identifiers, rows) {
+function promptText(question, card, grammar, feedback, previousSql, mode, identifiers, rows) {
   const lines = [
     'Return one JSON object and no other text.',
     'Keys are sql, chart, and narration. No other keys.',
     'sql is one SELECT or WITH. The only uploaded table is t.',
     'chart.kind is number, bar, line, stacked_bar, or table.',
     'chart.y is a column name or an array of column names. chart.x is a column name.',
-    'narration is one sentence. A slot is {rN.column} or {column} for the first row.',
+    'narration is one sentence. A slot is {rN.column}, N counting rows from 0, or {column} for the first row.',
     'A digit outside a slot is refused. Do not write a number except inside a slot.',
     'The schema below has no cell values. Do not invent values.',
   ];
@@ -101,7 +145,7 @@ function promptText(question, card, grammar, feedback, mode, identifiers, rows) 
       'Write one SELECT that reads table t and has a GROUP BY.',
       'Each output is a grouping key, or count, sum or avg of a column, with arithmetic, CAST or round over those.',
       'min, max, string_agg, CASE inside an aggregate, FILTER and a CTE named t are not sent.',
-      'The next message lists groups of size at least ' +
+      'The request after this one lists the groups your statement made of size at least ' +
         AGGREGATE_K +
         ', and how many groups were dropped.',
       'A smaller group is not in that list. Rows that are not groups are not sent.',
@@ -126,6 +170,7 @@ function promptText(question, card, grammar, feedback, mode, identifiers, rows) 
     lines.push('', 'Rows:', rows);
   }
   if (feedback) {
+    if (previousSql) lines.push('', 'Previous statement:', previousSql);
     lines.push('', 'Previous attempt:', feedback);
   }
   return lines.join('\n');
@@ -141,7 +186,8 @@ function describeMode() {
   } else if (mode === 'local-model') {
     blurb.textContent =
       'Rows go to 127.0.0.1. Nothing leaves this machine. The first ask holds this tab to ' +
-      '127.0.0.1 until it is reloaded.';
+      '127.0.0.1 until it is reloaded. Name a model your server has, and let the server allow ' +
+      'this page\'s origin (for Ollama, set OLLAMA_ORIGINS).';
   } else {
     blurb.textContent =
       'The schema leaves this browser. The rows stay. A statement that does not plan goes back ' +
@@ -149,7 +195,22 @@ function describeMode() {
       'What the model can still learn is that its statement planned, which the schema decides.';
   }
   document.getElementById('port-label').hidden = mode !== 'local-model';
+  swapModel(mode);
   showBudget();
+}
+
+// The hosted default is not a name a local server has, so each side keeps its own.
+let modelSide = 'hosted';
+const modelKept = { hosted: DEFAULT_MODEL, local: '' };
+
+function swapModel(mode) {
+  const side = mode === 'local-model' ? 'local' : 'hosted';
+  if (side === modelSide) return;
+  const field = document.getElementById('model');
+  modelKept[modelSide] = field.value;
+  field.value = modelKept[side];
+  field.placeholder = side === 'local' ? 'the model your server has' : '';
+  modelSide = side;
 }
 
 function showBudget() {
@@ -263,7 +324,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function post(url, body, key, mode) {
+async function post(url, body, key, mode, attempt) {
   const headers = { 'content-type': 'application/json' };
   if (mode !== 'local-model') {
     headers['x-api-key'] = key;
@@ -283,11 +344,13 @@ async function post(url, body, key, mode) {
       message = JSON.parse(await res.text())?.error?.message || '';
     } catch {}
     const error = 'model http ' + res.status + (message ? ': ' + message : '');
-    // A rate limit is waited out. Any other refusal is the key, the model name or the request,
-    // and asking the model to fix it would only send the request again.
-    if (res.status === 429) {
+    // A rate limit or an overloaded server is waited out, and the model is not told: it did not
+    // write the failure. Any other refusal is the key, the model name or the request, and asking
+    // the model to fix it would only send the request again.
+    if (res.status === 429 || res.status === 529 || res.status >= 500) {
       const after = Number(res.headers.get('retry-after'));
-      return { error, wait: Number.isFinite(after) && after > 0 ? after * 1000 : 5000 };
+      const base = res.status === 429 ? 5000 : 2000 * 2 ** attempt;
+      return { error, wait: Number.isFinite(after) && after > 0 ? Math.min(after, 60) * 1000 : base };
     }
     return { error, fatal: res.status >= 400 && res.status < 500 };
   }
@@ -728,6 +791,7 @@ async function openFile(file, persist) {
   }
   held = file;
   heldName = file.name;
+  renames = [];
   let storageNote = '';
   if (persist) {
     try {
@@ -809,6 +873,7 @@ async function applyRenames() {
     const prev = field.input.dataset.name;
     if (next === prev) continue;
     await call('rename', { from: prev, to: next });
+    renames.push({ from: prev, to: next });
     field.input.dataset.name = next;
   }
 }
@@ -835,12 +900,18 @@ async function ask() {
     await applyRenames();
     const mode = document.getElementById('mode').value;
     const key = document.getElementById('key').value;
+    const modelName = document.getElementById('model').value.trim();
+    const model = modelName || DEFAULT_MODEL;
     let port = '';
     if (mode === 'local-model') {
       port = document.getElementById('port').value.trim();
       const n = Number(port);
       if (!/^[0-9]+$/.test(port) || n < 1 || n > 65535) {
         status('The local model is a port on 127.0.0.1.');
+        return;
+      }
+      if (!modelName) {
+        status('Name the model your local server has.');
         return;
       }
     } else if (!key) {
@@ -873,27 +944,32 @@ async function ask() {
         truncated: dumped.answer.truncated,
       });
     }
-    const model = document.getElementById('model').value.trim() || DEFAULT_MODEL;
     const locale = separators();
     const url = modelUrl(mode, port);
     let feedback = '';
+    let previousSql = '';
+    let lastError = '';
     let fedGroups = false;
     let fedTokens = false;
     for (let attempt = 0; attempt < 4; attempt++) {
       const body = requestBody(
         model,
-        promptText(question, packed.card, packed.grammar, feedback, mode, identifiers, rows),
+        promptText(question, packed.card, packed.grammar, feedback, previousSql, mode, identifiers, rows),
       );
       logBody(url, body);
       if (document.getElementById('confirm').checked) await waitForSend();
-      const sent = await post(url, body, key, mode);
+      const sent = await post(url, body, key, mode, attempt);
       if (sent.fatal) {
         status(sent.error);
         return;
       }
       if (sent.wait) {
-        status(sent.error + '. Waiting ' + Math.round(sent.wait / 1000) + ' s.');
-        await sleep(sent.wait);
+        lastError = sent.error;
+        status(sent.error);
+        if (attempt < 3) {
+          status(sent.error + '. Waiting ' + Math.round(sent.wait / 1000) + ' s.');
+          await sleep(sent.wait);
+        }
         continue;
       }
       if (sent.error) {
@@ -901,7 +977,9 @@ async function ask() {
         status(sent.error);
         continue;
       }
+      lastError = '';
       let reply;
+      previousSql = '';
       try {
         reply = await call('parse', { text: sent.text });
       } catch (err) {
@@ -909,6 +987,7 @@ async function ask() {
         status(feedback);
         continue;
       }
+      previousSql = reply.sql;
       const queried = await call('query', { sql: reply.sql });
       // Whether a statement reads rows and then fails, or finds none, is about the data. In
       // schema mode only a failure the schema decides goes back.
@@ -949,9 +1028,15 @@ async function ask() {
       status(queried.answer.rows.length ? '' : 'No rows.');
       return;
     }
-    status('No answer after 4 attempts.');
+    status(lastError || 'No answer after 4 attempts.');
   } catch (err) {
-    status(err.message || String(err));
+    const message = err.message || String(err);
+    const local = document.getElementById('mode').value === 'local-model';
+    status(
+      local && err instanceof TypeError
+        ? message + '. The local server is not running on that port, or does not allow this page\'s origin.'
+        : message,
+    );
   } finally {
     document.getElementById('ask').disabled = false;
     document.getElementById('send').hidden = true;
@@ -1012,6 +1097,7 @@ document.getElementById('ask').addEventListener('click', () => {
   ask();
 });
 document.getElementById('mode').addEventListener('change', describeMode);
+document.getElementById('stop').addEventListener('click', () => restart('Stopped.'));
 document.getElementById('export').addEventListener('click', exportCsv);
 document.getElementById('run-here').addEventListener('click', () => {
   runHere();

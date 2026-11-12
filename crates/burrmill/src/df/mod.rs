@@ -377,6 +377,12 @@ impl Engine {
         self.session.function_names()
     }
 
+    /// The DuckDB spellings the dialect rewrites to a registered function, so are not in
+    /// [`Engine::function_names`] but are answered.
+    pub fn duckdb_spellings() -> &'static [&'static str] {
+        dialect::DUCKDB_SPELLINGS
+    }
+
     /// Every registered name, the `__raw`, `__hot` and `__union` parts a statement may not name
     /// included. [`Engine::visible_tables`] is the listing a host serves.
     pub fn tables(&self) -> Vec<String> {

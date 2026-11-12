@@ -28,8 +28,8 @@ Each request to the model (`promptText` and `requestBody` in `demo/app.js`) carr
   column and reason. No cell value.
   For a column the user ticks as a sign, one word for its sign; for one ticked as a date, its
   minimum and maximum;
-- the grammar (`Session::grammar`): the admitted statement kinds and every function name;
-- the question, and the previous attempt's feedback, if any.
+- the grammar (`Session::grammar`): the dialect (DuckDB), the admitted statement kinds, the DuckDB spellings the engine rewrites (`Engine::duckdb_spellings`), the few it refuses by name, the functions refused over DECIMAL, and the registered function names;
+- the question, and on a retry the model's own previous statement with that attempt's feedback.
 
 Feedback after a query that ran is its shape (`feedback_shape`): row count, column names and types,
 and whether it was truncated. A query that failed before reading a row sends its message through
@@ -67,7 +67,9 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
   more, sends no rows (`mask`). With
   nothing marked, no rows are sent.
 - **Local model**. Requests go to `http://127.0.0.1:<port>/v1/messages` with no key, and carry
-  `SELECT * FROM t` as JSON, up to the row cap.
+  `SELECT * FROM t` as JSON, up to the row cap. The model field holds a name the local server has
+  (it starts empty in this mode), and the server must allow the page's origin: for Ollama, set
+  `OLLAMA_ORIGINS`. A server that does not shows as a failed fetch.
 
 ## Budgets
 
@@ -79,6 +81,9 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
   at most 2,048 tokens; four attempts per question; the outbound log keeps eight requests, each
   shown to 64 KB; aggregates mode takes 20 asks per page load (`AGGREGATE_ASKS`), counted on the
   page, which bounds differencing across asks without preventing it.
+- A statement running past 60 s (`QUERY_MS`), or one the user stops with "Stop the query", ends the
+  worker; the page starts a new one and opens the held file in it again, so the file and its
+  renames survive.
 - The gzip of ingest plus the engine for wasm32 must be at most 8 MiB (`tab-wasm` in
   `.github/workflows/ci.yml`).
 
@@ -102,7 +107,7 @@ From `demo/index.html` and `demo/app.js`:
 - The key stays in the tab, and in `sessionStorage` only if "Remember the key in this tab" is ticked.
 - "Confirm before sending" is on by default; each request is shown in the log and waits for Send or
   Don't send.
-- A 4xx other than 429 stops the question with the API's message; a 429 waits for `retry-after`.
+- A 4xx other than 429 stops the question with the API's message. A 429, a 529 or a 5xx waits (`retry-after` if sent, else a doubling pause) and sends the request again without telling the model; if the attempts run out the page shows the API's message.
 - The local model's port must be 1 to 65535.
 - A column name or question matching an identifier label (email, phone, iban, ssn, patient, hiv,
   id) shows a warning. It does not stop a send.
