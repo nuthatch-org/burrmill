@@ -72,6 +72,7 @@ await page.locator('#file-input').setInputFiles({
 await page.getByText('CANARY_MERCHANT_AAA').waitFor({ timeout: 120000 });
 await page.locator('#mode').selectOption('local-model');
 await page.locator('#port').fill(modelPort);
+await page.locator('#model').fill('llama3');
 await page.locator('#key').fill('sk-ant-test-key');
 await page.locator('#question').fill('Total');
 await page.locator('#confirm').uncheck();
