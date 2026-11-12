@@ -209,3 +209,149 @@ fn a_topk_reads_by_the_race_and_selects_the_same() {
         "the fixture no longer races, so this proves nothing: {read:?}"
     );
 }
+
+/// A store whose reads each take `DELAY` once `slow` is set, counting them.
+#[derive(Debug)]
+struct Slow {
+    inner: object_store::memory::InMemory,
+    slow: std::sync::atomic::AtomicBool,
+    gets: std::sync::atomic::AtomicUsize,
+}
+
+const DELAY: std::time::Duration = std::time::Duration::from_millis(5);
+
+impl std::fmt::Display for Slow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Slow({})", self.inner)
+    }
+}
+
+#[async_trait::async_trait]
+impl object_store::ObjectStore for Slow {
+    async fn put_opts(
+        &self,
+        location: &object_store::path::Path,
+        payload: object_store::PutPayload,
+        opts: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        self.inner.put_opts(location, payload, opts).await
+    }
+    async fn put_multipart_opts(
+        &self,
+        location: &object_store::path::Path,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+    async fn get_opts(
+        &self,
+        location: &object_store::path::Path,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        use std::sync::atomic::Ordering;
+        if self.slow.load(Ordering::Relaxed) {
+            self.gets.fetch_add(1, Ordering::Relaxed);
+            let (tx, rx) = futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                std::thread::sleep(DELAY);
+                let _ = tx.send(());
+            });
+            let _ = rx.await;
+        }
+        self.inner.get_opts(location, options).await
+    }
+    fn delete_stream(
+        &self,
+        locations: futures::stream::BoxStream<
+            'static,
+            object_store::Result<object_store::path::Path>,
+        >,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>> {
+        self.inner.delete_stream(locations)
+    }
+    fn list(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+    async fn copy_opts(
+        &self,
+        from: &object_store::path::Path,
+        to: &object_store::path::Path,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+/// A `LIMIT 1` stops after one segment, and the metered answer then waits for every footer: read
+/// one at a time, that wait is at least a delay per segment.
+#[test]
+fn a_limit_does_not_wait_on_footers_read_one_at_a_time() {
+    use object_store::ObjectStoreExt;
+    use std::sync::atomic::Ordering;
+
+    const SEGMENTS: u64 = 200;
+    let store = Arc::new(Slow {
+        inner: object_store::memory::InMemory::new(),
+        slow: false.into(),
+        gets: 0.into(),
+    });
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]));
+    let mut selected = 0u64;
+    futures::executor::block_on(async {
+        for s in 0..SEGMENTS {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(UInt64Array::from_iter_values([s]))],
+            )
+            .unwrap();
+            let mut bytes = Vec::new();
+            let mut w =
+                parquet::arrow::ArrowWriter::try_new(&mut bytes, schema.clone(), None).unwrap();
+            w.write(&batch).unwrap();
+            let meta = w.close().unwrap();
+            selected += meta
+                .row_groups()
+                .iter()
+                .map(|g| g.column(0).compressed_size() as u64)
+                .sum::<u64>();
+            let key = object_store::path::Path::from(format!("nest/segments/ev-{s:064x}.parquet"));
+            store.put(&key, bytes.into()).await.unwrap();
+        }
+    });
+    // A footer cache of 128 KiB holds a few of the 200 footers, so the pass reads the store.
+    let e = futures::executor::block_on(
+        Engine::builder()
+            .store(store.clone(), "nest")
+            .budget(Budget {
+                memory_bytes: 1 << 20,
+                threads: 4,
+                spill: None,
+            })
+            .open_async(),
+    )
+    .unwrap();
+    store.slow.store(true, Ordering::Relaxed);
+    let started = std::time::Instant::now();
+    let m = metered(&e, "SELECT id FROM ev LIMIT 1");
+    let took = started.elapsed();
+    let gets = store.gets.load(Ordering::Relaxed);
+    assert_eq!(m.output_rows, 1);
+    assert_eq!(m.sealed_bytes_scanned, selected);
+    assert!(
+        gets as u64 >= SEGMENTS / 2,
+        "{gets} reads: the footers were cached"
+    );
+    assert!(
+        took < DELAY * gets as u32 / 4,
+        "{took:?} for {gets} reads of {DELAY:?} each"
+    );
+}

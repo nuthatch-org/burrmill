@@ -238,3 +238,37 @@ fn a_repeated_window_is_computed_once() {
     );
     assert_eq!(executed_scans(&e, "roll", sql), 1);
 }
+
+/// An aggregate emits its groups at once and hands them on in slices of one buffer, so a shared
+/// definition is charged for that buffer once, not once per slice.
+#[test]
+fn a_shared_aggregate_is_charged_its_size_once() {
+    let e = Engine::builder()
+        .budget(burrmill::Budget {
+            memory_bytes: 1 << 30,
+            threads: 1,
+            spill: None,
+        })
+        .open()
+        .unwrap();
+    let sql = "WITH g AS (SELECT range % 200000 AS k, count(*) AS c FROM range(400000) GROUP BY 1)
+               SELECT count(*) FROM g a JOIN g b ON a.k = b.k";
+    let mut m = burrmill::QueryMetrics::default();
+    let mut answer = Vec::new();
+    e.sql_for_each_metered(sql, Some(&mut m), |b| {
+        answer.push(b);
+        Ok(())
+    })
+    .unwrap();
+    let n = answer[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>();
+    assert_eq!(n.unwrap().value(0), 200_000);
+    // 200,000 groups of two 8-byte columns are about 3 MB; charged per slice they were 205 MB.
+    assert!(
+        m.peak_memory_bytes < 16 << 20,
+        "peak {} bytes",
+        m.peak_memory_bytes
+    );
+}
