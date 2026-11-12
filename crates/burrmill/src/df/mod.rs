@@ -258,8 +258,13 @@ impl Engine {
         };
         let mut fold_tables = std::collections::HashMap::new();
         // The owned fold opens segment files itself, so a table in a store has none; the
-        // substitution then declines and DataFusion's aggregate runs instead.
-        for t in tables.iter().filter(|t| !t.files.is_empty() && !t.keyed) {
+        // substitution then declines and DataFusion's aggregate runs instead. Under a budget that
+        // may spill it declines too: that aggregate spills where the fold, held to the pool, refuses.
+        let spills = budget.as_ref().is_some_and(|b| b.spill.is_some());
+        for t in tables
+            .iter()
+            .filter(|t| !spills && !t.files.is_empty() && !t.keyed)
+        {
             let name = if t.wide.is_empty() {
                 t.name.clone()
             } else {

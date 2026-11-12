@@ -81,26 +81,26 @@ fn segments(segs: &Path, rows: usize) {
     }
 }
 
-fn budgeted(segs: &Path) -> Engine {
+fn budgeted(segs: &Path, memory_bytes: usize, spill: Option<&Path>) -> Engine {
     Engine::builder()
         .segments(segs)
         .budget(Budget {
-            memory_bytes: BUDGET,
+            memory_bytes,
             threads: 2,
-            spill: None,
+            spill: spill.map(|d| (d.to_path_buf(), 4 << 30)),
         })
         .open()
         .unwrap()
 }
 
 #[test]
-fn a_substituted_fold_answers_within_the_budget_or_refuses() {
+fn a_fold_is_held_to_the_budget_or_left_to_an_aggregate_that_spills() {
     let tmp = tempfile::tempdir().unwrap();
 
     // Small enough for the budget: still substituted, and the same answer as unbudgeted.
     let small = tmp.path().join("small");
     segments(&small, 1_000);
-    let e = budgeted(&small);
+    let e = budgeted(&small, BUDGET, None);
     let plan = format!("{:?}", e.sql(&format!("EXPLAIN {FOLD}")).unwrap());
     assert!(plan.contains("OwnedSignedFold"), "not substituted:\n{plan}");
     let count = |e: &Engine| {
@@ -117,7 +117,7 @@ fn a_substituted_fold_answers_within_the_budget_or_refuses() {
     // A million parties, whose aggregation is several times the budget.
     let large = tmp.path().join("large");
     segments(&large, 250_000);
-    let e = budgeted(&large);
+    let e = budgeted(&large, BUDGET, None);
     let mut m = QueryMetrics::default();
     let before = LIVE.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);
@@ -134,4 +134,37 @@ fn a_substituted_fold_answers_within_the_budget_or_refuses() {
         ),
     }
     assert!(grew < 4 * BUDGET, "grew the heap by {grew} bytes");
+
+    // With a spill directory the fold is not substituted, and DataFusion's aggregate answers the
+    // same million parties within a budget the fold could not fit, byte for byte.
+    let spill = tmp.path().join("spill");
+    std::fs::create_dir(&spill).unwrap();
+    let e = budgeted(&large, 4 * BUDGET, Some(&spill));
+    let plan = format!("{:?}", e.sql(&format!("EXPLAIN {FOLD}")).unwrap());
+    assert!(!plan.contains("OwnedSignedFold"), "substituted:\n{plan}");
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    // Measured with the answer dropped as it comes, so the heap is the statement's own.
+    e.sql_for_each(FOLD, |_| Ok(()))
+        .unwrap_or_else(|err| panic!("refused with a spill directory: {err}"));
+    let grew = PEAK.load(Ordering::Relaxed) - before;
+    eprintln!(
+        "spilling aggregate at {} MiB: grew the heap by {grew} bytes",
+        (4 * BUDGET) >> 20
+    );
+    let got = e.sql(FOLD).unwrap();
+    let want = Engine::open_segments(&large).unwrap().sql(FOLD).unwrap();
+    // No ORDER BY, so the comparison is of the aggregate alone; its rows come in any order.
+    let rows = |b: &[RecordBatch]| -> Vec<String> {
+        let mut r: Vec<String> = b
+            .iter()
+            .flat_map(|b| burrmill::df::encode::rows(b).unwrap())
+            .map(|r| r.to_string())
+            .collect();
+        r.sort();
+        r
+    };
+    let got = rows(&got);
+    assert_eq!(got.len(), 1_000_000);
+    assert_eq!(got, rows(&want));
 }
