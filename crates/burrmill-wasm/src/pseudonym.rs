@@ -8,8 +8,9 @@ use burrmill_ingest::InferredType;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sqlparser::ast::{
-    Expr, GroupByExpr, JoinConstraint, JoinOperator, ObjectNamePart, Query, Select, SelectItem,
-    SetExpr, Statement, TableAlias, TableFactor, Visit, Visitor,
+    Distinct, Expr, GroupByExpr, JoinConstraint, JoinOperator, ObjectNamePart, OrderByKind, Query,
+    Select, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableAlias, TableFactor,
+    Value as SqlValue, Visit, Visitor,
 };
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
@@ -20,6 +21,7 @@ use crate::session::QueryOut;
 const EXPR: &str = "an identifier column is used in an expression";
 pub(crate) const NONE_MARKED: &str = "no column is marked as an identifier, so no rows are sent";
 const FILTER: &str = "an identifier column is used to choose rows";
+const ORDER: &str = "an identifier column is used to order rows";
 const UNTOKENISED: &str = "an identifier value was not tokenised";
 const NOT_ONE: &str = "the statement was not one query";
 
@@ -230,7 +232,15 @@ pub fn projection_allows(sql: &str, marked: &BTreeSet<String>) -> Result<(), &'s
         .iter()
         .map(|name| name.to_ascii_lowercase())
         .collect();
-    check_query(&query, &mut marked).map(|_| ())
+    check_query(&query, &mut marked)?;
+    // A marked name may stand only where the walk admits it: a bare output column or a bare
+    // `GROUP BY` key of a relation. Those cleared, a name anywhere else is refused.
+    let mut held = (*query).clone();
+    clear_admitted(&mut held);
+    if mentions(&held, &marked) {
+        return Err(EXPR);
+    }
+    Ok(())
 }
 
 pub fn mask(out: &QueryOut, tokens: &TokenMap, bound: bool) -> Result<Vec<Value>, &'static str> {
@@ -442,7 +452,97 @@ fn check_query(query: &Query, marked: &mut BTreeSet<String>) -> Result<bool, &'s
             mark_alias(&cte.alias, passes, marked);
         }
     }
-    check_set(&query.body, marked)
+    let passes = check_set(&query.body, marked)?;
+    // Sorting by a value ranks it against the others, and against any literal in a `UNION ALL`.
+    match query.order_by.as_ref().map(|o| &o.kind) {
+        Some(OrderByKind::All(_)) if passes => return Err(ORDER),
+        Some(OrderByKind::Expressions(keys)) => {
+            for key in keys {
+                if mentions(&key.expr, marked) {
+                    return Err(ORDER);
+                }
+                if passes
+                    && ordinal(&key.expr).is_some_and(|n| !ordinal_clear(&query.body, n, marked))
+                {
+                    return Err(ORDER);
+                }
+                check_expr_queries(&key.expr, marked)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(passes)
+}
+
+fn ordinal(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Value(v) => match &v.value {
+            SqlValue::Number(n, _) => n.parse().ok(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether output column `n` (from 1) is known by name and not marked.
+fn ordinal_clear(body: &SetExpr, n: usize, marked: &BTreeSet<String>) -> bool {
+    output_names(body)
+        .and_then(|names| names.get(n.checked_sub(1)?).cloned())
+        .is_some_and(|name| !marked.contains(&name))
+}
+
+/// What the closing scan in `projection_allows` may skip: each relation's bare output columns
+/// and bare `GROUP BY` keys. A subquery inside an expression keeps all of its names.
+fn clear_admitted(query: &mut Query) {
+    if let Some(with) = &mut query.with {
+        for cte in &mut with.cte_tables {
+            clear_admitted(&mut cte.query);
+        }
+    }
+    clear_set(&mut query.body);
+}
+
+fn clear_set(body: &mut SetExpr) {
+    match body {
+        SetExpr::Select(select) => {
+            select.projection.retain(|item| match item {
+                SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => {
+                    !is_bare(e)
+                }
+                _ => true,
+            });
+            if let GroupByExpr::Expressions(keys, _) = &mut select.group_by {
+                keys.retain(|k| !is_bare(k));
+            }
+            for table in &mut select.from {
+                clear_factor(&mut table.relation);
+                for join in &mut table.joins {
+                    clear_factor(&mut join.relation);
+                }
+            }
+        }
+        SetExpr::Query(query) => clear_admitted(query),
+        SetExpr::SetOperation { left, right, .. } => {
+            clear_set(left);
+            clear_set(right);
+        }
+        _ => {}
+    }
+}
+
+fn clear_factor(factor: &mut TableFactor) {
+    match factor {
+        TableFactor::Derived { subquery, .. } => clear_admitted(subquery),
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => {
+            clear_factor(&mut table_with_joins.relation);
+            for join in &mut table_with_joins.joins {
+                clear_factor(&mut join.relation);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The names a set operation's output takes, or `None` when one is generated from an expression.
@@ -480,8 +580,18 @@ fn check_set(body: &SetExpr, marked: &mut BTreeSet<String>) -> Result<bool, &'st
     match body {
         SetExpr::Select(select) => check_select(select, marked),
         SetExpr::Query(query) => check_query(query, marked),
-        SetExpr::SetOperation { left, right, .. } => {
+        SetExpr::SetOperation {
+            left,
+            right,
+            op,
+            set_quantifier,
+        } => {
             let passes = check_set(left, marked)? | check_set(right, marked)?;
+            // Anything but `UNION ALL` compares rows across the arms, so an arm of literals asks
+            // whether a value is among them.
+            if passes && !(*op == SetOperator::Union && *set_quantifier == SetQuantifier::All) {
+                return Err(FILTER);
+            }
             // The output is named by the left arm, so a marked column in any arm marks those.
             if passes {
                 for name in output_names(left).ok_or(EXPR)? {
@@ -504,6 +614,11 @@ fn check_select(select: &Select, marked: &mut BTreeSet<String>) -> Result<bool, 
     let mut passes = false;
     for item in &select.projection {
         passes |= check_item(item, marked)?;
+    }
+    if let Some(Distinct::On(keys)) = &select.distinct
+        && keys.iter().any(|k| mentions(k, marked))
+    {
+        return Err(FILTER);
     }
     // A predicate on an identifier is an oracle: `WHERE email LIKE 'alice%'` returns her row.
     for expr in [&select.selection, &select.having, &select.qualify]
@@ -659,7 +774,7 @@ fn is_bare(expr: &Expr) -> bool {
     matches!(expr, Expr::Identifier(_) | Expr::CompoundIdentifier(_))
 }
 
-fn mentions(expr: &Expr, marked: &BTreeSet<String>) -> bool {
+fn mentions(expr: &impl Visit, marked: &BTreeSet<String>) -> bool {
     struct Hit<'a> {
         marked: &'a BTreeSet<String>,
         hit: bool,
@@ -808,6 +923,83 @@ OTHER_MERCHANT,canary.two@example.com,DE89370400440532013000,+359 888 100002,-3.
         for sql in [
             "SELECT email, amount FROM t WHERE amount < -5",
             "SELECT email, count(*) AS n FROM t GROUP BY email",
+        ] {
+            let payload = s.pseudonym_feedback(sql).unwrap();
+            assert_no(sql, &payload);
+            assert!(payload.contains("CUSTOMER_"), "{sql}: {payload}");
+        }
+    }
+
+    #[test]
+    fn an_identifier_cannot_order_or_pick_rows_from_any_clause() {
+        let s = bound();
+        let refused = [
+            (
+                "SELECT amount FROM t ORDER BY CASE WHEN email LIKE 'canary.one%' THEN 0 ELSE 1 END LIMIT 1",
+                ORDER,
+            ),
+            ("SELECT email FROM t ORDER BY email", ORDER),
+            (
+                "SELECT email FROM t UNION ALL SELECT 'canary.o' UNION ALL SELECT 'canary.t' ORDER BY 1",
+                ORDER,
+            ),
+            ("SELECT email AS e FROM t ORDER BY e", ORDER),
+            ("SELECT * FROM t ORDER BY 2", ORDER),
+            ("SELECT email, amount FROM t ORDER BY ALL", ORDER),
+            (
+                "WITH x AS (SELECT amount FROM t ORDER BY email LIMIT 1) SELECT amount FROM x",
+                ORDER,
+            ),
+            (
+                "SELECT DISTINCT ON (email LIKE 'canary.one%') amount FROM t ORDER BY amount",
+                FILTER,
+            ),
+            (
+                "SELECT email FROM t INTERSECT SELECT 'canary.one@example.com'",
+                FILTER,
+            ),
+            (
+                "SELECT email FROM t EXCEPT SELECT 'canary.one@example.com'",
+                FILTER,
+            ),
+            (
+                "SELECT email FROM t UNION SELECT 'canary.one@example.com'",
+                FILTER,
+            ),
+            (
+                "SELECT amount FROM t LIMIT (SELECT count(*) FROM t WHERE email LIKE 'canary.one%')",
+                EXPR,
+            ),
+            (
+                "SELECT amount FROM t OFFSET (SELECT count(*) FROM t WHERE email < 'canary.p')",
+                EXPR,
+            ),
+            (
+                "SELECT amount, row_number() OVER w AS r FROM t WINDOW w AS (ORDER BY email)",
+                EXPR,
+            ),
+            (
+                "SELECT amount, rank() OVER (PARTITION BY email ORDER BY amount) AS r FROM t",
+                EXPR,
+            ),
+            (
+                "SELECT count(*) FILTER (WHERE email LIKE 'canary.one%') AS n FROM t",
+                EXPR,
+            ),
+        ];
+        for (sql, reason) in refused {
+            let payload = s.pseudonym_feedback(sql).unwrap();
+            assert_no(sql, &payload);
+            assert!(!payload.contains("-10.00"), "{sql}: {payload}");
+            let value: Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(value["omitted"], reason, "{sql}: {payload}");
+        }
+        for sql in [
+            "SELECT email, amount FROM t ORDER BY amount",
+            "SELECT email, amount FROM t ORDER BY 2",
+            "SELECT email FROM t UNION ALL SELECT email FROM t",
+            "SELECT DISTINCT email FROM t",
+            "SELECT email, count(*) AS n FROM t GROUP BY email ORDER BY n",
         ] {
             let payload = s.pseudonym_feedback(sql).unwrap();
             assert_no(sql, &payload);
