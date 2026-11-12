@@ -315,13 +315,18 @@ impl Session {
 
     /// Replace the token map. An empty list clears it, so a later schema or
     /// aggregates question neither restores a token nor sends one.
+    /// The same marks again keep their binding: dealing it scans the table and copies it.
     pub fn bind(&mut self, identifiers: &[String]) {
-        self.marked = self
+        let marked: BTreeSet<String> = self
             .names
             .iter()
             .filter(|name| identifiers.iter().any(|id| id == *name))
             .cloned()
             .collect();
+        if !marked.is_empty() && marked == self.marked && self.tokenised.is_some() {
+            return;
+        }
+        self.marked = marked;
         self.tokens = pseudonym::assign(&self.names, &self.marked, &self.batches, self.order);
         self.withheld = pseudonym::withheld(&self.names, &self.marked, &self.batches, &self.tokens);
         self.tokenised = None;

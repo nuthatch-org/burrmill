@@ -1375,10 +1375,16 @@ canary.one@example.com,DE89370400440532013000,+359 888 100002,2
         assert_eq!(sorted, (1..=40).collect::<Vec<u64>>());
         assert_ne!(numbers, sorted, "tokens came out in row order");
         s.bind(&["email".into()]);
+        let kept = s
+            .pseudonym_feedback("SELECT email FROM t ORDER BY n")
+            .unwrap();
+        assert_eq!(payload, kept, "the same marks dealt again");
+        s.bind(&["n".into()]);
+        s.bind(&["email".into()]);
         let again = s
             .pseudonym_feedback("SELECT email FROM t ORDER BY n")
             .unwrap();
-        assert_ne!(payload, again, "a second bind dealt the same numbers");
+        assert_ne!(payload, again, "new marks dealt the same numbers");
     }
 
     #[test]
