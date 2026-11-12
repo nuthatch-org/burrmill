@@ -287,6 +287,12 @@ impl<'a> SignedFoldExec<'a> {
         }
 
         let agg_bytes = shared.bytes();
+        // The answer is built beside the aggregate it is taken from: an index entry and a row a group.
+        if let Some(charge) = self.charge {
+            let entry =
+                std::mem::size_of::<(u32, u32, Vec<i128>)>() + 16 * self.plan.sum_aliases.len();
+            charge(agg_bytes + shared.len() * (entry + 32))?;
+        }
 
         let merge_started = Instant::now();
         let mut rows_read = 0u64;

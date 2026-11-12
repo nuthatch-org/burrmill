@@ -139,30 +139,30 @@ fn a_fold_is_held_to_the_budget_or_left_to_an_aggregate_that_spills() {
     // same million parties within a budget the fold could not fit, byte for byte.
     let spill = tmp.path().join("spill");
     std::fs::create_dir(&spill).unwrap();
+    let ordered = format!("{FOLD} ORDER BY addr");
     let e = budgeted(&large, 4 * BUDGET, Some(&spill));
-    let plan = format!("{:?}", e.sql(&format!("EXPLAIN {FOLD}")).unwrap());
+    let plan = format!("{:?}", e.sql(&format!("EXPLAIN {ordered}")).unwrap());
     assert!(!plan.contains("OwnedSignedFold"), "substituted:\n{plan}");
     let before = LIVE.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);
     // Measured with the answer dropped as it comes, so the heap is the statement's own.
-    e.sql_for_each(FOLD, |_| Ok(()))
+    e.sql_for_each(&ordered, |_| Ok(()))
         .unwrap_or_else(|err| panic!("refused with a spill directory: {err}"));
     let grew = PEAK.load(Ordering::Relaxed) - before;
     eprintln!(
         "spilling aggregate at {} MiB: grew the heap by {grew} bytes",
         (4 * BUDGET) >> 20
     );
-    let got = e.sql(FOLD).unwrap();
-    let want = Engine::open_segments(&large).unwrap().sql(FOLD).unwrap();
-    // No ORDER BY, so the comparison is of the aggregate alone; its rows come in any order.
+    let got = e.sql(&ordered).unwrap();
+    let want = Engine::open_segments(&large)
+        .unwrap()
+        .sql(&ordered)
+        .unwrap();
     let rows = |b: &[RecordBatch]| -> Vec<String> {
-        let mut r: Vec<String> = b
-            .iter()
+        b.iter()
             .flat_map(|b| burrmill::df::encode::rows(b).unwrap())
             .map(|r| r.to_string())
-            .collect();
-        r.sort();
-        r
+            .collect()
     };
     let got = rows(&got);
     assert_eq!(got.len(), 1_000_000);
