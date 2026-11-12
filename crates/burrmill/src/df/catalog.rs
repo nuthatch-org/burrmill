@@ -328,16 +328,21 @@ struct Sizes {
     leaves: Box<[u64]>,
 }
 
+/// A file's length and modification time, which a file rewritten at the same path would not share.
+pub(super) type Stamp = (u64, chrono::DateTime<chrono::Utc>);
+
 #[derive(Default)]
 struct SizesCache {
-    /// By location, with the file's length, which a replaced file would not share.
-    by_file: HashMap<String, (u64, Arc<Sizes>)>,
+    by_file: HashMap<String, (Stamp, Arc<Sizes>)>,
     /// One copy of each distinct footer schema.
     descrs: Vec<Arc<parquet::schema::types::SchemaDescriptor>>,
+    /// About what `by_file` holds: its keys, sizes and the map's own entry.
+    bytes: usize,
 }
 
-/// Entries before the map is emptied: a few tens of MiB at the most.
-const SIZES_CAP: usize = 1 << 16;
+/// Bytes before the map is emptied, outside the pool as the footer-schema map beside it is: about
+/// 20,000 segments of 25 columns.
+const SIZES_BYTES: usize = 8 << 20;
 
 static SIZES: std::sync::LazyLock<Mutex<SizesCache>> = std::sync::LazyLock::new(Default::default);
 
@@ -345,10 +350,16 @@ static SIZES: std::sync::LazyLock<Mutex<SizesCache>> = std::sync::LazyLock::new(
 pub(super) static SELECTION_FOOTER_READS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// The length and modification time of the local file at `path`.
+pub(super) fn stamp_of(path: &Path) -> Option<Stamp> {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.len(), m.modified().ok()?.into()))
+}
+
 /// Keeps the column sizes of the local segment at `location` from its footer.
 pub(super) fn note_sizes(
     location: &str,
-    len: u64,
+    stamp: Stamp,
     meta: &parquet::file::metadata::ParquetMetaData,
 ) {
     let descr = meta.file_metadata().schema_descr_ptr();
@@ -358,8 +369,9 @@ pub(super) fn note_sizes(
             leaves[i] += c.compressed_size().max(0) as u64;
         }
     }
+    let bytes = location.len() + 8 * leaves.len() + 96;
     let mut cache = SIZES.lock().unwrap_or_else(|p| p.into_inner());
-    if cache.by_file.len() >= SIZES_CAP {
+    if cache.bytes + bytes > SIZES_BYTES {
         *cache = SizesCache::default();
     }
     let descr = match cache.descrs.iter().find(|d| ***d == *descr) {
@@ -373,15 +385,21 @@ pub(super) fn note_sizes(
         descr,
         leaves: leaves.into_boxed_slice(),
     });
-    cache.by_file.insert(location.to_string(), (len, sizes));
+    if cache
+        .by_file
+        .insert(location.to_string(), (stamp, sizes))
+        .is_none()
+    {
+        cache.bytes += bytes;
+    }
 }
 
-fn sizes(location: &str, len: u64) -> Option<Arc<Sizes>> {
+fn sizes(location: &str, stamp: Stamp) -> Option<Arc<Sizes>> {
     let cache = SIZES.lock().unwrap_or_else(|p| p.into_inner());
     cache
         .by_file
         .get(location)
-        .filter(|(l, _)| *l == len)
+        .filter(|(s, _)| *s == stamp)
         .map(|(_, s)| Arc::clone(s))
 }
 
@@ -483,9 +501,12 @@ pub(super) async fn selected_bytes(scans: Vec<Selection>) -> DFResult<u64> {
         .map(|(s, f)| {
             let unread = Arc::clone(&unread);
             async move {
-                let cached = (s.local && s.pruning.is_none())
-                    .then(|| sizes(f.location.as_ref(), f.size))
-                    .flatten();
+                // A listing stamps each local file; one without a stamp is not kept.
+                let stamp = (s.local && f.last_modified.timestamp_nanos_opt() != Some(0))
+                    .then_some((f.size, f.last_modified));
+                let cached = stamp
+                    .filter(|_| s.pruning.is_none())
+                    .and_then(|st| sizes(f.location.as_ref(), st));
                 if let Some(sizes) = cached {
                     let mask = s.columns.as_ref().map(|n| {
                         ProjectionMask::columns(&sizes.descr, n.iter().map(String::as_str))
@@ -506,8 +527,8 @@ pub(super) async fn selected_bytes(scans: Vec<Selection>) -> DFResult<u64> {
                     .with_page_index_policy(Some(parquet::file::metadata::PageIndexPolicy::Skip))
                     .fetch_metadata()
                     .await?;
-                if s.local {
-                    note_sizes(f.location.as_ref(), f.size, &meta);
+                if let Some(st) = stamp {
+                    note_sizes(f.location.as_ref(), st, &meta);
                 }
                 let groups = meta.row_groups();
                 let descr = meta.file_metadata().schema_descr();
@@ -600,7 +621,13 @@ impl Listed {
                 } else {
                     local_location(p, &mut parents)?
                 };
-                Ok(PartitionedFile::new(loc.to_string(), *size))
+                let mut file = PartitionedFile::new(loc.to_string(), *size);
+                // With its modification time, a file rewritten at the same path and length is not
+                // taken for the one whose footer or sizes were kept.
+                if let Some((_, modified)) = (!keyed).then(|| stamp_of(p)).flatten() {
+                    file.object_meta.last_modified = modified;
+                }
+                Ok(file)
             })
             .collect::<crate::Result<Vec<_>>>()?;
         Ok(Self {
