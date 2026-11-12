@@ -7,8 +7,6 @@ use sqlparser::ast::{
     Select, SelectItem, SetExpr, Statement, TableFactor, UnaryOperator, Value as SqlValue, Visit,
     Visitor,
 };
-use sqlparser::dialect::DuckDbDialect;
-use sqlparser::parser::Parser;
 use std::ops::ControlFlow;
 
 use crate::session::QueryOut;
@@ -135,7 +133,7 @@ fn row_object(columns: &[crate::session::Column], row: &[Option<String>]) -> Val
 }
 
 fn parse_one(sql: &str) -> Result<Box<Query>, &'static str> {
-    let mut statements = Parser::parse_sql(&DuckDbDialect {}, sql).map_err(|_| SKIP)?;
+    let mut statements = burrmill::inspect::parse(sql).map_err(|_| SKIP)?;
     if statements.len() != 1 {
         return Err(SKIP);
     }
@@ -689,6 +687,23 @@ mod tests {
         let payload = s.aggregate_feedback(&probe).unwrap();
         let value: Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["omitted"], NOT_SUMMARY, "{payload}");
+    }
+
+    #[test]
+    fn the_engines_own_syntax_is_measured_and_a_refused_form_sends_nothing() {
+        let (s, forbidden) = grouped_file();
+        let sql = "SELECT merchant, sum(amount) AS total FROM t WHERE merchant ^@ 'KEPT' GROUP BY merchant";
+        let payload = s.aggregate_feedback(sql).unwrap();
+        assert_no(sql, &payload, &forbidden);
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        assert!(value["omitted"].is_null(), "{payload}");
+        assert!(payload.contains("KEPT_GROUP"), "{payload}");
+        let sql = "SELECT merchant, sum(amount) AS total FROM t WHERE merchant GLOB 'KEPT*' GROUP BY merchant";
+        let payload = s.aggregate_feedback(sql).unwrap();
+        assert_no(sql, &payload, &forbidden);
+        assert!(!payload.contains("KEPT_GROUP"), "{payload}");
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        assert!(value["omitted"].is_string() && value["groups"].as_array().unwrap().is_empty());
     }
 
     #[test]

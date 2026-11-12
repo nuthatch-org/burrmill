@@ -14,8 +14,6 @@ use sqlparser::ast::{
     FunctionArguments, GroupByExpr, Query, Select, SelectItem, SetExpr, SetOperator, SetQuantifier,
     Statement, TableFactor, UnaryOperator, Value,
 };
-use sqlparser::dialect::GenericDialect;
-use sqlparser::parser::Parser;
 
 use crate::error::{BurrmillError, Result};
 
@@ -179,8 +177,8 @@ fn not_allowed(what: impl Into<String>) -> BurrmillError {
 
 /// Parse and plan, or refuse.
 pub fn plan(sql: &str) -> Result<Plan> {
-    let mut statements = Parser::parse_sql(&GenericDialect {}, sql)
-        .map_err(|e| BurrmillError::Parse(e.to_string()))?;
+    let mut statements =
+        crate::inspect::parse(sql).map_err(|e| BurrmillError::Parse(e.to_string()))?;
     if statements.len() != 1 {
         return Err(not_allowed(format!(
             "exactly one statement per query; got {}",
