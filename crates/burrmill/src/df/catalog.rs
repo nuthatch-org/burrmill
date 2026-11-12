@@ -217,18 +217,72 @@ pub(super) fn listed(plan: &Arc<dyn ExecutionPlan>, partition: usize) -> usize {
 #[derive(Debug, Default)]
 pub(super) struct Opened(Mutex<HashMap<usize, Vec<Running>>>);
 
-type Held = datafusion_execution::memory_pool::MemoryReservation;
+/// What one running partition of a scan holds against the pool for its segments.
+///
+/// Its bytes cannot be spilled or given back before the scan ends, so they are charged only while
+/// the pool keeps `headroom` free beside them: a sort that can spill must still find room to reserve
+/// its merge and its next batch. Past that they go uncounted, as they were before they were charged.
+#[derive(Debug)]
+pub(super) struct Bookkeeping {
+    held: datafusion_execution::memory_pool::MemoryReservation,
+    pool: Arc<dyn datafusion_execution::memory_pool::MemoryPool>,
+    headroom: usize,
+}
+
+impl Bookkeeping {
+    pub(super) fn new(
+        held: datafusion_execution::memory_pool::MemoryReservation,
+        pool: Arc<dyn datafusion_execution::memory_pool::MemoryPool>,
+        headroom: usize,
+    ) -> Self {
+        Self {
+            held,
+            pool,
+            headroom,
+        }
+    }
+
+    pub(super) fn charge(&self, bytes: usize) {
+        use datafusion_execution::memory_pool::MemoryLimit;
+        match self.pool.memory_limit() {
+            MemoryLimit::Finite(limit) => {
+                if self.pool.reserved() + bytes + self.headroom <= limit {
+                    let _ = self.held.try_grow(bytes);
+                }
+            }
+            _ => self.held.grow(bytes),
+        }
+    }
+
+    #[cfg(test)]
+    fn size(&self) -> usize {
+        self.held.size()
+    }
+}
+
+/// The pool a statement's spilling sorts need free to go on: each partition's merge reservation
+/// and about as much again for the batch it is taking in. A quarter of the pool at the least.
+pub(super) fn headroom(ctx: &datafusion_execution::TaskContext) -> usize {
+    use datafusion_execution::memory_pool::MemoryLimit;
+    let options = ctx.session_config().options();
+    let sorts =
+        2 * options.execution.target_partitions * options.execution.sort_spill_reservation_bytes;
+    match ctx.memory_pool().memory_limit() {
+        MemoryLimit::Finite(limit) => sorts.max(limit / 4).min(limit),
+        _ => 0,
+    }
+}
 
 #[derive(Debug)]
 struct Running {
-    held: Weak<Held>,
+    held: Weak<Bookkeeping>,
     /// A segment's bloom filters are read through a second reader, which must not charge it twice.
     charged: HashSet<u64>,
 }
 
 impl Opened {
     /// `held` is what `partition` charges from here on, until its stream drops it.
-    pub(super) fn running(&self, partition: usize, held: &Arc<Held>) {
+    pub(super) fn running(&self, partition: usize, held: &Arc<Bookkeeping>) {
         let mut all = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let runs = all.entry(partition).or_default();
         runs.retain(|r| r.held.strong_count() > 0);
@@ -254,8 +308,7 @@ impl Opened {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hash::hash(location, &mut h);
         if run.charged.insert(std::hash::Hasher::finish(&h)) {
-            // Charged whether or not it fits, so the operators that can spill make room for it.
-            held.grow(PER_SEGMENT - LISTED);
+            held.charge(PER_SEGMENT - LISTED);
         }
     }
 }
@@ -796,7 +849,13 @@ mod tests {
     fn a_segment_is_charged_once_to_the_run_that_opens_it() {
         use datafusion_execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
-        let run = |name: &str| Arc::new(MemoryConsumer::new(name).register(&pool));
+        let run = |name: &str| {
+            Arc::new(Bookkeeping::new(
+                MemoryConsumer::new(name).register(&pool),
+                Arc::clone(&pool),
+                0,
+            ))
+        };
         let opened = Opened::default();
         let (a, b) = (
             PartitionedFile::new("/s/a.parquet", 1),

@@ -272,6 +272,11 @@ path = "tests/df_scanpool.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_scansort"
+path = "tests/df_scansort.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_filelists"
 path = "tests/df_filelists.rs"
 required-features = ["datafusion"]

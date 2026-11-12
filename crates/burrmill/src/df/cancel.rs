@@ -182,12 +182,13 @@ impl ExecutionPlan for CancelExec {
             let _ = slot.set(token.clone());
         }
         let held = self.opened.as_ref().map(|opened| {
-            let r = Arc::new(
+            let r = Arc::new(super::catalog::Bookkeeping::new(
                 MemoryConsumer::new(format!("SegmentScan[{partition}]"))
                     .register(ctx.memory_pool()),
-            );
-            // Charged whether or not it fits, so the operators that can spill make room for it.
-            r.grow(super::catalog::listed(&self.inner, partition));
+                Arc::clone(ctx.memory_pool()),
+                super::catalog::headroom(&ctx),
+            ));
+            r.charge(super::catalog::listed(&self.inner, partition));
             opened.running(partition, &r);
             r
         });
