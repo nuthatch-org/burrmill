@@ -48,6 +48,9 @@ pub enum BurrmillError {
     /// balances came back empty, so presumably nobody staked anything. A nest's segment directory
     /// holds every table, so a typo in a table name is one prefix away at all times.
     NoSegments(String),
+    /// The engine was asked to open in a way that cannot work: a shared pool with no budget, a store
+    /// source opened without `open_async`. Nothing about any statement.
+    Config(String),
 }
 
 impl fmt::Display for BurrmillError {
@@ -63,6 +66,7 @@ impl fmt::Display for BurrmillError {
             Self::Substrate(m) => write!(f, "substrate error: {m}"),
             Self::Parse(m) => write!(f, "parse error: {m}"),
             Self::NoSegments(m) => write!(f, "no segments: {m}"),
+            Self::Config(m) => write!(f, "invalid engine configuration: {m}"),
         }
     }
 }

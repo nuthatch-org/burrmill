@@ -62,10 +62,19 @@ pub struct NestTable {
 /// Where an engine opened from an object store finds it.
 pub const NEST_STORE: &str = "nest://segments";
 
-/// Discover `<table>-<hash>.parquet` under `segments/`, last hyphen splitting table from hash.
+/// Discover `<table>-<hash>.parquet` under `segments/`, last hyphen splitting table from hash. A
+/// `.parquet` file with no hyphen is skipped.
 pub fn discover_tables(segments: &Path) -> crate::Result<Vec<NestTable>> {
     let mut by_table: HashMap<String, Vec<(PathBuf, u64)>> = HashMap::new();
-    for e in std::fs::read_dir(segments)?.flatten() {
+    let entries = std::fs::read_dir(segments).map_err(|e| {
+        let at = segments.display();
+        if e.kind() == std::io::ErrorKind::NotFound {
+            crate::BurrmillError::NoSegments(format!("no segments directory at {at}"))
+        } else {
+            crate::BurrmillError::Substrate(format!("cannot read {at}: {e}"))
+        }
+    })?;
+    for e in entries.flatten() {
         let p = e.path();
         let Some(stem) = p
             .file_name()
