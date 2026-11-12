@@ -137,6 +137,12 @@ pub fn folds_running() -> usize {
     fold::RUNNING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Footers the metered pass has read in this process, for a test that a statement run again reads none.
+#[doc(hidden)]
+pub fn selection_footer_reads() -> u64 {
+    catalog::SELECTION_FOOTER_READS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Local segment footers read in this process, for a test that a second engine reads none again.
 #[doc(hidden)]
 pub fn footer_reads() -> u64 {

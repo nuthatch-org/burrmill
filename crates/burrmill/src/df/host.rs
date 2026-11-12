@@ -434,6 +434,7 @@ fn footer_schemas(files: &[(PathBuf, u64)]) -> Result<Vec<SchemaRef>> {
     };
     let mut read = Vec::new();
     let mut each = Vec::with_capacity(files.len());
+    let mut parents = HashMap::new();
     for ((path, len), known) in files.iter().zip(known) {
         if let Some(s) = known {
             each.push(s);
@@ -451,6 +452,10 @@ fn footer_schemas(files: &[(PathBuf, u64)]) -> Result<Vec<SchemaRef>> {
                 ))
             })?;
         FOOTER_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // A metered statement then costs this segment without its footer.
+        if let Ok(loc) = super::catalog::local_location(path, &mut parents) {
+            super::catalog::note_sizes(loc.as_ref(), *len, meta.metadata());
+        }
         let s = intern(view_schema(meta.schema()));
         read.push(((path.clone(), *len), Arc::clone(&s)));
         each.push(s);

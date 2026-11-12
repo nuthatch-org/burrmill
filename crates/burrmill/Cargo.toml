@@ -257,6 +257,11 @@ path = "tests/df_metrics.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_metersizes"
+path = "tests/df_metersizes.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_scancpu"
 path = "tests/df_scancpu.rs"
 required-features = ["datafusion"]
