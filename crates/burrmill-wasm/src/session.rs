@@ -27,6 +27,22 @@ pub const RESULT_ROWS: usize = 5000;
 const MEMORY_BYTES: usize = 256 * 1024 * 1024;
 const TABLE: &str = "t";
 
+/// Registered functions the checked arithmetic refuses over DECIMAL, the type a money column
+/// is read as, so the model is not offered them.
+const REFUSED_OVER_DECIMAL: &[&str] = &["median", "ceil", "floor", "trunc", "gcd", "lcm"];
+
+/// DuckDB spellings the engine refuses and says so by name (docs/sql.md, Refused by name).
+const REFUSED_BY_NAME: &[&str] = &[
+    "approx_count_distinct",
+    "list_aggregate",
+    "array_aggregate",
+    "strptime",
+    "try_strptime",
+    "COLUMNS",
+    "PIVOT",
+    "UNPIVOT",
+];
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Column {
     pub name: String,
@@ -203,9 +219,20 @@ impl Session {
     }
 
     pub fn grammar(&self) -> String {
+        let spellings = Engine::duckdb_spellings();
+        let functions: Vec<String> = self
+            .engine
+            .function_names()
+            .into_iter()
+            .filter(|f| {
+                !REFUSED_OVER_DECIMAL.contains(&f.as_str()) && !spellings.contains(&f.as_str())
+            })
+            .collect();
         format!(
-            "burrmill subset v1\nSELECT and WITH only. The uploaded table is {TABLE}. No files, no catalogue, no DDL.\nFunctions: {}",
-            self.engine.function_names().join(", ")
+            "burrmill subset v1\nDuckDB dialect. SELECT and WITH only. The uploaded table is {TABLE}. No files, no catalogue, no DDL.\nDuckDB spellings admitted: {}\nRefused by name: {}\nFunctions: {}",
+            spellings.join(", "),
+            REFUSED_BY_NAME.join(", "),
+            functions.join(", ")
         )
     }
 
@@ -841,6 +868,69 @@ posted,merchant,amount
         assert_clean("cast", &cast.feedback);
         assert!(s.grammar().starts_with("burrmill subset v1\n"));
         assert_clean("grammar", &s.grammar());
+    }
+
+    #[test]
+    fn the_grammar_names_the_dialect_and_what_it_admits() {
+        let s = session();
+        let grammar = s.grammar();
+        assert!(grammar.contains("DuckDB dialect"), "{grammar}");
+        let spelled = grammar
+            .lines()
+            .find(|l| l.starts_with("DuckDB spellings"))
+            .unwrap();
+        for name in Engine::duckdb_spellings() {
+            assert!(spelled.contains(name), "{name} missing from {spelled}");
+        }
+        let functions = grammar
+            .lines()
+            .find(|l| l.starts_with("Functions:"))
+            .unwrap();
+        let listed: Vec<&str> = functions["Functions: ".len()..].split(", ").collect();
+        assert!(listed.contains(&"coalesce"), "{functions}");
+        for name in REFUSED_OVER_DECIMAL {
+            assert!(!listed.contains(name), "{name} is offered");
+        }
+    }
+
+    #[test]
+    fn the_functions_left_out_are_refused_over_decimal() {
+        let s = session();
+        for name in REFUSED_OVER_DECIMAL {
+            let args = if matches!(*name, "gcd" | "lcm") {
+                "amount, amount"
+            } else {
+                "amount"
+            };
+            let sql = format!("SELECT {name}({args}) FROM t");
+            assert!(s.query(&sql).is_err(), "{sql} runs");
+        }
+    }
+
+    #[test]
+    fn the_names_the_grammar_refuses_are_refused_by_name() {
+        let s = session();
+        for name in REFUSED_BY_NAME {
+            let sql = match *name {
+                "approx_count_distinct" => "SELECT approx_count_distinct(amount) FROM t",
+                "list_aggregate" => "SELECT list_aggregate([1, 2], 'sum')",
+                "array_aggregate" => "SELECT array_aggregate([1, 2], 'sum')",
+                "strptime" => "SELECT strptime(merchant, '%Y') FROM t",
+                "try_strptime" => "SELECT try_strptime(merchant, '%Y') FROM t",
+                "COLUMNS" => "SELECT COLUMNS('a') FROM t",
+                "PIVOT" => "PIVOT t ON merchant USING sum(amount)",
+                "UNPIVOT" => "UNPIVOT t ON amount",
+                other => panic!("no probe for {other}"),
+            };
+            let e = s.query(sql).unwrap_err();
+            assert!(
+                e.local
+                    .to_ascii_lowercase()
+                    .contains(&name.to_ascii_lowercase()),
+                "{sql}: {}",
+                e.local
+            );
+        }
     }
 
     #[test]
