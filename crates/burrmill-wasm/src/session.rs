@@ -11,7 +11,7 @@ use burrmill_ingest::{IngestReport, Issue, Locale, RowIssue, Table};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::aggregates::{filter_payload, measure_sql, ran_and_failed, skipped};
+use crate::aggregates::{bucket, filter_payload, measure_sql, ran_and_failed, skipped};
 use crate::chart::{Chart, check_chart};
 use crate::format::{
     cell_string, format_date, format_number, format_timestamp, is_ident, is_numeric,
@@ -185,7 +185,8 @@ impl Session {
 
     /// Names, types, row count, and ingest errors. `signs` and `dates` are the
     /// columns the user ticked. A sign is a word. A date range is the min and max.
-    pub fn card(&self, signs: &[String], dates: &[String]) -> Result<String, String> {
+    /// `coarse` sends the row count as a bucket, as aggregates mode sends every count.
+    pub fn card(&self, signs: &[String], dates: &[String], coarse: bool) -> Result<String, String> {
         for name in &self.names {
             check_ident(name)?;
         }
@@ -218,7 +219,11 @@ impl Session {
         }
         let mut obj = json!({
             "table": TABLE,
-            "rows": self.report.rows,
+            "rows": if coarse {
+                json!(bucket(self.report.rows))
+            } else {
+                json!(self.report.rows)
+            },
             "dialect": dialect_label(&self.report),
             "columns": columns,
             "issues": self.report.rejected.iter().map(|iss| issue_json(&self.report, &self.names, iss)).collect::<Vec<_>>(),
@@ -287,7 +292,7 @@ impl Session {
             Err(f) => return Ok(ran_and_failed(&f)),
         };
         Ok(match self.query(&measured.answer) {
-            Ok(answer) => filter_payload(&answer, &dropped),
+            Ok(answer) => filter_payload(&answer, &dropped, &measured),
             Err(f) => ran_and_failed(&f),
         })
     }
@@ -303,7 +308,7 @@ impl Session {
             Err(f) => return Ok(ran_and_failed(&f)),
         };
         Ok(match self.query(&measured.answer).await {
-            Ok(answer) => filter_payload(&answer, &dropped),
+            Ok(answer) => filter_payload(&answer, &dropped, &measured),
             Err(f) => ran_and_failed(&f),
         })
     }
@@ -935,14 +940,14 @@ posted,merchant,amount
     #[test]
     fn the_card_has_no_cell_and_a_sign_has_no_magnitude() {
         let s = session();
-        let card = s.card(&[], &[]).unwrap();
+        let card = s.card(&[], &[], false).unwrap();
         assert_clean("card", &card);
         assert!(card.contains("\"rows\":4"));
         assert!(card.contains("DECIMAL"));
-        let signed = s.card(&["amount".into()], &[]).unwrap();
+        let signed = s.card(&["amount".into()], &[], false).unwrap();
         assert_clean("sign", &signed);
         assert!(signed.contains("negative"));
-        let dated = s.card(&[], &["posted".into()]).unwrap();
+        let dated = s.card(&[], &["posted".into()], false).unwrap();
         assert!(dated.contains("2024-01-02"), "{dated}");
         assert!(dated.contains("2024-04-05"), "{dated}");
         assert!(!dated.contains("CANARY_MERCHANT_AAA"));

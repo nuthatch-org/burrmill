@@ -23,7 +23,7 @@ it. The page does the HTTP (`demo/app.js`); the crates do none.
 
 Each request to the model (`promptText` and `requestBody` in `demo/app.js`) carries:
 
-- the card (`Session::card`): table name, row count, CSV dialect (`parquet` or `json` for those
+- the card (`Session::card`): table name, row count (in aggregates mode a bucket, as below), CSV dialect (`parquet` or `json` for those
   files), each column's name, inferred type, null count and note, and ingest issues as row number,
   column and reason. No cell value.
   For a column the user ticks as a sign, one word for its sign; for one ticked as a date, its
@@ -53,9 +53,20 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
   must be one grouped read of `t`; `HAVING`, `LIMIT` and any `group_n` it wrote are removed, and
   `count(*) AS group_n` is added. Each output must be a grouping key, or `count`, `sum` or `avg` of a
   column with arithmetic, `CAST` and `round` over them; `DISTINCT` only in `count`; `FILTER` and
-  `CASE` inside an aggregate are refused, as is a CTE named `t`. The feedback (`filter_payload`) is
-  the groups with `group_n` of at least k and the number dropped. Anything else sends no group and
-  a reason. A statement that fails while reading rows sends only that it failed, with no kind, and
+  `CASE` inside an aggregate are refused, as is a CTE named `t`. A count may stand only as itself
+  (cast or rounded) or as what a `sum` or `avg` is divided by: `count(*) * 7` or `count(*) - 45` is
+  refused. The feedback (`filter_payload`) is the groups with `group_n` of at least k and the
+  number dropped. Anything else sends no group and a reason.
+  Every count leaves as a bucket (`bucket`): `0-9` below k, then `10-99`, `100-999` and so on. That
+  is each group's `group_n` and each count the model wrote, the number of groups dropped, and the
+  card's row count. One member added to or taken from a group changes nothing sent unless the
+  count sits exactly on an edge, such as 99 and 100; that is the same bounded leak as comparing two
+  asks. An answer with no row and one whose groups were all dropped send the same thing, the
+  groups go in one order whatever `ORDER BY` said, and a `HAVING` over a count or a limit after
+  `ORDER BY` a count is not applied to what is sent (`not_applied` says so), since either would
+  pick groups by an exact count. `sum` and `avg` are sent exact: they move with one member, so
+  `sum(amount)` of a group chosen by a key over one person still answers a question about that
+  person, and `sum(x) / avg(x)` is the exact count. The buckets close only the count. A statement that fails while reading rows sends only that it failed, with no kind, and
   one `measure_sql` refuses gets its refusal whether it failed or not. Once the groups have been
   sent, a later attempt that fails or finds no rows ends the question on the page. Whether a
   passed statement fails is still one bit per attempt about the data, and can be about one member:
@@ -135,6 +146,7 @@ From `demo/index.html` and `demo/app.js`:
 - The page: `demo/egress.mjs` drives the page in Chromium with Playwright and fails if a canary cell
   appears in any request body or in the log, if the key is in a body, or if any host other than
   localhost and `api.anthropic.com` is contacted. `aggregates.mjs`, `pseudonym.mjs`, `local.mjs`,
-  `send.mjs`, `warn.mjs`, `offline.mjs` and `persist.mjs` cover the other modes and controls, and
+  `send.mjs`, `warn.mjs`, `offline.mjs` and `persist.mjs` cover the other modes and controls,
+  `guesses.mjs` asks about one person both ways and fails if the two sent different requests, and
   `a11y.mjs` fails on any axe violation. CI's `demo` job builds the engine with `demo/build.sh` and
   runs every `demo/*.mjs`.

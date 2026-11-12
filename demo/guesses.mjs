@@ -92,6 +92,13 @@ const tokened = await ask(people, 'pseudonymised', literal(right));
 same('a literal that guesses a value', tokened, await ask(people, 'pseudonymised', literal(wrong)), [right, wrong]);
 if (tokened.some((body) => /CUSTOMER_\d/.test(body))) bad('a literal came back as a token');
 
+for (const sql of [
+  "SELECT (merchant <> 'CANARY_X' OR amount > 2) AS g, count(*) AS n FROM t GROUP BY 1",
+  "SELECT merchant, count(*) AS n FROM t WHERE merchant = 'CANARY_X' AND amount < 2 GROUP BY merchant",
+]) {
+  same(sql, await ask(shops('1.00'), 'aggregates', sql), await ask(shops('3.00'), 'aggregates', sql));
+}
+
 await browser.close();
 if (failed) process.exit(1);
 console.log('guesses ok');

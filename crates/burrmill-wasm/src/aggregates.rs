@@ -3,9 +3,9 @@
 
 use sqlparser::ast::{
     BinaryOperator, DuplicateTreatment, Expr, Function, FunctionArg, FunctionArgExpr,
-    FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, ObjectName, ObjectNamePart, Query,
-    Select, SelectItem, SetExpr, Statement, TableFactor, UnaryOperator, Value as SqlValue, Visit,
-    Visitor,
+    FunctionArgumentList, FunctionArguments, GroupByExpr, Ident, ObjectName, ObjectNamePart,
+    OrderByKind, Query, Select, SelectItem, SetExpr, Statement, TableFactor, UnaryOperator,
+    Value as SqlValue, Visit, Visitor,
 };
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
@@ -23,12 +23,35 @@ const UNMEASURED: &str = "group size was not measured";
 const NOT_SUMMARY: &str = "only grouping keys and count, sum or avg of a column leave";
 const SHADOWED: &str = "a CTE named t is not the upload";
 const FAILED: &str = "the statement failed while reading rows";
+const COUNTED: &str = "a count leaves only as itself, or as what a sum or avg is divided by";
+const HAVING_COUNT: &str = "HAVING over a count";
+const LIMIT_COUNT: &str = "ORDER BY a count with a limit";
 
 pub(crate) struct Measured {
     /// The statement as written, with `count(*) AS group_n` added to each group.
     pub answer: String,
     /// How many groups are under k, before `HAVING` or a limit can hide one.
     pub dropped: String,
+    /// The output columns that are counts, `group_n` last, which leave as a [`bucket`].
+    pub counts: Vec<usize>,
+    /// What of the statement was not applied, because it would choose groups by an exact count.
+    pub unapplied: Vec<&'static str>,
+}
+
+/// The size `n` leaves as: below k, then one order of magnitude, `10-99`, `100-999` and so on. One
+/// member moves a count across a bucket only when the count sits on an edge.
+pub(crate) fn bucket(n: u64) -> String {
+    if n < AGGREGATE_K {
+        return format!("0-{}", AGGREGATE_K - 1);
+    }
+    let mut low = AGGREGATE_K;
+    while n / low >= 10 {
+        low *= 10;
+    }
+    format!(
+        "{low}-{}",
+        low.checked_mul(10).map_or(u64::MAX, |high| high - 1)
+    )
 }
 
 /// Rewrite a grouped read of `t` so `count(*) AS group_n` is measured here.
@@ -49,7 +72,37 @@ pub(crate) fn measure_sql(sql: &str) -> Result<Measured, &'static str> {
         return Err(SKIP);
     };
     select.projection.retain(|item| !alias_is_group_n(item));
+    let uses: Vec<CountUse> = select.projection.iter().map(item_use).collect();
+    if uses.contains(&CountUse::Bad) {
+        return Err(COUNTED);
+    }
+    // A name or position that stands for a count, as `HAVING` and `ORDER BY` may refer to one.
+    let counted: Vec<(usize, Option<String>)> = select
+        .projection
+        .iter()
+        .zip(&uses)
+        .enumerate()
+        .filter(|(_, (_, u))| **u != CountUse::Free)
+        .map(|(i, (item, _))| (i, item_alias(item)))
+        .collect();
+    let mut unapplied = Vec::new();
+    if select
+        .having
+        .as_ref()
+        .is_some_and(|h| names_count(h, &counted, false))
+    {
+        select.having = None;
+        unapplied.push(HAVING_COUNT);
+    }
+    let mut counts: Vec<usize> = (0..uses.len())
+        .filter(|&i| uses[i] == CountUse::Whole)
+        .collect();
+    counts.push(uses.len());
     select.projection.push(count_star());
+    if orders_by_count(&query, &counted) {
+        clear_limits(&mut query);
+        unapplied.push(LIMIT_COUNT);
+    }
     let answer = Statement::Query(query.clone()).to_string();
     if let Some(select) = outermost_mut(&mut query.body) {
         select.having = None;
@@ -58,11 +111,152 @@ pub(crate) fn measure_sql(sql: &str) -> Result<Measured, &'static str> {
     let dropped = format!(
         "SELECT count(*) AS dropped FROM ({query}) AS measured WHERE group_n < {AGGREGATE_K}"
     );
-    Ok(Measured { answer, dropped })
+    Ok(Measured {
+        answer,
+        dropped,
+        counts,
+        unapplied,
+    })
 }
 
-/// Whether a grouped read failed can turn on one member (`WHERE amount / (amount - 5) > 0`), so
-/// nothing of how it failed goes with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CountUse {
+    /// No count in it.
+    Free,
+    /// A count, cast or rounded, which leaves as a bucket.
+    Whole,
+    /// A sum or avg divided by a count: the mean, which the sum and avg already say.
+    Mean,
+    /// Anything else over a count, such as `count(*) * 7` or `count(*) - 45`, which would put a
+    /// bucket's edge wherever the statement chose.
+    Bad,
+}
+
+fn item_use(item: &SelectItem) -> CountUse {
+    match item {
+        SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => count_use(expr),
+        _ => CountUse::Free,
+    }
+}
+
+fn item_alias(item: &SelectItem) -> Option<String> {
+    match item {
+        SelectItem::ExprWithAlias { alias, .. } => Some(alias.value.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+fn count_use(expr: &Expr) -> CountUse {
+    use CountUse::{Bad, Free, Mean, Whole};
+    match expr {
+        Expr::Nested(inner) | Expr::Cast { expr: inner, .. } => count_use(inner),
+        Expr::UnaryOp {
+            op: UnaryOperator::Plus,
+            expr,
+        } => count_use(expr),
+        Expr::UnaryOp { expr, .. } => match count_use(expr) {
+            Free => Free,
+            Mean => Mean,
+            _ => Bad,
+        },
+        Expr::BinaryOp { left, op, right } => match (count_use(left), op, count_use(right)) {
+            (Free, _, Free) => Free,
+            (Free, BinaryOperator::Divide, Whole) if has_summary(left) => Mean,
+            (Mean, _, Free | Mean) | (Free, _, Mean) => Mean,
+            _ => Bad,
+        },
+        Expr::Function(function) if bare_name(function).as_deref() == Some("count") => Whole,
+        Expr::Function(function) if bare_name(function).as_deref() == Some("round") => {
+            let FunctionArguments::List(list) = &function.args else {
+                return Free;
+            };
+            // `rounded` admits only a literal number of digits, so `round(count(*), -1)` is refused.
+            match list.args.first() {
+                Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(inner))) => count_use(inner),
+                _ => Free,
+            }
+        }
+        _ => Free,
+    }
+}
+
+/// Whether `expr` holds a `sum` or `avg`, so that dividing it by a count is a mean, not `1 / n`.
+fn has_summary(expr: &Expr) -> bool {
+    struct Has(bool);
+    impl Visitor for Has {
+        type Break = ();
+
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+            if let Expr::Function(function) = expr
+                && matches!(bare_name(function).as_deref(), Some("sum" | "avg"))
+            {
+                self.0 = true;
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let mut has = Has(false);
+    let _ = expr.visit(&mut has);
+    has.0
+}
+
+/// Whether `expr` names a count: the function, or the alias or (with `ordinals`) the position of
+/// an output that holds one.
+fn names_count(expr: &Expr, counted: &[(usize, Option<String>)], ordinals: bool) -> bool {
+    if ordinals
+        && let Expr::Value(v) = expr
+        && let SqlValue::Number(n, _) = &v.value
+        && let Ok(n) = n.parse::<usize>()
+    {
+        return counted.iter().any(|(i, _)| *i + 1 == n);
+    }
+    struct Named<'a>(&'a [(usize, Option<String>)], bool);
+    impl Visitor for Named<'_> {
+        type Break = ();
+
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+            let hit = match expr {
+                Expr::Function(function) => bare_name(function).as_deref() == Some("count"),
+                Expr::Identifier(id) => {
+                    let name = id.value.to_ascii_lowercase();
+                    self.0
+                        .iter()
+                        .any(|(_, alias)| alias.as_deref() == Some(&name))
+                }
+                _ => false,
+            };
+            if hit {
+                self.1 = true;
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let mut named = Named(counted, false);
+    let _ = expr.visit(&mut named);
+    named.1
+}
+
+/// An `ORDER BY` over a count that a limit then cuts, at any level of the statement.
+fn orders_by_count(query: &Query, counted: &[(usize, Option<String>)]) -> bool {
+    let limited = query.limit_clause.is_some() || query.fetch.is_some();
+    let ordered = match query.order_by.as_ref().map(|o| &o.kind) {
+        Some(OrderByKind::All(_)) => true,
+        Some(OrderByKind::Expressions(keys)) => {
+            keys.iter().any(|key| names_count(&key.expr, counted, true))
+        }
+        None => false,
+    };
+    (limited && ordered)
+        || match query.body.as_ref() {
+            SetExpr::Query(inner) => orders_by_count(inner, counted),
+            _ => false,
+        }
+}
+
+/// Whether a grouped read failed can turn on one member (`error()` in a `WHERE`), so nothing of
+/// how it failed goes with it.
 pub(crate) fn ran_and_failed(failure: &Failure) -> String {
     skipped(if failure.before_rows {
         UNMEASURED
@@ -81,15 +275,10 @@ pub(crate) fn skipped(reason: &str) -> String {
     .to_string()
 }
 
-pub(crate) fn filter_payload(out: &QueryOut, measured: &QueryOut) -> String {
-    let Some(idx) = out
-        .columns
-        .iter()
-        .rposition(|c| c.name.eq_ignore_ascii_case("group_n") && c.type_name == "INTEGER")
-    else {
-        return skipped(UNMEASURED);
-    };
-    let Some(dropped) = measured
+/// Every count in it is a [`bucket`]. An answer with no row and one whose groups are all under k
+/// read alike, and the groups go in one order whatever `ORDER BY` said.
+pub(crate) fn filter_payload(out: &QueryOut, dropped: &QueryOut, measured: &Measured) -> String {
+    let Some(dropped) = dropped
         .rows
         .first()
         .and_then(|row| row.first())
@@ -99,29 +288,45 @@ pub(crate) fn filter_payload(out: &QueryOut, measured: &QueryOut) -> String {
         return skipped(UNMEASURED);
     };
     let mut groups = Vec::new();
-    for row in &out.rows {
-        if row
-            .get(idx)
-            .and_then(|cell| cell.as_deref())
-            .and_then(parse_size)
-            .is_some_and(|n| n >= AGGREGATE_K)
-        {
-            groups.push(row_object(&out.columns, row));
+    if !out.rows.is_empty() {
+        let Some(idx) = out
+            .columns
+            .iter()
+            .rposition(|c| c.name.eq_ignore_ascii_case("group_n") && c.type_name == "INTEGER")
+        else {
+            return skipped(UNMEASURED);
+        };
+        for row in &out.rows {
+            if row
+                .get(idx)
+                .and_then(|cell| cell.as_deref())
+                .and_then(parse_size)
+                .is_some_and(|n| n >= AGGREGATE_K)
+            {
+                groups.push(row_object(&out.columns, row, &measured.counts, idx));
+            }
         }
     }
-    let columns: Vec<_> = out
-        .columns
-        .iter()
-        .map(|c| json!({ "name": c.name, "type": c.type_name }))
-        .collect();
-    json!({
+    groups.sort_by_cached_key(Value::to_string);
+    let any = !groups.is_empty();
+    let mut payload = json!({
         "k": AGGREGATE_K,
-        "dropped": dropped,
-        "columns": columns,
+        "dropped": bucket(dropped),
         "groups": groups,
         "truncated": out.truncated,
-    })
-    .to_string()
+    });
+    // The columns are known only from a row, so they go only with a group.
+    if any {
+        payload["columns"] = out
+            .columns
+            .iter()
+            .map(|c| json!({ "name": c.name, "type": c.type_name }))
+            .collect();
+    }
+    if !measured.unapplied.is_empty() {
+        payload["not_applied"] = json!(measured.unapplied);
+    }
+    payload.to_string()
 }
 
 fn parse_size(text: &str) -> Option<u64> {
@@ -131,16 +336,24 @@ fn parse_size(text: &str) -> Option<u64> {
     text.parse().ok()
 }
 
-fn row_object(columns: &[crate::session::Column], row: &[Option<String>]) -> Value {
+fn row_object(
+    columns: &[crate::session::Column],
+    row: &[Option<String>],
+    counts: &[usize],
+    group_n: usize,
+) -> Value {
     let mut obj = serde_json::Map::new();
-    for (column, cell) in columns.iter().zip(row) {
-        obj.insert(
-            column.name.clone(),
-            match cell {
-                Some(text) => Value::String(text.clone()),
-                None => Value::Null,
-            },
-        );
+    for (i, (column, cell)) in columns.iter().zip(row).enumerate() {
+        let value = match cell {
+            Some(text) if i == group_n || counts.contains(&i) => text
+                .parse::<f64>()
+                .ok()
+                .filter(|n| n.is_finite() && *n >= 0.0)
+                .map_or(Value::Null, |n| Value::String(bucket(n as u64))),
+            Some(text) => Value::String(text.clone()),
+            None => Value::Null,
+        };
+        obj.insert(column.name.clone(), value);
     }
     Value::Object(obj)
 }
@@ -575,18 +788,18 @@ mod tests {
         assert_no("grouped", &payload, &forbidden);
         let value: Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["k"], AGGREGATE_K);
-        assert_eq!(value["dropped"], AGGREGATE_K - 1);
+        assert_eq!(value["dropped"], "0-9");
         assert_eq!(value["groups"].as_array().unwrap().len(), 1);
         assert_eq!(value["groups"][0]["merchant"], "KEPT_GROUP");
         assert_eq!(value["groups"][0]["total"], "80.00");
-        assert_eq!(value["groups"][0]["group_n"], AGGREGATE_K.to_string());
+        assert_eq!(value["groups"][0]["group_n"], "10-99");
 
         let lied = "SELECT merchant, sum(amount) AS total, 10 AS group_n FROM t GROUP BY merchant";
         let lied_payload = s.aggregate_feedback(lied).unwrap();
         assert_no("literal group_n", &lied_payload, &forbidden);
         let lied_value: Value = serde_json::from_str(&lied_payload).unwrap();
         assert_eq!(lied_value["groups"].as_array().unwrap().len(), 1);
-        assert_eq!(lied_value["dropped"], AGGREGATE_K - 1);
+        assert_eq!(lied_value["dropped"], "0-9");
 
         let wrapped = "WITH bound AS (SELECT 1 AS n) SELECT merchant, sum(amount) AS total FROM t WHERE (SELECT n FROM bound) = 1 GROUP BY merchant";
         let wrapped_payload = s.aggregate_feedback(wrapped).unwrap();
@@ -644,7 +857,7 @@ mod tests {
                 1,
                 "{sql}: {payload}"
             );
-            assert_eq!(value["dropped"], AGGREGATE_K - 1, "{sql}: {payload}");
+            assert_eq!(value["dropped"], "0-9", "{sql}: {payload}");
         }
     }
 
@@ -680,7 +893,7 @@ mod tests {
             ),
             ("ORDER BY total DESC LIMIT 1", vec!["BIG_B"]),
             ("ORDER BY total LIMIT 1", vec![]),
-            ("HAVING count(*) < 5", vec![]),
+            ("HAVING count(*) < 5", vec!["BIG_A", "BIG_B", "BIG_C"]),
         ];
         for (tail, want) in cases {
             let sql = format!("{base} {tail}");
@@ -694,12 +907,130 @@ mod tests {
                 .map(|g| g["merchant"].as_str().unwrap())
                 .collect();
             assert_eq!(got, want, "{sql}: {payload}");
-            assert_eq!(value["dropped"], 1, "{sql}: {payload}");
+            assert_eq!(value["dropped"], "0-9", "{sql}: {payload}");
         }
         let probe = format!("{base} HAVING max(amount) > 4");
         let payload = s.aggregate_feedback(&probe).unwrap();
         let value: Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(value["omitted"], NOT_SUMMARY, "{payload}");
+    }
+
+    /// Fifty ordinary rows and, unless `member` is `None`, one row for `CANARY_X` of that amount.
+    fn with_member(member: Option<&str>) -> Session {
+        let mut lines = vec!["merchant,amount".to_string()];
+        for n in 0..50 {
+            lines.push(format!("SHOP_{:02},5.00", n % 4));
+        }
+        if let Some(amount) = member {
+            lines.push(format!("CANARY_X,{amount}"));
+        }
+        let table = burrmill_ingest::ingest_bytes(
+            lines.join("\n").as_bytes(),
+            FormatHint::Sniff,
+            &Budget::untrusted(),
+        )
+        .unwrap();
+        Session::open(table).unwrap()
+    }
+
+    #[test]
+    fn one_member_does_not_change_what_is_sent() {
+        let questions = [
+            "SELECT (merchant <> 'CANARY_X' OR amount > 2) AS g, count(*) AS n FROM t GROUP BY 1",
+            "SELECT (merchant <> 'CANARY_X' OR amount > 2) AS g, count(merchant) AS n, count(DISTINCT merchant) AS m FROM t GROUP BY 1",
+            "SELECT (merchant <> 'CANARY_X' OR amount > 2) AS g, CAST(count(*) AS VARCHAR) AS n FROM t GROUP BY 1",
+            "SELECT merchant, count(*) AS n FROM t WHERE merchant = 'CANARY_X' AND amount < 2 GROUP BY merchant",
+            "SELECT merchant, count(*) AS n FROM t WHERE merchant <> 'CANARY_X' OR amount < 2 GROUP BY merchant",
+        ];
+        let below = with_member(Some("1.00"));
+        let above = with_member(Some("3.00"));
+        for sql in questions {
+            let a = below.aggregate_feedback(sql).unwrap();
+            let b = above.aggregate_feedback(sql).unwrap();
+            assert_eq!(a, b, "{sql}");
+            assert!(!a.contains("CANARY_X"), "{sql}: {a}");
+            let value: Value = serde_json::from_str(&a).unwrap();
+            assert!(value["omitted"].is_null(), "{sql}: {a}");
+        }
+        let card = |s: &Session| s.card(&[], &[], true).unwrap();
+        assert_eq!(card(&with_member(None)), card(&below));
+        assert!(
+            card(&below).contains(r#""rows":"10-99""#),
+            "{}",
+            card(&below)
+        );
+        assert!(
+            below
+                .card(&[], &[], false)
+                .unwrap()
+                .contains(r#""rows":51"#)
+        );
+    }
+
+    #[test]
+    fn a_count_leaves_only_as_itself_and_never_chooses_a_group() {
+        let s = with_member(Some("1.00"));
+        for sql in [
+            "SELECT merchant, count(*) * 7 AS n FROM t GROUP BY merchant",
+            "SELECT merchant, count(*) - 45 AS n FROM t GROUP BY merchant",
+            "SELECT merchant, 1 / count(*) AS n FROM t GROUP BY merchant",
+            "SELECT merchant, sum(amount) + count(*) AS n FROM t GROUP BY merchant",
+            "SELECT merchant, -count(*) AS n FROM t GROUP BY merchant",
+        ] {
+            let payload = s.aggregate_feedback(sql).unwrap();
+            let value: Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(value["omitted"], COUNTED, "{sql}: {payload}");
+            assert!(!s.admits("aggregates", sql), "{sql}");
+        }
+        let all = s
+            .aggregate_feedback("SELECT merchant, count(*) AS n FROM t GROUP BY merchant")
+            .unwrap();
+        for (sql, unapplied) in [
+            (
+                "SELECT merchant, count(*) AS n FROM t GROUP BY merchant HAVING count(*) >= 13",
+                HAVING_COUNT,
+            ),
+            (
+                "SELECT merchant, count(*) AS n FROM t GROUP BY merchant HAVING n < 13",
+                HAVING_COUNT,
+            ),
+            (
+                "SELECT merchant, count(*) AS n FROM t GROUP BY merchant ORDER BY n DESC LIMIT 1",
+                LIMIT_COUNT,
+            ),
+            (
+                "SELECT merchant, count(*) AS n FROM t GROUP BY merchant ORDER BY 2 LIMIT 1",
+                LIMIT_COUNT,
+            ),
+            (
+                "SELECT merchant, count(*) AS n FROM t GROUP BY merchant ORDER BY count(*) LIMIT 2 OFFSET 1",
+                LIMIT_COUNT,
+            ),
+        ] {
+            let payload = s.aggregate_feedback(sql).unwrap();
+            let mut value: Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(value["not_applied"], json!([unapplied]), "{sql}: {payload}");
+            value.as_object_mut().unwrap().remove("not_applied");
+            assert_eq!(value.to_string(), all, "{sql}");
+        }
+        let ordered = s
+            .aggregate_feedback(
+                "SELECT merchant, count(*) AS n FROM t GROUP BY merchant ORDER BY n DESC",
+            )
+            .unwrap();
+        assert_eq!(ordered, all);
+        let mean = s
+            .aggregate_feedback(
+                "SELECT merchant, round(sum(amount) / count(*), 2) AS mean FROM t GROUP BY merchant",
+            )
+            .unwrap();
+        assert!(mean.contains(r#""mean":"5""#), "{mean}");
+        assert_eq!(bucket(0), "0-9");
+        assert_eq!(bucket(9), "0-9");
+        assert_eq!(bucket(10), "10-99");
+        assert_eq!(bucket(999), "100-999");
+        assert_eq!(bucket(1000), "1000-9999");
+        assert_eq!(bucket(u64::MAX), format!("{}-{}", 10u64.pow(19), u64::MAX));
     }
 
     #[test]

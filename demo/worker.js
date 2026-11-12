@@ -38,7 +38,11 @@ async function handle(msg) {
   }
   if (msg.op === 'card') {
     return {
-      card: session.card(JSON.stringify(msg.signs || []), JSON.stringify(msg.dates || [])),
+      card: session.card(
+        JSON.stringify(msg.signs || []),
+        JSON.stringify(msg.dates || []),
+        Boolean(msg.coarse),
+      ),
       grammar: session.grammar(),
     };
   }

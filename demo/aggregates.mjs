@@ -116,7 +116,7 @@ if (bodies[0] && (bodies[0].includes('KEPT_GROUP') || bodies[0].includes('CANARY
   bad('first request already had a group value');
 }
 const second = bodies[1] || '';
-if (!second.includes('\\"dropped\\":9') && !second.includes('"dropped":9')) {
+if (!second.includes('\\"dropped\\":\\"0-9\\"') && !second.includes('"dropped":"0-9"')) {
   bad('dropped count missing');
 }
 if (!second.includes('KEPT_GROUP')) bad('kept group missing');

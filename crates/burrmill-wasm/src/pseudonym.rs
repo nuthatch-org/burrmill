@@ -1301,7 +1301,7 @@ OTHER_MERCHANT,canary.two@example.com,DE89370400440532013000,+359 888 100002,-3.
                 ("phone".into(), "phone"),
             ]
         );
-        let card = s.card(&[], &[]).unwrap();
+        let card = s.card(&[], &[], false).unwrap();
         assert_no("card", &card);
     }
 

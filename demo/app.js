@@ -150,6 +150,8 @@ function promptText(question, card, grammar, feedback, previousSql, mode, identi
         ', and how many groups were dropped.',
       'A smaller group is not in that list. Rows that are not groups are not sent.',
       'group_n is the measured size of a group.',
+      'Every count, group_n, the number dropped and the row count of t come back as a range such as 10-99.',
+      'A count leaves only as itself or as what a sum or avg is divided by. HAVING over a count, and a limit after ORDER BY a count, are not applied to what is sent.',
     );
   }
   if (mode === 'pseudonymised') {
@@ -237,7 +239,7 @@ function dropStatus(text) {
   } catch {
     return '';
   }
-  if (typeof payload.dropped === 'number') {
+  if (typeof payload.dropped === 'string') {
     return payload.dropped + ' groups under ' + payload.k + ' were left out of the request.';
   }
   if (payload.omitted) return 'No groups were sent.';
@@ -933,7 +935,11 @@ async function ask() {
     if (mode === 'local-model') holdLocal();
     const identifiers = mode === 'pseudonymised' ? ticked('identifier') : [];
     await call('bind', { identifiers });
-    const packed = await call('card', { signs: ticked('sign'), dates: ticked('date') });
+    const packed = await call('card', {
+      signs: ticked('sign'),
+      dates: ticked('date'),
+      coarse: mode === 'aggregates',
+    });
     let rows = '';
     if (mode === 'local-model') {
       const dumped = await call('query', { sql: 'SELECT * FROM t' });
