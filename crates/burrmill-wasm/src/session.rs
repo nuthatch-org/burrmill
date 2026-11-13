@@ -1,6 +1,8 @@
 //! One uploaded table, named `t`, and the card the page is allowed to send.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use arrow::array::{Array, AsArray};
@@ -18,7 +20,7 @@ use crate::format::{
     reserved_suffix, type_name,
 };
 use crate::narrate::narrate_with;
-use crate::pseudonym::{self, TokenMap};
+use crate::pseudonym::{self, Deal, TokenMap};
 use crate::redact::redact;
 
 /// How many result rows the page is handed. The engine's memory budget is what
@@ -89,9 +91,11 @@ pub struct Session {
     marked: BTreeSet<String>,
     tokens: TokenMap,
     withheld: BTreeSet<String>,
-    /// `t` with marked values as their tokens, which pseudonymised feedback reads.
+    /// `t` with marked values as `prefix` and their id, which pseudonymised feedback reads.
     tokenised: Option<Engine>,
-    pub(crate) order: fn(&mut [u64]),
+    pub(crate) prefix: String,
+    deal: RefCell<Deal>,
+    pub(crate) random: fn(&mut [u8]) -> bool,
 }
 
 impl Session {
@@ -117,10 +121,12 @@ impl Session {
             tokens: TokenMap::default(),
             withheld: BTreeSet::new(),
             tokenised: None,
+            prefix: String::new(),
+            deal: RefCell::default(),
             #[cfg(not(test))]
-            order: pseudonym::shuffled,
+            random: pseudonym::random,
             #[cfg(test)]
-            order: pseudonym::row_order,
+            random: pseudonym::zeros,
         };
         session.reregister()?;
         Ok(session)
@@ -313,10 +319,12 @@ impl Session {
         })
     }
 
-    /// Replace the token map. An empty list clears it, so a later schema or
-    /// aggregates question neither restores a token nor sends one.
-    /// The same marks again keep their binding: dealing it scans the table and copies it.
+    /// Start an ask: every token is dealt afresh, so no token names the same value in two asks.
+    /// An empty list clears the map, so a later schema or aggregates question neither restores a
+    /// token nor sends one. The same marks again keep the copy, which scanning and copying the
+    /// table would otherwise rebuild.
     pub fn bind(&mut self, identifiers: &[String]) {
+        *self.deal.get_mut() = Deal::default();
         let marked: BTreeSet<String> = self
             .names
             .iter()
@@ -327,7 +335,7 @@ impl Session {
             return;
         }
         self.marked = marked;
-        self.tokens = pseudonym::assign(&self.names, &self.marked, &self.batches, self.order);
+        self.tokens = pseudonym::assign(&self.names, &self.marked, &self.batches);
         self.withheld = pseudonym::withheld(&self.names, &self.marked, &self.batches, &self.tokens);
         self.tokenised = None;
         if !self.marked.is_empty() {
@@ -336,7 +344,16 @@ impl Session {
         }
     }
 
-    fn tokenised_engine(&self) -> Result<Engine, String> {
+    fn tokenised_engine(&mut self) -> Result<Engine, String> {
+        let mut nonce = [0u8; 16];
+        if !(self.random)(&mut nonce) {
+            return Err(pseudonym::UNDEALT.into());
+        }
+        self.prefix = nonce.iter().fold(String::from("ID_"), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+        self.prefix.push('_');
         let mut out = Vec::with_capacity(self.batches.len());
         for batch in &self.batches {
             let batch = rename_batch(batch, &self.names)?;
@@ -345,6 +362,7 @@ impl Session {
                 &self.names,
                 &self.marked,
                 &self.tokens,
+                &self.prefix,
             )?);
         }
         let mut engine = Engine::open_empty_within(MEMORY_BYTES).map_err(|e| e.to_string())?;
@@ -378,7 +396,7 @@ impl Session {
             return Ok(pseudonym::omitted(&identifiers, pseudonym::NONE_MARKED));
         };
         match self.query_on(tokenised, sql) {
-            Ok(out) => Ok(pseudonym::payload(&identifiers, &out)),
+            Ok(out) => Ok(self.dealt(&identifiers, &out)),
             Err(f) => Ok(f.feedback),
         }
     }
@@ -397,7 +415,7 @@ impl Session {
             return Ok(pseudonym::omitted(&identifiers, pseudonym::NONE_MARKED));
         };
         match self.query_on(tokenised, sql).await {
-            Ok(out) => Ok(pseudonym::payload(&identifiers, &out)),
+            Ok(out) => Ok(self.dealt(&identifiers, &out)),
             Err(f) => Ok(f.feedback),
         }
     }
@@ -416,8 +434,21 @@ impl Session {
             narration,
             group,
             decimal,
-            self.tokens.restorations(),
+            self.deal.borrow().restorations(),
         )
+    }
+
+    /// The payload in this ask's tokens. Only a token sent in this ask is ever restored.
+    fn dealt(&self, identifiers: &[String], out: &QueryOut) -> String {
+        pseudonym::payload(
+            identifiers,
+            out,
+            &self.prefix,
+            &self.tokens,
+            &mut self.deal.borrow_mut(),
+            self.random,
+        )
+        .unwrap_or_else(|| pseudonym::omitted(identifiers, pseudonym::UNDEALT))
     }
 
     /// Whether the mode's check passes `sql`, from the statement and the marks alone. Only then may

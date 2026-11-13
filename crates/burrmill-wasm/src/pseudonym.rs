@@ -28,6 +28,7 @@ const FILTER: &str = "an identifier column is used to choose rows";
 const ORDER: &str = "an identifier column is used to order rows";
 const UNTOKENISED: &str = "an identifier value was not tokenised";
 const NOT_ONE: &str = "the statement was not one query";
+pub(crate) const UNDEALT: &str = "no random number was to be had, so no token was dealt";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -52,11 +53,11 @@ pub struct Proposal {
     pub kind: &'static str,
 }
 
-/// `CUSTOMER_N` assigned in first-seen order. `forward` is the value, `back` restores it.
+/// Each marked value's id, in first-seen order. The ids never leave: `Deal` numbers the tokens.
 #[derive(Clone, Debug, Default)]
 pub struct TokenMap {
-    forward: BTreeMap<String, String>,
-    back: BTreeMap<String, String>,
+    forward: BTreeMap<String, u64>,
+    values: Vec<String>,
     /// Sorted hashes of the values of four bytes or more, one list per byte length.
     lengths: Vec<(usize, Vec<u64>)>,
 }
@@ -70,12 +71,8 @@ fn window_hash(bytes: &[u8]) -> u64 {
 }
 
 impl TokenMap {
-    pub fn token(&self, value: &str) -> Option<&str> {
-        self.forward.get(value).map(String::as_str)
-    }
-
-    pub fn restorations(&self) -> &BTreeMap<String, String> {
-        &self.back
+    pub fn id(&self, value: &str) -> Option<u64> {
+        self.forward.get(value).copied()
     }
 
     /// A cell that contains a tokenised value without being one.
@@ -128,10 +125,35 @@ impl TokenMap {
         }
         false
     }
+}
 
-    fn insert(&mut self, value: String, token: String) {
-        self.back.insert(token.clone(), value.clone());
-        self.forward.insert(value, token);
+/// One ask's tokens. Each id gets a `CUSTOMER_N` at random the first time a payload sends it, so
+/// the same value has an unrelated token in the next ask. A partial Fisher-Yates over 1..=len.
+#[derive(Debug, Default)]
+pub struct Deal {
+    dealt: BTreeMap<u64, String>,
+    back: BTreeMap<String, String>,
+    /// Slots of the shuffle a swap has written to; any other slot `i` holds `i`.
+    moved: BTreeMap<u64, u64>,
+}
+
+impl Deal {
+    pub fn restorations(&self) -> &BTreeMap<String, String> {
+        &self.back
+    }
+
+    fn deal(&mut self, id: u64, word: u64, tokens: &TokenMap) {
+        let at = self.dealt.len() as u64;
+        let pick = at + word % (tokens.values.len() as u64 - at);
+        let number = self.moved.get(&pick).copied().unwrap_or(pick);
+        let displaced = self.moved.remove(&at).unwrap_or(at);
+        if pick != at {
+            self.moved.insert(pick, displaced);
+        }
+        let token = format!("CUSTOMER_{}", number + 1);
+        self.back
+            .insert(token.clone(), tokens.values[id as usize].clone());
+        self.dealt.insert(id, token);
     }
 }
 
@@ -156,17 +178,10 @@ pub fn proposals(
     out
 }
 
-/// The same value keeps one token, including across columns, so a later query
-/// still names that entity. `order` deals the numbers: row order would tell the
-/// model where a value sits in the file, and be the same at every bind.
-pub fn assign(
-    names: &[String],
-    marked: &BTreeSet<String>,
-    batches: &[RecordBatch],
-    order: fn(&mut [u64]),
-) -> TokenMap {
+/// The same value keeps one id, including across columns, so within an ask a later query still
+/// names that entity.
+pub fn assign(names: &[String], marked: &BTreeSet<String>, batches: &[RecordBatch]) -> TokenMap {
     let mut map = TokenMap::default();
-    let mut values = Vec::new();
     for batch in batches {
         for r in 0..batch.num_rows() {
             for (i, name) in names.iter().enumerate() {
@@ -179,16 +194,10 @@ pub fn assign(
                 if value.is_empty() || map.forward.contains_key(&value) {
                     continue;
                 }
-                map.forward.insert(value.clone(), String::new());
-                values.push(value);
+                map.forward.insert(value.clone(), map.values.len() as u64);
+                map.values.push(value);
             }
         }
-    }
-    let mut numbers: Vec<u64> = (1..=values.len() as u64).collect();
-    order(&mut numbers);
-    map.forward.clear();
-    for (value, n) in values.into_iter().zip(numbers) {
-        map.insert(value, format!("CUSTOMER_{n}"));
     }
     let mut lengths: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
     for value in map.forward.keys().filter(|value| value.len() >= 4) {
@@ -206,22 +215,17 @@ pub fn assign(
     map
 }
 
-/// A Fisher-Yates shuffle from the platform's generator. If that fails the
-/// numbers stay in row order, which hides values as before.
-pub fn shuffled(numbers: &mut [u64]) {
-    let mut bytes = vec![0u8; numbers.len() * 8];
-    if getrandom::fill(&mut bytes).is_err() {
-        return;
-    }
-    for (i, chunk) in (1..numbers.len()).zip(bytes.chunks_exact(8)).rev() {
-        let mut word = [0u8; 8];
-        word.copy_from_slice(chunk);
-        numbers.swap(i, (u64::from_le_bytes(word) % (i as u64 + 1)) as usize);
-    }
+/// The platform's generator. Without it nothing is dealt and nothing is sent.
+pub fn random(bytes: &mut [u8]) -> bool {
+    getrandom::fill(bytes).is_ok()
 }
 
+/// Deals tokens in the order a payload first sends them, and a zero prefix.
 #[cfg(test)]
-pub fn row_order(_: &mut [u64]) {}
+pub fn zeros(bytes: &mut [u8]) -> bool {
+    bytes.fill(0);
+    true
+}
 
 /// `withheld` are the unmarked columns that hold identifier values (`withheld`), refused anywhere.
 pub fn projection_allows(
@@ -273,7 +277,7 @@ pub fn withheld(
         let holds = batches.iter().any(|batch| {
             (0..batch.num_rows()).any(|r| {
                 cell_string(batch.column(i), r).is_some_and(|text| {
-                    tokens.token(&text).is_some() || kind_of(&text).is_some() || tokens.hides(&text)
+                    tokens.id(&text).is_some() || kind_of(&text).is_some() || tokens.hides(&text)
                 })
             })
         });
@@ -284,13 +288,15 @@ pub fn withheld(
     out
 }
 
-/// The batch with each marked value replaced by its token. Feedback runs over this, so a token in
-/// an answer came from the table, and a literal in the statement stays the literal it was.
+/// The batch with each marked value replaced by `prefix` and its id. Feedback runs over this, so a
+/// token in an answer came from the table, and a literal in the statement stays the literal it was.
+/// The prefix is random and never sent, so no literal can pass for an id.
 pub fn tokenise(
     batch: &RecordBatch,
     names: &[String],
     marked: &BTreeSet<String>,
     tokens: &TokenMap,
+    prefix: &str,
 ) -> Result<RecordBatch, String> {
     let mut fields = Vec::with_capacity(names.len());
     let mut columns = Vec::with_capacity(names.len());
@@ -300,7 +306,7 @@ pub fn tokenise(
             let swapped: StringArray = (0..batch.num_rows())
                 .map(|r| {
                     cell_string(column, r)
-                        .map(|text| tokens.token(&text).map_or(text.clone(), str::to_string))
+                        .map(|text| tokens.id(&text).map_or(text, |id| format!("{prefix}{id}")))
                 })
                 .collect();
             fields.push(Field::new(name, DataType::Utf8, true));
@@ -322,7 +328,38 @@ pub fn omitted(identifiers: &[String], reason: &str) -> String {
     .to_string()
 }
 
-pub fn payload(identifiers: &[String], out: &QueryOut) -> String {
+/// The answer over the copy with each id sent as this ask's token. `None` without a random number.
+pub fn payload(
+    identifiers: &[String],
+    out: &QueryOut,
+    prefix: &str,
+    tokens: &TokenMap,
+    deal: &mut Deal,
+    random: fn(&mut [u8]) -> bool,
+) -> Option<String> {
+    let id_of = |cell: &str| {
+        cell.strip_prefix(prefix)?
+            .parse::<u64>()
+            .ok()
+            .filter(|id| *id < tokens.values.len() as u64)
+    };
+    let fresh: BTreeSet<u64> = out
+        .rows
+        .iter()
+        .flatten()
+        .flatten()
+        .filter_map(|cell| id_of(cell))
+        .filter(|id| !deal.dealt.contains_key(id))
+        .collect();
+    let mut bytes = vec![0u8; fresh.len() * 8];
+    if !random(&mut bytes) {
+        return None;
+    }
+    for (id, chunk) in fresh.into_iter().zip(bytes.chunks_exact(8)) {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(chunk);
+        deal.deal(id, u64::from_le_bytes(word), tokens);
+    }
     let rows: Vec<Value> = out
         .rows
         .iter()
@@ -332,7 +369,12 @@ pub fn payload(identifiers: &[String], out: &QueryOut) -> String {
                 .iter()
                 .zip(row)
                 .map(|(column, cell)| {
-                    let value = cell.clone().map_or(Value::Null, Value::String);
+                    let value = match cell {
+                        None => Value::Null,
+                        Some(cell) => Value::String(
+                            id_of(cell).map_or_else(|| cell.clone(), |id| deal.dealt[&id].clone()),
+                        ),
+                    };
                     (column.name.clone(), value)
                 })
                 .collect();
@@ -344,13 +386,15 @@ pub fn payload(identifiers: &[String], out: &QueryOut) -> String {
         .iter()
         .map(|c| json!({ "name": c.name, "type": c.type_name }))
         .collect();
-    json!({
-        "identifiers": identifiers,
-        "columns": columns,
-        "rows": rows,
-        "truncated": out.truncated,
-    })
-    .to_string()
+    Some(
+        json!({
+            "identifiers": identifiers,
+            "columns": columns,
+            "rows": rows,
+            "truncated": out.truncated,
+        })
+        .to_string(),
+    )
 }
 
 fn column_kind(batches: &[RecordBatch], idx: usize) -> Option<Kind> {
@@ -1355,7 +1399,7 @@ canary.one@example.com,DE89370400440532013000,+359 888 100002,2
             burrmill_ingest::ingest_bytes(csv.as_bytes(), FormatHint::Sniff, &Budget::untrusted())
                 .unwrap();
         let mut s = Session::open(table).unwrap();
-        s.order = shuffled;
+        s.random = random;
         s.bind(&["email".into()]);
         let payload = s
             .pseudonym_feedback("SELECT email FROM t ORDER BY n")
@@ -1374,17 +1418,59 @@ canary.one@example.com,DE89370400440532013000,+359 888 100002,2
         sorted.sort_unstable();
         assert_eq!(sorted, (1..=40).collect::<Vec<u64>>());
         assert_ne!(numbers, sorted, "tokens came out in row order");
-        s.bind(&["email".into()]);
-        let kept = s
-            .pseudonym_feedback("SELECT email FROM t ORDER BY n")
-            .unwrap();
-        assert_eq!(payload, kept, "the same marks dealt again");
-        s.bind(&["n".into()]);
+        let prefix = s.prefix.clone();
         s.bind(&["email".into()]);
         let again = s
             .pseudonym_feedback("SELECT email FROM t ORDER BY n")
             .unwrap();
-        assert_ne!(payload, again, "new marks dealt the same numbers");
+        assert_ne!(payload, again, "a second ask dealt the same numbers");
+        assert_eq!(s.prefix, prefix, "the same marks copied the table again");
+    }
+
+    #[test]
+    fn each_token_restores_its_own_value_within_an_ask() {
+        let csv: String = std::iter::once("email,n\n".to_string())
+            .chain((0..40).map(|i| format!("canary.{i}@example.com,{i}\n")))
+            .collect();
+        let table =
+            burrmill_ingest::ingest_bytes(csv.as_bytes(), FormatHint::Sniff, &Budget::untrusted())
+                .unwrap();
+        let mut s = Session::open(table).unwrap();
+        s.random = random;
+        let out = s.query("SELECT n FROM t LIMIT 1").unwrap();
+        let chart = Chart {
+            kind: ChartKind::Table,
+            x: None,
+            y: vec![],
+        };
+        let mut asks = Vec::new();
+        for _ in 0..2 {
+            s.bind(&["email".into()]);
+            let sql = "SELECT email, n FROM t WHERE n < 20";
+            let payload = s.pseudonym_feedback(sql).unwrap();
+            assert_eq!(
+                payload,
+                s.pseudonym_feedback(sql).unwrap(),
+                "one ask, two deals"
+            );
+            let wider = s.pseudonym_feedback("SELECT email, n FROM t").unwrap();
+            let value: Value = serde_json::from_str(&wider).unwrap();
+            let mut tokens = BTreeMap::new();
+            for row in value["rows"].as_array().unwrap() {
+                let token = row["email"].as_str().unwrap().to_string();
+                let n = row["n"].as_str().unwrap().to_string();
+                let shown = s.present_bound(&out, &chart, &format!("Person {token}."), ",", ".");
+                assert_eq!(
+                    shown.narration.as_deref(),
+                    Some(format!("Person canary.{n}@example.com.").as_str()),
+                    "{token}"
+                );
+                tokens.insert(n, token);
+            }
+            assert_eq!(tokens.values().collect::<BTreeSet<_>>().len(), 40);
+            asks.push(tokens);
+        }
+        assert_ne!(asks[0], asks[1], "two asks gave each person the same token");
     }
 
     #[test]
@@ -1452,12 +1538,7 @@ prefix-canary.one@example.com-suffix,canary.one@example.com,1
         let array: arrow::array::ArrayRef = Arc::new(arrow::array::StringArray::from(column));
         let batch = RecordBatch::try_from_iter([("email", array)]).unwrap();
         let names = vec!["email".to_string()];
-        assign(
-            &names,
-            &BTreeSet::from(["email".to_string()]),
-            &[batch],
-            row_order,
-        )
+        assign(&names, &BTreeSet::from(["email".to_string()]), &[batch])
     }
 
     #[test]
@@ -1517,6 +1598,13 @@ prefix-canary.one@example.com-suffix,canary.one@example.com,1
             x: None,
             y: vec![],
         };
+        let unsent = s.present_bound(&out, &chart, "Person CUSTOMER_1.", ",", ".");
+        assert!(
+            unsent.narration.is_none(),
+            "a token not yet sent was restored"
+        );
+        s.pseudonym_feedback("SELECT email, iban, phone FROM t")
+            .unwrap();
         let shown = s.present_bound(&out, &chart, "Person CUSTOMER_1.", ",", ".");
         assert_eq!(
             shown.narration.as_deref(),
