@@ -205,6 +205,11 @@ impl Floors {
     /// spiller's floor is kept, nor than its share of what the idle ones leave to those holding.
     fn spill_room(&self, id: usize, reserved: usize, pool_size: usize) -> usize {
         let free = pool_size.saturating_sub(self.spillable + self.unspillable);
+        // A reservation holding nothing has nothing to spill, so refusing it what is free ends the
+        // statement: a sort that had spilled could not take its next batch.
+        if reserved == 0 {
+            return free;
+        }
         let spill_available = pool_size.saturating_sub(self.unspillable);
         let spillers = self.spillers.max(1);
         let fair = spill_available / spillers;
