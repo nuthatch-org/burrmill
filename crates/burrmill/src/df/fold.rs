@@ -26,6 +26,7 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNodeRecursion};
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
 use datafusion_execution::TaskContext;
+use datafusion_execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion_expr::expr::AggregateFunction;
 use datafusion_expr::logical_plan::{Aggregate, Extension, Filter, TableScan};
 use datafusion_expr::{
@@ -606,6 +607,7 @@ impl ExecutionPlan for OwnedFoldExec {
         ctx: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let bytes = self.bytes.clone();
+        let reservation = MemoryConsumer::new("OwnedSignedFoldExec").register(ctx.memory_pool());
         // A blocking task outlives its handle, so a dropped stream stops the fold through its token.
         let cancel = crate::CancelToken::under(&[&super::cancel::statement_token(&ctx)], None);
         let stop = StopOnDrop(cancel.clone());
@@ -620,22 +622,21 @@ impl ExecutionPlan for OwnedFoldExec {
         let stream = futures::stream::once(async move {
             let _stop = stop;
             let rows = tokio::task::spawn_blocking(move || {
-                let (rows, read) = fold_rows(&fold, &tables, cancel)?;
+                let (rows, read, reservation) = fold_rows(&fold, &tables, reservation, cancel)?;
                 bytes.add(read as usize);
-                Ok::<_, DataFusionError>((Arc::new(rows), fold))
+                Ok::<_, DataFusionError>((Arc::new(rows), fold, Arc::new(reservation)))
             })
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))??;
             Ok::<_, DataFusionError>(rows)
         })
-        .map_ok(move |(rows, fold)| {
+        .map_ok(move |(rows, fold, reservation)| {
             let n = rows.len();
             let out = Arc::clone(&out);
-            futures::stream::iter(
-                (0..n)
-                    .step_by(CHUNK)
-                    .map(move |start| to_batch(&rows, start..(start + CHUNK).min(n), &fold, &out)),
-            )
+            futures::stream::iter((0..n).step_by(CHUNK).map(move |start| {
+                let _ = &reservation;
+                to_batch(&rows, start..(start + CHUNK).min(n), &fold, &out)
+            }))
         })
         .try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
@@ -667,8 +668,9 @@ impl Drop for Running {
 fn fold_rows(
     fold: &SignedFold,
     tables: &FoldTables,
+    reservation: MemoryReservation,
     cancel: crate::CancelToken,
-) -> Result<(Rows, u64)> {
+) -> Result<(Rows, u64, MemoryReservation)> {
     RUNNING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _running = Running;
     // Every value here is read strictly, `TRY_CAST` included, so the owned fold's "the query used
@@ -685,14 +687,29 @@ fn fold_rows(
         .iter()
         .map(|b| &tables.tables[&b.table])
         .collect();
-    let (rows, metrics) = tables
-        .pool
-        .install(|| {
-            SignedFoldExec::new(fold, &segments, Limits::default())
-                .with_cancel(cancel)
-                .run()
+    // Held in the engine's pool as it grows, so a budget bounds the fold as it bounds any aggregate.
+    let reservation = std::sync::Mutex::new(reservation);
+    let refused = std::sync::Mutex::new(None);
+    let charge = |bytes: usize| {
+        let r = reservation.lock().unwrap_or_else(|e| e.into_inner());
+        r.try_resize(bytes).map_err(|e| {
+            let m = e.to_string();
+            *refused.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
+            crate::BurrmillError::LimitExceeded(m)
         })
-        .map_err(ext)?;
+    };
+    let run = tables.pool.install(|| {
+        SignedFoldExec::new(fold, &segments, Limits::default())
+            .with_charge(&charge)
+            .with_cancel(cancel)
+            .run()
+    });
+    if let Some(e) = refused.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        return Err(e);
+    }
+    let (rows, metrics) = run.map_err(ext)?;
+    let reservation = reservation.into_inner().unwrap_or_else(|e| e.into_inner());
+    reservation.try_resize(rows.bytes())?;
     for i in 0..rows.len() {
         let v = rows.sum(i);
         if !Decimal128Type::is_valid_decimal_precision(v, 38) {
@@ -701,7 +718,7 @@ fn fold_rows(
             )));
         }
     }
-    Ok((rows, metrics.bytes_read))
+    Ok((rows, metrics.bytes_read, reservation))
 }
 
 fn to_batch(

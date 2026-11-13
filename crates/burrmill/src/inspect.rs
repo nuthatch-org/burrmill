@@ -49,9 +49,10 @@ fn unreachable(why: String, serves: &str) -> BurrmillError {
 
 /// The statements `sql` holds. The engine's own dialect where there is one, so a form it refuses by
 /// name is refused by that name here and not as a syntax error.
-fn parse(sql: &str) -> std::result::Result<Vec<Statement>, sqlparser::parser::ParserError> {
+#[doc(hidden)]
+pub fn parse(sql: &str) -> std::result::Result<Vec<Statement>, sqlparser::parser::ParserError> {
     #[cfg(feature = "datafusion")]
-    return Parser::parse_sql(&crate::df::duck_dialect(), sql);
+    return crate::df::refuse_asof(Parser::parse_sql(&crate::df::duck_dialect(), sql));
     #[cfg(not(feature = "datafusion"))]
     Parser::parse_sql(&sqlparser::dialect::DuckDbDialect {}, sql)
 }
