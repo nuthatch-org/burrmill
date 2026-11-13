@@ -253,7 +253,9 @@ pub fn refs(sql: &str) -> Option<Refs> {
 /// The scalar, aggregate and window functions a statement calls, each as the parts of its name,
 /// lowercased: `main.upper(x)` is `["main", "upper"]`. Table functions are [`refs`]'s. A list
 /// comprehension counts as the calls it is rewritten into. `None` for anything but one parseable
-/// statement, of whatever kind.
+/// statement, of whatever kind. Operators the engine runs as functions (`::`, `||`, `->>`,
+/// `EXTRACT`, `TRIM`, `[i]` and the like) are not calls here, so withholding one of those needs
+/// more than this set.
 pub fn calls(sql: &str) -> Option<BTreeSet<Vec<String>>> {
     struct Calls(BTreeSet<Vec<String>>);
     impl Visitor for Calls {
