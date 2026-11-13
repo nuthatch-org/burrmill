@@ -251,6 +251,37 @@ pub fn refs(sql: &str) -> Option<Refs> {
     Some(c.0)
 }
 
+/// The scalar, aggregate and window functions a statement calls, each as the parts of its name,
+/// lowercased: `main.upper(x)` is `["main", "upper"]`. Table functions are [`refs`]'s. A list
+/// comprehension counts as the calls it is rewritten into. `None` for anything but one parseable
+/// statement, of whatever kind. Operators the engine runs as functions (`::`, `||`, `->>`,
+/// `EXTRACT`, `TRIM`, `[i]` and the like) are not calls here, so withholding one of those needs
+/// more than this set.
+pub fn calls(sql: &str) -> Option<BTreeSet<Vec<String>>> {
+    struct Calls(BTreeSet<Vec<String>>);
+    impl Visitor for Calls {
+        type Break = ();
+        fn pre_visit_expr(&mut self, e: &Expr) -> ControlFlow<()> {
+            if let Expr::Function(f) = e {
+                let name = parts(&f.name)
+                    .iter()
+                    .map(|p| p.to_ascii_lowercase())
+                    .collect();
+                self.0.insert(name);
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let expanded = crate::listcomp::before_parse(sql);
+    let stmts = parse(&expanded).ok()?;
+    let [stmt] = stmts.as_slice() else {
+        return None;
+    };
+    let mut c = Calls(BTreeSet::new());
+    let _ = crate::walk::walk(stmt, &mut c);
+    Some(c.0)
+}
+
 /// The physical tables a statement reads, lowercased: names bound by a `WITH` in scope are not
 /// tables. A CTE's definition sees its earlier siblings, and itself only when recursive, so
 /// `WITH t AS (SELECT * FROM t)` reads the table `t`; a qualified name is always a table. This is
@@ -475,6 +506,42 @@ mod tests {
     }
 
     #[test]
+    fn calls_name_every_function_a_statement_calls() {
+        let c = |sql: &str| calls(sql).unwrap().into_iter().collect::<Vec<_>>();
+        let v = |s: &[&str]| s.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            c(
+                "SELECT upper(x), \"VERSION\"(), main.Lower(y) FROM t, range(3) \
+               WHERE x IN (SELECT max(z) OVER (PARTITION BY w) FROM u)"
+            ),
+            vec![
+                v(&["main", "lower"]),
+                v(&["max"]),
+                v(&["upper"]),
+                v(&["version"])
+            ]
+        );
+        assert!(c("SELECT list_transform([1], y -> version())").contains(&v(&["version"])));
+        assert!(c("SELECT [version() FOR x IN [1]]").contains(&v(&["version"])));
+        assert!(c("EXPLAIN SELECT version()").contains(&v(&["version"])));
+        assert!(calls("SELECT 1; SELECT 2").is_none());
+        assert!(calls("SELEC 1").is_none());
+    }
+
+    #[cfg(feature = "datafusion")]
+    #[test]
+    fn calls_read_engine_only_syntax() {
+        let c = calls("SELECT last_value(a IGNORE NULLS) OVER () FROM t WHERE a ^@ 'x'").unwrap();
+        assert_eq!(
+            c.into_iter().collect::<Vec<_>>(),
+            vec![
+                vec!["last_value".to_string()],
+                vec!["starts_with".to_string()]
+            ]
+        );
+    }
+
+    #[test]
     fn refs_report_without_refusing() {
         let r =
             refs("WITH c AS (SELECT * FROM T) SELECT * FROM c, read_csv('/x'), range(3)").unwrap();
@@ -620,6 +687,7 @@ mod tests {
             assert!(base_tables(sql).is_some(), "{sql}");
             assert!(refs(sql).is_some(), "{sql}");
             assert!(canonical(sql).is_some(), "{sql}");
+            assert!(calls(sql).is_some(), "{sql}");
         }
         assert!(
             read >= 15,
