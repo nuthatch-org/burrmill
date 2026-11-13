@@ -52,7 +52,7 @@ fn a_metered_limit_reads_no_footer_it_has_read_before() {
     let e = Engine::open_nest_budgeted(
         tmp.path(),
         Budget {
-            memory_bytes: 512 << 10,
+            memory_bytes: 8 << 20,
             threads: 1,
             spill: None,
         },
@@ -84,7 +84,7 @@ fn a_metered_limit_reads_no_footer_it_has_read_before() {
         })
         .collect();
     let mut e = Engine::open_empty_budgeted(Budget {
-        memory_bytes: 512 << 10,
+        memory_bytes: 8 << 20,
         threads: 1,
         spill: None,
     })

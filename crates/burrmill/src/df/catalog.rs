@@ -336,13 +336,12 @@ struct SizesCache {
     by_file: HashMap<String, (Stamp, Arc<Sizes>)>,
     /// One copy of each distinct footer schema.
     descrs: Vec<Arc<parquet::schema::types::SchemaDescriptor>>,
-    /// About what `by_file` holds: its keys, sizes and the map's own entry.
+    /// About what the map holds: its keys, sizes and entries, and each distinct schema.
     bytes: usize,
 }
 
-/// Bytes before the map is emptied, outside the pool as the footer-schema map beside it is: about
-/// 20,000 segments of 25 columns.
-const SIZES_BYTES: usize = 8 << 20;
+/// What one distinct footer schema costs the map, a column at a time.
+const DESCR_COLUMN_BYTES: usize = 256;
 
 static SIZES: std::sync::LazyLock<Mutex<SizesCache>> = std::sync::LazyLock::new(Default::default);
 
@@ -369,13 +368,23 @@ pub(super) fn note_sizes(
             leaves[i] += c.compressed_size().max(0) as u64;
         }
     }
-    let bytes = location.len() + 8 * leaves.len() + 96;
+    let mut bytes = location.len() + 8 * leaves.len() + 96;
     let mut cache = SIZES.lock().unwrap_or_else(|p| p.into_inner());
-    if cache.bytes + bytes > SIZES_BYTES {
+    // Full, it keeps what it has rather than starting again, and a segment it cannot keep is costed
+    // from its footer as before. Emptied only when the limit has fallen below what it holds.
+    let limit = super::session::local_sizes_limit();
+    if cache.bytes > limit {
         *cache = SizesCache::default();
     }
-    let descr = match cache.descrs.iter().find(|d| ***d == *descr) {
-        Some(d) => Arc::clone(d),
+    let known = cache.descrs.iter().find(|d| ***d == *descr).cloned();
+    if known.is_none() {
+        bytes += DESCR_COLUMN_BYTES * descr.num_columns();
+    }
+    if cache.bytes + bytes > limit {
+        return;
+    }
+    let descr = match known {
+        Some(d) => d,
         None => {
             cache.descrs.push(Arc::clone(&descr));
             descr
@@ -623,7 +632,8 @@ impl Listed {
                 };
                 let mut file = PartitionedFile::new(loc.to_string(), *size);
                 // With its modification time, a file rewritten at the same path and length is not
-                // taken for the one whose footer or sizes were kept.
+                // taken for the one whose footer or sizes were kept. A list reused for the same files
+                // (#153) keeps its stamps; sealed segments are not rewritten in place.
                 if let Some((_, modified)) = (!keyed).then(|| stamp_of(p)).flatten() {
                     file.object_meta.last_modified = modified;
                 }

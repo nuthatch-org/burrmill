@@ -76,7 +76,7 @@ impl LocalShare {
     fn new(bytes: usize) -> Self {
         let mut live = LOCAL_SHARES.lock().unwrap_or_else(|p| p.into_inner());
         live.push(bytes);
-        LOCAL_FOOTERS.update_cache_limit(local_limit(&live));
+        LOCAL_FOOTERS.update_cache_limit(footers_limit(&live));
         Self(bytes)
     }
 }
@@ -90,7 +90,7 @@ impl Drop for LocalShare {
         // The last engine out leaves the limit as it stood: a host that closes one engine before
         // it opens the next keeps the footers between them.
         if !live.is_empty() {
-            LOCAL_FOOTERS.update_cache_limit(local_limit(&live));
+            LOCAL_FOOTERS.update_cache_limit(footers_limit(&live));
         }
     }
 }
@@ -99,6 +99,17 @@ impl Drop for LocalShare {
 /// its pool, and the engines beside it now add nothing to it.
 fn local_limit(live: &[usize]) -> usize {
     live.iter().copied().max().unwrap_or(0)
+}
+
+/// The local footers take three quarters of that allowance; the column sizes a metered statement
+/// keeps for each segment (`catalog::Sizes`) take the rest.
+fn footers_limit(live: &[usize]) -> usize {
+    local_limit(live) - local_limit(live) / 4
+}
+
+/// The bytes the kept column sizes may hold, out of the live engines' allowance for local footers.
+pub(super) fn local_sizes_limit() -> usize {
+    local_limit(&LOCAL_SHARES.lock().unwrap_or_else(|p| p.into_inner())) / 4
 }
 
 pub struct MiniSession {
