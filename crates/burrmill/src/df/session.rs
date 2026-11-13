@@ -15,7 +15,9 @@ use datafusion_catalog::{
 use datafusion_common::alias::AliasGenerator;
 use datafusion_common::config::{ConfigOptions, TableOptions};
 use datafusion_common::display::{PlanType, ToStringifiedPlan};
-use datafusion_common::{DFSchema, Result as DFResult, TableReference, plan_datafusion_err};
+use datafusion_common::{
+    DFSchema, Result as DFResult, TableReference, plan_datafusion_err, resources_datafusion_err,
+};
 use datafusion_execution::TaskContext;
 use datafusion_execution::cache::Cache;
 use datafusion_execution::cache::cache_manager::{
@@ -25,7 +27,8 @@ use datafusion_execution::cache::default_cache::DefaultCache;
 use datafusion_execution::config::SessionConfig;
 use datafusion_execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
 use datafusion_execution::memory_pool::{
-    FairSpillPool, GreedyMemoryPool, MemoryPool, PeakRecordingPool, TrackConsumersPool,
+    GreedyMemoryPool, MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation,
+    PeakRecordingPool, TrackConsumersPool, human_readable_size,
 };
 use datafusion_execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
 use datafusion_expr::execution_props::ExecutionProps;
@@ -156,9 +159,167 @@ pub(super) fn budget_pool(memory_bytes: usize, spills: bool) -> Arc<dyn MemoryPo
     let size = memory_bytes - memory_bytes / 8;
     let five = NonZeroUsize::new(5).expect("five");
     if spills {
-        Arc::new(TrackConsumersPool::new(FairSpillPool::new(size), five))
+        Arc::new(TrackConsumersPool::new(LendingSpillPool::new(size), five))
     } else {
         Arc::new(TrackConsumersPool::new(GreedyMemoryPool::new(size), five))
+    }
+}
+
+/// A pool where a consumer that can spill takes what is free up to its fair share, and past it
+/// borrows, leaving one share free, no more than an even split with the others holding.
+///
+/// `FairSpillPool` caps each at a share of every spiller registered, finished or idle, which was 49
+/// on nuthatch's QoS nest: a final aggregate replaying its spills, which cannot spill again, was
+/// refused at 12.4 MB of a pool with 560 MB free.
+#[derive(Debug)]
+pub(super) struct LendingSpillPool {
+    pool_size: usize,
+    state: Mutex<Loans>,
+}
+
+#[derive(Debug, Default)]
+struct Loans {
+    spillers: usize,
+    /// Bytes by spilling consumer, across its reservations; one holding nothing is absent.
+    held: HashMap<usize, usize>,
+    spillable: usize,
+    unspillable: usize,
+}
+
+impl LendingSpillPool {
+    pub(super) fn new(pool_size: usize) -> Self {
+        Self {
+            pool_size,
+            state: Mutex::new(Loans::default()),
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, Loans> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+impl Loans {
+    /// What the spilling consumer `id` may take of `additional`. A loan leaves a share free because
+    /// nothing makes a borrower give it back; the split counts small holders at what they hold, as a
+    /// partial aggregate that could emit early once borrowed 53 MB and left a replay none.
+    fn spill_room(&self, id: usize, additional: usize, pool_size: usize) -> usize {
+        let free = pool_size.saturating_sub(self.spillable + self.unspillable);
+        let spill_available = pool_size.saturating_sub(self.unspillable);
+        let fair = spill_available / self.spillers.max(1);
+        let held = self.held.get(&id).copied().unwrap_or(0);
+        if held + additional <= fair {
+            return free;
+        }
+        let kept = fair;
+        let mut lendable = spill_available - kept;
+        let mut others: Vec<usize> = self
+            .held
+            .iter()
+            .filter(|(k, _)| **k != id)
+            .map(|(_, b)| *b)
+            .collect();
+        others.sort_unstable();
+        let mut sharing = others.len() + 1;
+        for b in others {
+            if b * sharing > lendable {
+                break;
+            }
+            lendable -= b;
+            sharing -= 1;
+        }
+        let level = (lendable / sharing).max(fair);
+        free.saturating_sub(kept).min(level.saturating_sub(held))
+    }
+
+    fn add(&mut self, c: &MemoryConsumer, bytes: usize) {
+        if c.can_spill() {
+            *self.held.entry(c.id()).or_default() += bytes;
+            self.spillable += bytes;
+        } else {
+            self.unspillable += bytes;
+        }
+    }
+}
+
+impl std::fmt::Display for LendingSpillPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "fair(pool_size: {})",
+            human_readable_size(self.pool_size)
+        )
+    }
+}
+
+impl MemoryPool for LendingSpillPool {
+    fn name(&self) -> &str {
+        "fair"
+    }
+
+    fn register(&self, c: &MemoryConsumer) {
+        if c.can_spill() {
+            self.state().spillers += 1;
+        }
+    }
+
+    fn unregister(&self, c: &MemoryConsumer) {
+        if c.can_spill() {
+            let mut s = self.state();
+            s.spillers = s.spillers.saturating_sub(1);
+            s.held.remove(&c.id());
+        }
+    }
+
+    fn grow(&self, r: &MemoryReservation, additional: usize) {
+        self.state().add(r.consumer(), additional);
+    }
+
+    fn shrink(&self, r: &MemoryReservation, shrink: usize) {
+        let mut s = self.state();
+        let c = r.consumer();
+        if c.can_spill() {
+            s.spillable = s.spillable.saturating_sub(shrink);
+            if let Some(b) = s.held.get_mut(&c.id()) {
+                *b = b.saturating_sub(shrink);
+                if *b == 0 {
+                    s.held.remove(&c.id());
+                }
+            }
+        } else {
+            s.unspillable = s.unspillable.saturating_sub(shrink);
+        }
+    }
+
+    fn try_grow(&self, r: &MemoryReservation, additional: usize) -> DFResult<()> {
+        let mut s = self.state();
+        let c = r.consumer();
+        let available = if c.can_spill() {
+            s.spill_room(c.id(), additional, self.pool_size)
+        } else {
+            self.pool_size.saturating_sub(s.spillable + s.unspillable)
+        };
+        if additional > available {
+            return Err(resources_datafusion_err!(
+                "Failed to allocate additional {} for {} with {} already allocated for this reservation - {} remain available for the total memory pool: {}",
+                human_readable_size(additional),
+                c.name(),
+                human_readable_size(r.size()),
+                human_readable_size(available),
+                self
+            ));
+        }
+        s.add(c, additional);
+        Ok(())
+    }
+
+    fn reserved(&self) -> usize {
+        let s = self.state();
+        s.spillable + s.unspillable
+    }
+
+    fn memory_limit(&self) -> MemoryLimit {
+        MemoryLimit::Finite(self.pool_size)
     }
 }
 
@@ -1073,5 +1234,101 @@ impl Session for MiniSession {
             self.window.clone(),
             Arc::clone(&self.runtime),
         ))
+    }
+}
+
+#[cfg(test)]
+mod lending_pool {
+    use super::*;
+
+    fn pool(size: usize) -> Arc<dyn MemoryPool> {
+        Arc::new(LendingSpillPool::new(size))
+    }
+
+    fn spiller(p: &Arc<dyn MemoryPool>, n: &str) -> MemoryReservation {
+        MemoryConsumer::new(n).with_can_spill(true).register(p)
+    }
+
+    #[test]
+    fn a_spiller_holding_nothing_cannot_take_the_pool_from_its_peers() {
+        let p = pool(1000);
+        let a = spiller(&p, "a");
+        let b = spiller(&p, "b");
+        let _c = spiller(&p, "c");
+        let d = spiller(&p, "d");
+        a.try_grow(10).unwrap();
+        assert!(d.try_grow(990).is_err());
+        b.try_grow(125).unwrap();
+    }
+
+    #[test]
+    fn spillers_registered_after_a_loan_still_reach_their_shares() {
+        let p = pool(1000);
+        let a = spiller(&p, "a");
+        let _b = spiller(&p, "b");
+        while a.try_grow(10).is_ok() {}
+        let late: Vec<_> = (0..8).map(|i| spiller(&p, &format!("late{i}"))).collect();
+        for r in &late {
+            r.try_grow(50).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_loan_leaves_a_later_statement_room_to_finish() {
+        let p = pool(1000);
+        let a = spiller(&p, "a");
+        let _b = spiller(&p, "b");
+        while a.try_grow(10).is_ok() {}
+        MemoryConsumer::new("final")
+            .register(&p)
+            .try_grow(400)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_spiller_borrows_past_its_share_from_idle_ones() {
+        let p = pool(1000);
+        let a = spiller(&p, "a");
+        let _idle: Vec<_> = (0..39).map(|i| spiller(&p, &format!("idle{i}"))).collect();
+        // A fair share is 25: the replay of a spilled aggregate asks past it.
+        a.try_grow(100).unwrap();
+        a.new_empty().try_grow(100).unwrap();
+    }
+
+    #[test]
+    fn concurrent_accounting_stays_within_the_pool() {
+        let p = pool(1 << 20);
+        let threads: Vec<_> = (0..16u64)
+            .map(|t| {
+                let p = Arc::clone(&p);
+                std::thread::spawn(move || {
+                    let mut x = t + 1;
+                    for _ in 0..50 {
+                        let mut r = MemoryConsumer::new(format!("c{t}"))
+                            .with_can_spill(t % 4 != 0)
+                            .register(&p);
+                        let s = r.split(0);
+                        for _ in 0..2000 {
+                            x ^= x << 13;
+                            x ^= x >> 7;
+                            x ^= x << 17;
+                            let n = (x % 20_000) as usize;
+                            match x % 5 {
+                                0 => drop(r.try_grow(n)),
+                                1 => drop(s.try_grow(n)),
+                                2 => r.shrink(n.min(r.size())),
+                                3 => s.shrink(n.min(s.size())),
+                                _ => drop(r.take()),
+                            }
+                            assert!(p.reserved() <= 1 << 20, "reserved {}", p.reserved());
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(p.reserved(), 0);
     }
 }
