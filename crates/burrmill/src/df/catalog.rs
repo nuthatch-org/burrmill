@@ -400,6 +400,12 @@ struct Summaries {
 /// What one distinct footer schema costs the map, a column at a time.
 const DESCR_COLUMN_BYTES: usize = 256;
 
+/// What an entry holds beyond its key, sizes and row counts.
+const ENTRY_BYTES: usize = 170;
+
+/// What one kept column's statistics hold beyond each row group's own.
+const STATS_BYTES: usize = 173;
+
 static SUMMARIES: std::sync::LazyLock<Mutex<Summaries>> =
     std::sync::LazyLock::new(Default::default);
 
@@ -442,17 +448,19 @@ pub(super) fn note_summary(
         .get(location)
         .filter(|(s, ..)| *s == stamp)
         .map(|(_, sum, b)| (Arc::clone(sum), *b));
-    let (base, mut bytes, was) = match held {
-        Some((sum, b)) => (sum, b, b),
+    // What a replaced entry was counted, stale or not, is given back.
+    let replaced = cache.by_file.get(location).map_or(0, |(.., b)| *b);
+    let mut schema = 0;
+    let kept = held.is_some();
+    let (base, mut bytes) = match held {
+        Some((sum, b)) => (sum, b),
         None => {
             let descr = meta.file_metadata().schema_descr_ptr();
             let n = descr.num_columns();
-            let known = cache.descrs.iter().find(|d| ***d == *descr).cloned();
-            let mut bytes = location.len() + 8 * groups.len() * (n + 1) + 160;
-            let descr = match known {
-                Some(d) => d,
+            let descr = match cache.descrs.iter().find(|d| ***d == *descr) {
+                Some(d) => Arc::clone(d),
                 None => {
-                    bytes += DESCR_COLUMN_BYTES * n;
+                    schema = DESCR_COLUMN_BYTES * n;
                     descr
                 }
             };
@@ -471,7 +479,7 @@ pub(super) fn note_summary(
                 sizes,
                 stats: HashMap::new(),
             });
-            (sum, bytes, 0)
+            (sum, entry_bytes(location.len(), groups.len(), n))
         }
     };
     let missing: Vec<usize> = leaves
@@ -479,7 +487,7 @@ pub(super) fn note_summary(
         .copied()
         .filter(|i| !base.stats.contains_key(i))
         .collect();
-    if was > 0 && missing.is_empty() {
+    if kept && missing.is_empty() {
         return;
     }
     let mut stats = base.stats.clone();
@@ -488,13 +496,13 @@ pub(super) fn note_summary(
             .iter()
             .map(|g| g.column(i).statistics().cloned())
             .collect();
-        bytes += 48 + per.iter().map(statistic_bytes).sum::<usize>();
+        bytes += STATS_BYTES + per.iter().map(statistic_bytes).sum::<usize>();
         stats.insert(i, per);
     }
-    if cache.bytes - was + bytes > limit {
+    if cache.bytes - replaced + bytes + schema > limit {
         return;
     }
-    if !cache.descrs.iter().any(|d| Arc::ptr_eq(d, &base.descr)) {
+    if schema > 0 {
         cache.descrs.push(Arc::clone(&base.descr));
     }
     let sum = Arc::new(Summary {
@@ -503,14 +511,36 @@ pub(super) fn note_summary(
         sizes: Arc::clone(&base.sizes),
         stats,
     });
-    cache.bytes = cache.bytes - was + bytes;
-    if let Some((_, _, old)) = cache
+    // A schema is counted once, when it is first kept, and stays counted while it is.
+    cache.bytes = cache.bytes - replaced + bytes + schema;
+    cache
         .by_file
-        .insert(location.to_string(), (stamp, sum, bytes))
-        && old != was
-    {
-        cache.bytes -= old;
+        .insert(location.to_string(), (stamp, sum, bytes));
+}
+
+/// What an entry holds on the heap before any statistics: its key, the map's slot, the summary and
+/// its sizes and row counts. Measured by `tests/df_metersizes_bytes.rs`.
+fn entry_bytes(path: usize, groups: usize, leaves: usize) -> usize {
+    path + 8 * groups * (leaves + 1) + ENTRY_BYTES
+}
+
+/// Keeps the summaries of the local segments at `paths` as a host's bind does, with the statistics
+/// of `columns`, and returns what the map then counts.
+pub(super) fn keep_summaries(paths: &[PathBuf], columns: &[&str]) -> usize {
+    let names: HashSet<String> = columns.iter().map(|c| c.to_string()).collect();
+    let mut parents = HashMap::new();
+    for p in paths {
+        let meta = std::fs::File::open(p)
+            .ok()
+            .and_then(|f| ArrowReaderMetadata::load(&f, ArrowReaderOptions::new()).ok());
+        if let (Some(meta), Ok(loc), Some(stamp)) =
+            (meta, local_location(p, &mut parents), stamp_of(p))
+        {
+            let leaves = leaves_of(meta.metadata().file_metadata().schema_descr(), &names);
+            note_summary(loc.as_ref(), stamp, meta.metadata(), &leaves);
+        }
     }
+    SUMMARIES.lock().unwrap_or_else(|p| p.into_inner()).bytes
 }
 
 /// The kept summary of the segment at `location`, if it holds the statistics of `leaves`.

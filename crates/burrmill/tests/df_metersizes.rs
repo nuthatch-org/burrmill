@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{StringArray, UInt64Array};
+use arrow::array::{ArrayRef, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use burrmill::{Budget, Engine, QueryMetrics};
@@ -18,24 +18,29 @@ fn metered(e: &Engine, sql: &str) -> QueryMetrics {
 /// A metered statement with nothing to prune by is costed from each segment's column sizes, which
 /// are kept apart from the footers, so a `LIMIT` over more segments than the footer cache holds does
 /// not decode every footer again on each run.
+const WIDE: usize = 49;
+
 #[test]
 fn a_metered_limit_reads_no_footer_it_has_read_before() {
     const SEGMENTS: u64 = 400;
     let tmp = tempfile::tempdir().unwrap();
     let segs = tmp.path().join("segments");
     std::fs::create_dir_all(&segs).unwrap();
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::UInt64, false),
-        Field::new("who", DataType::Utf8, false),
-    ]));
+    // Wide, as nests are: a footer many times the sizes kept for it.
+    let schema = Arc::new(Schema::new(
+        std::iter::once(Field::new("id", DataType::UInt64, false))
+            .chain((0..WIDE).map(|c| Field::new(format!("c{c}"), DataType::Utf8, false)))
+            .collect::<Vec<_>>(),
+    ));
     let mut selected = 0u64;
     for s in 0..SEGMENTS {
         let batch = RecordBatch::try_new(
             schema.clone(),
-            vec![
-                Arc::new(UInt64Array::from_iter_values([s])),
-                Arc::new(StringArray::from_iter_values([format!("0x{s:040x}")])),
-            ],
+            std::iter::once(Arc::new(UInt64Array::from_iter_values([s])) as ArrayRef)
+                .chain((0..WIDE).map(|c| {
+                    Arc::new(StringArray::from_iter_values([format!("0x{s:040x}{c}")])) as ArrayRef
+                }))
+                .collect(),
         )
         .unwrap();
         let f = std::fs::File::create(segs.join(format!("ev-{s:064x}.parquet"))).unwrap();
@@ -48,11 +53,11 @@ fn a_metered_limit_reads_no_footer_it_has_read_before() {
             .map(|g| g.column(0).compressed_size() as u64)
             .sum::<u64>();
     }
-    // A footer cache of 64 KiB holds a few of the 400 footers.
+    // An eighth of the budget holds few of these wide footers; a fifth of that, the sizes of all.
     let e = Engine::open_nest_budgeted(
         tmp.path(),
         Budget {
-            memory_bytes: 8 << 20,
+            memory_bytes: 32 << 20,
             threads: 1,
             spill: None,
         },
@@ -84,12 +89,14 @@ fn a_metered_limit_reads_no_footer_it_has_read_before() {
         })
         .collect();
     let mut e = Engine::open_empty_budgeted(Budget {
-        memory_bytes: 8 << 20,
+        memory_bytes: 32 << 20,
         threads: 1,
         spill: None,
     })
     .unwrap();
-    let declared = vec![("id".into(), "u64".into()), ("who".into(), "string".into())];
+    let declared: Vec<(String, String)> = std::iter::once(("id".into(), "u64".into()))
+        .chain((0..WIDE).map(|c| (format!("c{c}"), "string".into())))
+        .collect();
     e.register_facts("ev", &declared, files, &[], (None, None))
         .unwrap();
     let before = burrmill::df::selection_footer_reads();

@@ -52,6 +52,8 @@ executor, with Burrmill owning the parts DataFusion gets wrong for an indexer:
   scans beneath read under 4 MiB.
 - **`FoldSubstitution`**: where a plan contains the signed-union `GROUP BY` an indexer's balance
   rebuilds are made of, the owned operator below is swapped in, provably equal, visible in `EXPLAIN`.
+  Under a budget its aggregation is charged to the pool; under a budget with a spill directory it
+  is not swapped in, since DataFusion's aggregate can spill where the fold could only refuse.
 - **A catalogue that knows the nest and nothing else**: `Engine::open_nest` reads the seal manifest,
   offers `_dec` and `_overflow` beside every wide column as nuthatch does, and registers no table
   factory and no file function. An unconfigured DataFusion `SessionContext` will read `/etc/hosts`.
