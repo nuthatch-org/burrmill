@@ -316,38 +316,98 @@ pub(super) struct Selection {
     store: Arc<dyn object_store::ObjectStore>,
     footers: Arc<FileMetadataCache>,
     files: Vec<object_store::ObjectMeta>,
-    /// Files on this machine, whose column sizes [`Sizes`] may already hold.
+    /// Files on this machine, whose [`Summary`] may already be kept.
     local: bool,
+    /// The columns the pruning predicate reads, whose statistics a kept summary must hold.
+    pruned_by: Option<HashSet<String>>,
 }
 
-/// What a metered statement with no predicate needs of a local segment's footer: each leaf column's
-/// compressed bytes over every row group, beside the footer's schema. A few hundred bytes a segment
-/// where the footer is many kilobytes, so they stay when the footer cache cannot keep the footers.
-struct Sizes {
+/// What a metered statement needs of a local segment's footer: each row group's row count and each
+/// leaf column's compressed bytes, and for the columns predicates have named, their statistics.
+/// A few hundred bytes a segment where the footer is many kilobytes, so they stay when the footer
+/// cache cannot keep the footers.
+struct Summary {
     descr: Arc<parquet::schema::types::SchemaDescriptor>,
-    leaves: Box<[u64]>,
+    rows: Arc<[i64]>,
+    /// Row group by row group, a value a leaf.
+    sizes: Arc<[u64]>,
+    /// By leaf, a row group at a time, for the leaves a predicate has needed.
+    stats: HashMap<usize, Arc<[Option<parquet::file::statistics::Statistics>]>>,
+}
+
+impl Summary {
+    fn leaves(&self) -> usize {
+        self.descr.num_columns()
+    }
+
+    /// The row groups the footer held, with the statistics kept: all the pruning reads.
+    fn groups(&self) -> DFResult<Vec<parquet::file::metadata::RowGroupMetaData>> {
+        use parquet::file::metadata::{ColumnChunkMetaData, RowGroupMetaData};
+        let n = self.leaves();
+        self.rows
+            .iter()
+            .enumerate()
+            .map(|(g, rows)| {
+                let columns = (0..n)
+                    .map(|i| {
+                        let mut c = ColumnChunkMetaData::builder(self.descr.column(i))
+                            .set_total_compressed_size(self.sizes[g * n + i] as i64);
+                        if let Some(s) = self.stats.get(&i).and_then(|s| s[g].clone()) {
+                            c = c.set_statistics(s);
+                        }
+                        c.build()
+                    })
+                    .collect::<parquet::errors::Result<Vec<_>>>()?;
+                RowGroupMetaData::builder(Arc::clone(&self.descr))
+                    .set_num_rows(*rows)
+                    .set_column_metadata(columns)
+                    .build()
+            })
+            .collect::<parquet::errors::Result<Vec<_>>>()
+            .map_err(|e| datafusion_common::DataFusionError::External(Box::new(e)))
+    }
+}
+
+/// The leaves under the top-level columns `names`, in `descr`'s order.
+fn leaves_of(
+    descr: &parquet::schema::types::SchemaDescriptor,
+    names: &HashSet<String>,
+) -> Vec<usize> {
+    (0..descr.num_columns())
+        .filter(|&i| {
+            descr
+                .column(i)
+                .path()
+                .parts()
+                .first()
+                .is_some_and(|root| names.contains(root))
+        })
+        .collect()
 }
 
 /// A file's length and modification time, which a file rewritten at the same path would not share.
 pub(super) type Stamp = (u64, chrono::DateTime<chrono::Utc>);
 
 #[derive(Default)]
-struct SizesCache {
-    /// With what each entry is counted, so a replaced one gives back what it took.
-    by_file: HashMap<String, (Stamp, Arc<Sizes>, usize)>,
+struct Summaries {
+    by_file: HashMap<String, (Stamp, Arc<Summary>, usize)>,
     /// One copy of each distinct footer schema.
     descrs: Vec<Arc<parquet::schema::types::SchemaDescriptor>>,
-    /// About what the map holds: its keys, sizes and entries, and each distinct schema.
+    /// About what the map holds: its keys, entries, sizes and statistics, and each distinct schema.
     bytes: usize,
 }
 
 /// What one distinct footer schema costs the map, a column at a time.
 const DESCR_COLUMN_BYTES: usize = 256;
 
-/// What an entry holds beyond its key and its sizes.
+/// What an entry holds beyond its key, sizes and row counts.
 const ENTRY_BYTES: usize = 170;
 
-static SIZES: std::sync::LazyLock<Mutex<SizesCache>> = std::sync::LazyLock::new(Default::default);
+/// What one kept column's statistics hold beyond each row group's own.
+const STATS_BYTES: usize = 173;
+
+static SUMMARIES: std::sync::LazyLock<Mutex<Summaries>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// Footers the metered pass has read, for a test that a statement run again reads none.
 pub(super) static SELECTION_FOOTER_READS: std::sync::atomic::AtomicU64 =
@@ -359,64 +419,115 @@ pub(super) fn stamp_of(path: &Path) -> Option<Stamp> {
     Some((m.len(), m.modified().ok()?.into()))
 }
 
-/// Keeps the column sizes of the local segment at `location` from its footer.
-pub(super) fn note_sizes(
+/// What one kept statistic costs beyond its own bytes.
+fn statistic_bytes(s: &Option<parquet::file::statistics::Statistics>) -> usize {
+    std::mem::size_of::<Option<parquet::file::statistics::Statistics>>()
+        + s.as_ref().map_or(0, |s| {
+            s.min_bytes_opt().map_or(0, <[u8]>::len) + s.max_bytes_opt().map_or(0, <[u8]>::len)
+        })
+}
+
+/// Keeps the summary of the local segment at `location` from its footer, with the statistics of
+/// `leaves` beside any it already holds.
+pub(super) fn note_summary(
     location: &str,
     stamp: Stamp,
     meta: &parquet::file::metadata::ParquetMetaData,
+    leaves: &[usize],
 ) {
-    let descr = meta.file_metadata().schema_descr_ptr();
-    let mut leaves = vec![0u64; descr.num_columns()];
-    for g in meta.row_groups() {
-        for (i, c) in g.columns().iter().enumerate() {
-            leaves[i] += c.compressed_size().max(0) as u64;
-        }
-    }
-    let bytes = entry_bytes(location.len(), leaves.len());
-    let mut cache = SIZES.lock().unwrap_or_else(|p| p.into_inner());
+    let groups = meta.row_groups();
+    let mut cache = SUMMARIES.lock().unwrap_or_else(|p| p.into_inner());
     // Full, it keeps what it has rather than starting again, and a segment it cannot keep is costed
     // from its footer as before. Emptied only when the limit has fallen below what it holds.
     let limit = super::session::local_sizes_limit();
     if cache.bytes > limit {
-        *cache = SizesCache::default();
+        *cache = Summaries::default();
     }
-    let known = cache.descrs.iter().find(|d| ***d == *descr).cloned();
-    let schema = if known.is_none() {
-        DESCR_COLUMN_BYTES * descr.num_columns()
-    } else {
-        0
+    let held = cache
+        .by_file
+        .get(location)
+        .filter(|(s, ..)| *s == stamp)
+        .map(|(_, sum, b)| (Arc::clone(sum), *b));
+    // What a replaced entry was counted, stale or not, is given back.
+    let replaced = cache.by_file.get(location).map_or(0, |(.., b)| *b);
+    let mut schema = 0;
+    let kept = held.is_some();
+    let (base, mut bytes) = match held {
+        Some((sum, b)) => (sum, b),
+        None => {
+            let descr = meta.file_metadata().schema_descr_ptr();
+            let n = descr.num_columns();
+            let descr = match cache.descrs.iter().find(|d| ***d == *descr) {
+                Some(d) => Arc::clone(d),
+                None => {
+                    schema = DESCR_COLUMN_BYTES * n;
+                    descr
+                }
+            };
+            let sizes: Arc<[u64]> = groups
+                .iter()
+                .flat_map(|g| {
+                    g.columns()
+                        .iter()
+                        .map(|c| c.compressed_size().max(0) as u64)
+                })
+                .collect();
+            let rows: Arc<[i64]> = groups.iter().map(|g| g.num_rows()).collect();
+            let sum = Arc::new(Summary {
+                descr,
+                rows,
+                sizes,
+                stats: HashMap::new(),
+            });
+            (sum, entry_bytes(location.len(), groups.len(), n))
+        }
     };
-    let replaced = cache.by_file.get(location).map_or(0, |(_, _, b)| *b);
+    let missing: Vec<usize> = leaves
+        .iter()
+        .copied()
+        .filter(|i| !base.stats.contains_key(i))
+        .collect();
+    if kept && missing.is_empty() {
+        return;
+    }
+    let mut stats = base.stats.clone();
+    for &i in &missing {
+        let per: Arc<[_]> = groups
+            .iter()
+            .map(|g| g.column(i).statistics().cloned())
+            .collect();
+        bytes += STATS_BYTES + per.iter().map(statistic_bytes).sum::<usize>();
+        stats.insert(i, per);
+    }
     if cache.bytes - replaced + bytes + schema > limit {
         return;
     }
-    let descr = match known {
-        Some(d) => d,
-        None => {
-            cache.descrs.push(Arc::clone(&descr));
-            descr
-        }
-    };
-    let sizes = Arc::new(Sizes {
-        descr,
-        leaves: leaves.into_boxed_slice(),
+    if schema > 0 {
+        cache.descrs.push(Arc::clone(&base.descr));
+    }
+    let sum = Arc::new(Summary {
+        descr: Arc::clone(&base.descr),
+        rows: Arc::clone(&base.rows),
+        sizes: Arc::clone(&base.sizes),
+        stats,
     });
     // A schema is counted once, when it is first kept, and stays counted while it is.
     cache.bytes = cache.bytes - replaced + bytes + schema;
     cache
         .by_file
-        .insert(location.to_string(), (stamp, sizes, bytes));
+        .insert(location.to_string(), (stamp, sum, bytes));
 }
 
-/// What an entry of `leaves` sizes under a location of `path` bytes holds on the heap: the key, the
-/// map's slot, the shared summary and its sizes. Measured by `tests/df_metersizes_bytes.rs`.
-fn entry_bytes(path: usize, leaves: usize) -> usize {
-    path + 8 * leaves + ENTRY_BYTES
+/// What an entry holds on the heap before any statistics: its key, the map's slot, the summary and
+/// its sizes and row counts. Measured by `tests/df_metersizes_bytes.rs`.
+fn entry_bytes(path: usize, groups: usize, leaves: usize) -> usize {
+    path + 8 * groups * (leaves + 1) + ENTRY_BYTES
 }
 
-/// Keeps the column sizes of the local segments at `paths` as a host's bind does, and returns what
-/// the map then counts.
-pub(super) fn keep_sizes(paths: &[PathBuf]) -> usize {
+/// Keeps the summaries of the local segments at `paths` as a host's bind does, with the statistics
+/// of `columns`, and returns what the map then counts.
+pub(super) fn keep_summaries(paths: &[PathBuf], columns: &[&str]) -> usize {
+    let names: HashSet<String> = columns.iter().map(|c| c.to_string()).collect();
     let mut parents = HashMap::new();
     for p in paths {
         let meta = std::fs::File::open(p)
@@ -425,19 +536,23 @@ pub(super) fn keep_sizes(paths: &[PathBuf]) -> usize {
         if let (Some(meta), Ok(loc), Some(stamp)) =
             (meta, local_location(p, &mut parents), stamp_of(p))
         {
-            note_sizes(loc.as_ref(), stamp, meta.metadata());
+            let leaves = leaves_of(meta.metadata().file_metadata().schema_descr(), &names);
+            note_summary(loc.as_ref(), stamp, meta.metadata(), &leaves);
         }
     }
-    SIZES.lock().unwrap_or_else(|p| p.into_inner()).bytes
+    SUMMARIES.lock().unwrap_or_else(|p| p.into_inner()).bytes
 }
 
-fn sizes(location: &str, stamp: Stamp) -> Option<Arc<Sizes>> {
-    let cache = SIZES.lock().unwrap_or_else(|p| p.into_inner());
-    cache
-        .by_file
-        .get(location)
-        .filter(|(s, ..)| *s == stamp)
-        .map(|(_, s, _)| Arc::clone(s))
+/// The kept summary of the segment at `location`, if it holds the statistics of `leaves`.
+fn summary(location: &str, stamp: Stamp, names: Option<&HashSet<String>>) -> Option<Arc<Summary>> {
+    let cache = SUMMARIES.lock().unwrap_or_else(|p| p.into_inner());
+    let (_, sum, _) = cache.by_file.get(location).filter(|(s, ..)| *s == stamp)?;
+    let complete = names.is_none_or(|n| {
+        leaves_of(&sum.descr, n)
+            .iter()
+            .all(|i| sum.stats.contains_key(i))
+    });
+    complete.then(|| Arc::clone(sum))
 }
 
 /// The footer cache a scan of `url` reads: the process's for files on this machine, the engine's
@@ -495,9 +610,16 @@ pub(super) fn selections(
             }
             names
         });
+        let pruned_by = pruning.as_ref().and(predicate.as_ref()).map(|e| {
+            collect_columns(e)
+                .into_iter()
+                .map(|c| c.name().to_string())
+                .collect()
+        });
         out.push(Selection {
             schema,
             pruning,
+            pruned_by,
             columns,
             store: env.object_store(&c.object_store_url)?,
             footers: footers_for(&c.object_store_url, env),
@@ -512,17 +634,46 @@ pub(super) fn selections(
     Ok(out)
 }
 
+/// The bytes one segment's row groups select for `s`: what its static predicate keeps by their
+/// statistics, of the leaves it projects. The footer and a kept summary are read the same way.
+fn selected_in(
+    s: &Selection,
+    descr: &parquet::schema::types::SchemaDescriptor,
+    groups: &[parquet::file::metadata::RowGroupMetaData],
+    unread: &datafusion_datasource_parquet::ParquetFileMetrics,
+) -> u64 {
+    use datafusion_datasource_parquet::{ParquetAccessPlan, RowGroupAccessPlanFilter};
+    use parquet::arrow::ProjectionMask;
+
+    let mut keep = RowGroupAccessPlanFilter::new(ParquetAccessPlan::new_all(groups.len()));
+    if let Some(p) = &s.pruning {
+        keep.prune_by_statistics(&s.schema, descr, groups, p, unread);
+    }
+    let mask = s
+        .columns
+        .as_ref()
+        .map(|n| ProjectionMask::columns(descr, n.iter().map(String::as_str)));
+    keep.row_group_indexes()
+        .map(|g| {
+            groups[g]
+                .columns()
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask.as_ref().is_none_or(|m| m.leaf_included(*i)))
+                .map(|(_, c)| c.compressed_size().max(0) as u64)
+                .sum::<u64>()
+        })
+        .sum()
+}
+
 /// The data bytes the scans select: the projected and filtered column chunks of every row group
 /// their row-group statistics keep, read from the footers. Unlike the bytes a scan reads, which a
 /// TopK's dynamic filter or a `LIMIT` cut by how the partitions race, this repeats for the same
 /// statement over the same segments.
 pub(super) async fn selected_bytes(scans: Vec<Selection>) -> DFResult<u64> {
+    use datafusion_datasource_parquet::ParquetFileMetrics;
     use datafusion_datasource_parquet::metadata::DFParquetMetadata;
-    use datafusion_datasource_parquet::{
-        ParquetAccessPlan, ParquetFileMetrics, RowGroupAccessPlanFilter,
-    };
     use futures::{StreamExt, TryStreamExt};
-    use parquet::arrow::ProjectionMask;
 
     let unread = Arc::new(ParquetFileMetrics::new(
         0,
@@ -541,22 +692,11 @@ pub(super) async fn selected_bytes(scans: Vec<Selection>) -> DFResult<u64> {
                 // A listing stamps each local file; one without a stamp is not kept.
                 let stamp = (s.local && f.last_modified.timestamp_nanos_opt() != Some(0))
                     .then_some((f.size, f.last_modified));
-                let cached = stamp
-                    .filter(|_| s.pruning.is_none())
-                    .and_then(|st| sizes(f.location.as_ref(), st));
-                if let Some(sizes) = cached {
-                    let mask = s.columns.as_ref().map(|n| {
-                        ProjectionMask::columns(&sizes.descr, n.iter().map(String::as_str))
-                    });
-                    return DFResult::Ok(
-                        sizes
-                            .leaves
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, _)| mask.as_ref().is_none_or(|m| m.leaf_included(*i)))
-                            .map(|(_, b)| *b)
-                            .sum::<u64>(),
-                    );
+                let cached =
+                    stamp.and_then(|st| summary(f.location.as_ref(), st, s.pruned_by.as_ref()));
+                if let Some(sum) = cached {
+                    let groups = sum.groups()?;
+                    return DFResult::Ok(selected_in(&s, &sum.descr, &groups, &unread));
                 }
                 SELECTION_FOOTER_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let meta = DFParquetMetadata::new(s.store.as_ref(), &f)
@@ -564,30 +704,15 @@ pub(super) async fn selected_bytes(scans: Vec<Selection>) -> DFResult<u64> {
                     .with_page_index_policy(Some(parquet::file::metadata::PageIndexPolicy::Skip))
                     .fetch_metadata()
                     .await?;
-                if let Some(st) = stamp {
-                    note_sizes(f.location.as_ref(), st, &meta);
-                }
-                let groups = meta.row_groups();
                 let descr = meta.file_metadata().schema_descr();
-                let mut keep =
-                    RowGroupAccessPlanFilter::new(ParquetAccessPlan::new_all(groups.len()));
-                if let Some(p) = &s.pruning {
-                    keep.prune_by_statistics(&s.schema, descr, groups, p, &unread);
+                if let Some(st) = stamp {
+                    let leaves = s
+                        .pruned_by
+                        .as_ref()
+                        .map_or_else(Vec::new, |n| leaves_of(descr, n));
+                    note_summary(f.location.as_ref(), st, &meta, &leaves);
                 }
-                let mask = s
-                    .columns
-                    .as_ref()
-                    .map(|n| ProjectionMask::columns(descr, n.iter().map(String::as_str)));
-                let mut bytes = 0u64;
-                for g in keep.row_group_indexes() {
-                    bytes += groups[g]
-                        .columns()
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| mask.as_ref().is_none_or(|m| m.leaf_included(*i)))
-                        .map(|(_, c)| c.compressed_size().max(0) as u64)
-                        .sum::<u64>();
-                }
+                let bytes = selected_in(&s, descr, meta.row_groups(), &unread);
                 DFResult::Ok(bytes)
             }
         })

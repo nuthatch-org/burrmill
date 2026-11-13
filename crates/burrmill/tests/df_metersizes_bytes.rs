@@ -45,7 +45,7 @@ fn the_count_is_the_heap() {
     let tmp = tempfile::tempdir().unwrap();
     let segs = tmp.path().join("segments");
     std::fs::create_dir_all(&segs).unwrap();
-    // QoS's shape: one row group of 25 text columns.
+    // QoS's shape: one row group of 25 text columns, two of them named by a predicate.
     let schema = Arc::new(Schema::new(
         (0..25)
             .map(|c| Field::new(format!("column_{c}"), DataType::Utf8, true))
@@ -73,7 +73,7 @@ fn the_count_is_the_heap() {
     })
     .unwrap();
     let base = LIVE.load(Ordering::Relaxed);
-    let counted = burrmill::df::keep_sizes(&paths);
+    let counted = burrmill::df::keep_summaries(&paths, &["column_0", "column_1"]);
     let heap = LIVE.load(Ordering::Relaxed) - base;
     eprintln!(
         "{SEGMENTS} segments: {heap} bytes on the heap ({} a segment), {counted} counted ({} a segment)",
@@ -85,5 +85,8 @@ fn the_count_is_the_heap() {
         "counted {counted} for {heap} bytes on the heap"
     );
     // Kept again, an entry and its schema are counted once.
-    assert_eq!(burrmill::df::keep_sizes(&paths), counted);
+    assert_eq!(
+        burrmill::df::keep_summaries(&paths, &["column_0", "column_1"]),
+        counted
+    );
 }
