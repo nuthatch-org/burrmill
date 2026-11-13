@@ -159,27 +159,27 @@ pub(super) fn budget_pool(memory_bytes: usize, spills: bool) -> Arc<dyn MemoryPo
     let size = memory_bytes - memory_bytes / 8;
     let five = NonZeroUsize::new(5).expect("five");
     if spills {
-        Arc::new(TrackConsumersPool::new(FloorSpillPool::new(size), five))
+        Arc::new(TrackConsumersPool::new(LendingSpillPool::new(size), five))
     } else {
         Arc::new(TrackConsumersPool::new(GreedyMemoryPool::new(size), five))
     }
 }
 
-/// A pool where every consumer that can spill is sure of half a fair share, and may borrow past its
-/// share whatever is free once the others' floors and a quarter of the pool are kept.
+/// A pool where a consumer that can spill takes what is free up to its fair share, and past it
+/// borrows only while half the pool stays free, in an even split with the others holding.
 ///
 /// `FairSpillPool` caps each at its share of every registered spiller, and a plan registers them
 /// all at once: a stacked view's repartitions, sorts and finished aggregates made 49 on nuthatch's
 /// QoS nest, and a final aggregate replaying its spills, which cannot spill again, was refused at
 /// 12.4 MB of a pool with 560 MB free.
 #[derive(Debug)]
-pub(super) struct FloorSpillPool {
+pub(super) struct LendingSpillPool {
     pool_size: usize,
-    state: Mutex<Floors>,
+    state: Mutex<Loans>,
 }
 
 #[derive(Debug, Default)]
-struct Floors {
+struct Loans {
     spillers: usize,
     /// Bytes by spilling consumer, across its reservations; one holding nothing is absent.
     held: HashMap<usize, usize>,
@@ -187,43 +187,52 @@ struct Floors {
     unspillable: usize,
 }
 
-impl FloorSpillPool {
+impl LendingSpillPool {
     pub(super) fn new(pool_size: usize) -> Self {
         Self {
             pool_size,
-            state: Mutex::new(Floors::default()),
+            state: Mutex::new(Loans::default()),
         }
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, Floors> {
+    fn state(&self) -> std::sync::MutexGuard<'_, Loans> {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
-impl Floors {
-    /// What the spilling consumer `id` may take of `additional`: what is free once every other
-    /// spiller's floor is kept, and past its own fair share, less a quarter of the pool never lent,
-    /// so spillers that register later still find their floors.
+impl Loans {
+    /// What the spilling consumer `id` may take of `additional`. Within its fair share, whatever is
+    /// free. Past it, a loan: only while half the pool stays free, since nothing can make a borrower
+    /// give it back and spillers registered later still need their shares; and no more than an even
+    /// split of that half with the others holding, the small counting only what they hold, since a
+    /// partial aggregate that could emit early borrowed 53 MB and left the replay none.
     fn spill_room(&self, id: usize, additional: usize, pool_size: usize) -> usize {
         let free = pool_size.saturating_sub(self.spillable + self.unspillable);
         let spill_available = pool_size.saturating_sub(self.unspillable);
-        let spillers = self.spillers.max(1);
-        let fair = spill_available / spillers;
-        let floor = fair / 2;
-        let mut holding = 0;
-        let mut owed = 0;
-        for (_, b) in self.held.iter().filter(|(k, _)| **k != id) {
-            holding += 1;
-            owed += floor.saturating_sub(*b);
-        }
-        owed += spillers.saturating_sub(1).saturating_sub(holding) * floor;
+        let fair = spill_available / self.spillers.max(1);
         let held = self.held.get(&id).copied().unwrap_or(0);
-        let kept = if held + additional > fair {
-            owed + spill_available / 4
-        } else {
-            owed
-        };
-        free.saturating_sub(kept)
+        if held + additional <= fair {
+            return free;
+        }
+        let kept = spill_available / 2;
+        let mut lendable = spill_available - kept;
+        let mut others: Vec<usize> = self
+            .held
+            .iter()
+            .filter(|(k, _)| **k != id)
+            .map(|(_, b)| *b)
+            .collect();
+        others.sort_unstable();
+        let mut sharing = others.len() + 1;
+        for b in others {
+            if b * sharing > lendable {
+                break;
+            }
+            lendable -= b;
+            sharing -= 1;
+        }
+        let level = (lendable / sharing).max(fair);
+        free.saturating_sub(kept).min(level.saturating_sub(held))
     }
 
     fn add(&mut self, c: &MemoryConsumer, bytes: usize) {
@@ -236,7 +245,7 @@ impl Floors {
     }
 }
 
-impl std::fmt::Display for FloorSpillPool {
+impl std::fmt::Display for LendingSpillPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -246,7 +255,7 @@ impl std::fmt::Display for FloorSpillPool {
     }
 }
 
-impl MemoryPool for FloorSpillPool {
+impl MemoryPool for LendingSpillPool {
     fn name(&self) -> &str {
         "fair"
     }
@@ -1232,11 +1241,11 @@ impl Session for MiniSession {
 }
 
 #[cfg(test)]
-mod floor_pool {
+mod lending_pool {
     use super::*;
 
     fn pool(size: usize) -> Arc<dyn MemoryPool> {
-        Arc::new(FloorSpillPool::new(size))
+        Arc::new(LendingSpillPool::new(size))
     }
 
     fn spiller(p: &Arc<dyn MemoryPool>, n: &str) -> MemoryReservation {
@@ -1244,7 +1253,7 @@ mod floor_pool {
     }
 
     #[test]
-    fn a_spiller_holding_nothing_leaves_its_peers_their_floors() {
+    fn a_spiller_holding_nothing_cannot_take_the_pool_from_its_peers() {
         let p = pool(1000);
         let a = spiller(&p, "a");
         let b = spiller(&p, "b");
@@ -1256,7 +1265,7 @@ mod floor_pool {
     }
 
     #[test]
-    fn spillers_registered_after_a_loan_still_reach_their_floors() {
+    fn spillers_registered_after_a_loan_still_reach_their_shares() {
         let p = pool(1000);
         let a = spiller(&p, "a");
         let _b = spiller(&p, "b");
@@ -1284,7 +1293,7 @@ mod floor_pool {
         let p = pool(1000);
         let a = spiller(&p, "a");
         let _idle: Vec<_> = (0..39).map(|i| spiller(&p, &format!("idle{i}"))).collect();
-        // A fair share is 25 and a floor 12: the replay of a spilled aggregate asks past both.
+        // A fair share is 25: the replay of a spilled aggregate asks past it.
         a.try_grow(100).unwrap();
         a.new_empty().try_grow(100).unwrap();
     }
