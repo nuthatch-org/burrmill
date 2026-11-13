@@ -37,13 +37,18 @@ impl WasmSession {
         self.inner.rename(from, to).map_err(|e| JsError::new(&e))
     }
 
-    pub fn card(&self, signs_json: &str, dates_json: &str) -> Result<String, JsError> {
+    pub fn card(
+        &self,
+        signs_json: &str,
+        dates_json: &str,
+        coarse: bool,
+    ) -> Result<String, JsError> {
         let signs: Vec<String> =
             serde_json::from_str(signs_json).map_err(|e| JsError::new(&e.to_string()))?;
         let dates: Vec<String> =
             serde_json::from_str(dates_json).map_err(|e| JsError::new(&e.to_string()))?;
         self.inner
-            .card(&signs, &dates)
+            .card(&signs, &dates, coarse)
             .map_err(|e| JsError::new(&e))
     }
 
@@ -87,6 +92,10 @@ impl WasmSession {
             .pseudonym_feedback(sql)
             .await
             .map_err(|e| JsError::new(&e))
+    }
+
+    pub fn admits(&self, mode: &str, sql: &str) -> bool {
+        self.inner.admits(mode, sql)
     }
 
     pub fn present_answer(

@@ -38,7 +38,11 @@ async function handle(msg) {
   }
   if (msg.op === 'card') {
     return {
-      card: session.card(JSON.stringify(msg.signs || []), JSON.stringify(msg.dates || [])),
+      card: session.card(
+        JSON.stringify(msg.signs || []),
+        JSON.stringify(msg.dates || []),
+        Boolean(msg.coarse),
+      ),
       grammar: session.grammar(),
     };
   }
@@ -61,6 +65,9 @@ async function handle(msg) {
   }
   if (msg.op === 'pseudonym') {
     return session.pseudonym_feedback(msg.sql);
+  }
+  if (msg.op === 'admits') {
+    return session.admits(msg.mode, msg.sql);
   }
   if (msg.op === 'present') {
     return JSON.parse(

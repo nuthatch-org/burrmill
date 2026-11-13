@@ -1,6 +1,8 @@
 //! One uploaded table, named `t`, and the card the page is allowed to send.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use arrow::array::{Array, AsArray};
@@ -11,14 +13,14 @@ use burrmill_ingest::{IngestReport, Issue, Locale, RowIssue, Table};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::aggregates::{filter_payload, measure_sql, skipped};
+use crate::aggregates::{bucket, filter_payload, measure_sql, ran_and_failed, skipped};
 use crate::chart::{Chart, check_chart};
 use crate::format::{
     cell_string, format_date, format_number, format_timestamp, is_ident, is_numeric,
     reserved_suffix, type_name,
 };
 use crate::narrate::narrate_with;
-use crate::pseudonym::{self, TokenMap};
+use crate::pseudonym::{self, Deal, TokenMap};
 use crate::redact::redact;
 
 /// How many result rows the page is handed. The engine's memory budget is what
@@ -90,7 +92,12 @@ pub struct Session {
     report: IngestReport,
     marked: BTreeSet<String>,
     tokens: TokenMap,
-    pub(crate) order: fn(&mut [u64]),
+    withheld: BTreeSet<String>,
+    /// `t` with marked values as `prefix` and their id, which pseudonymised feedback reads.
+    tokenised: Option<Engine>,
+    pub(crate) prefix: String,
+    deal: RefCell<Deal>,
+    pub(crate) random: fn(&mut [u8]) -> bool,
 }
 
 impl Session {
@@ -114,10 +121,14 @@ impl Session {
             report,
             marked: BTreeSet::new(),
             tokens: TokenMap::default(),
+            withheld: BTreeSet::new(),
+            tokenised: None,
+            prefix: String::new(),
+            deal: RefCell::default(),
             #[cfg(not(test))]
-            order: pseudonym::shuffled,
+            random: pseudonym::random,
             #[cfg(test)]
-            order: pseudonym::row_order,
+            random: pseudonym::zeros,
         };
         session.reregister()?;
         Ok(session)
@@ -175,12 +186,15 @@ impl Session {
             return Err("column already exists".into());
         }
         self.names[idx] = to.to_string();
+        // The marks are by name, so a rename unbinds rather than leave a marked column unmarked.
+        self.bind(&[]);
         self.reregister()
     }
 
     /// Names, types, row count, and ingest errors. `signs` and `dates` are the
     /// columns the user ticked. A sign is a word. A date range is the min and max.
-    pub fn card(&self, signs: &[String], dates: &[String]) -> Result<String, String> {
+    /// `coarse` sends the row count as a bucket, as aggregates mode sends every count.
+    pub fn card(&self, signs: &[String], dates: &[String], coarse: bool) -> Result<String, String> {
         for name in &self.names {
             check_ident(name)?;
         }
@@ -213,7 +227,11 @@ impl Session {
         }
         let mut obj = json!({
             "table": TABLE,
-            "rows": self.report.rows,
+            "rows": if coarse {
+                json!(bucket(self.report.rows))
+            } else {
+                json!(self.report.rows)
+            },
             "dialect": dialect_label(&self.report),
             "columns": columns,
             "issues": self.report.rejected.iter().map(|iss| issue_json(&self.report, &self.names, iss)).collect::<Vec<_>>(),
@@ -247,17 +265,27 @@ impl Session {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn query(&self, sql: &str) -> Result<QueryOut, Failure> {
+        self.query_on(&self.engine, sql)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn query_on(&self, engine: &Engine, sql: &str) -> Result<QueryOut, Failure> {
         self.guard(sql)?;
         let mut out = Packed::default();
-        let r = self.engine.sql_for_each(sql, |b| out.take(&b));
+        let r = engine.sql_for_each(sql, |b| out.take(&b));
         self.packed(out, r)
     }
 
     #[cfg(target_arch = "wasm32")]
     pub async fn query(&self, sql: &str) -> Result<QueryOut, Failure> {
+        self.query_on(&self.engine, sql).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn query_on(&self, engine: &Engine, sql: &str) -> Result<QueryOut, Failure> {
         self.guard(sql)?;
         let mut out = Packed::default();
-        let r = self.engine.sql_async_for_each(sql, |b| out.take(&b)).await;
+        let r = engine.sql_async_for_each(sql, |b| out.take(&b)).await;
         self.packed(out, r)
     }
 
@@ -267,9 +295,14 @@ impl Session {
             Ok(measured) => measured,
             Err(reason) => return Ok(skipped(reason)),
         };
-        let dropped = self.query(&measured.dropped).map_err(|f| f.local)?;
-        let answer = self.query(&measured.answer).map_err(|f| f.local)?;
-        Ok(filter_payload(&answer, &dropped))
+        let dropped = match self.query(&measured.dropped) {
+            Ok(out) => out,
+            Err(f) => return Ok(ran_and_failed(&f)),
+        };
+        Ok(match self.query(&measured.answer) {
+            Ok(answer) => filter_payload(&answer, &dropped, &measured),
+            Err(f) => ran_and_failed(&f),
+        })
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -278,21 +311,67 @@ impl Session {
             Ok(measured) => measured,
             Err(reason) => return Ok(skipped(reason)),
         };
-        let dropped = self.query(&measured.dropped).await.map_err(|f| f.local)?;
-        let answer = self.query(&measured.answer).await.map_err(|f| f.local)?;
-        Ok(filter_payload(&answer, &dropped))
+        let dropped = match self.query(&measured.dropped).await {
+            Ok(out) => out,
+            Err(f) => return Ok(ran_and_failed(&f)),
+        };
+        Ok(match self.query(&measured.answer).await {
+            Ok(answer) => filter_payload(&answer, &dropped, &measured),
+            Err(f) => ran_and_failed(&f),
+        })
     }
 
-    /// Replace the token map. An empty list clears it, so a later schema or
-    /// aggregates question neither restores a token nor sends one.
+    /// Start an ask: every token is dealt afresh, so no token names the same value in two asks.
+    /// An empty list clears the map, so a later schema or aggregates question neither restores a
+    /// token nor sends one. The same marks again keep the copy, which scanning and copying the
+    /// table would otherwise rebuild.
     pub fn bind(&mut self, identifiers: &[String]) {
-        self.marked = self
+        *self.deal.get_mut() = Deal::default();
+        let marked: BTreeSet<String> = self
             .names
             .iter()
             .filter(|name| identifiers.iter().any(|id| id == *name))
             .cloned()
             .collect();
-        self.tokens = pseudonym::assign(&self.names, &self.marked, &self.batches, self.order);
+        if !marked.is_empty() && marked == self.marked && self.tokenised.is_some() {
+            return;
+        }
+        self.marked = marked;
+        self.tokens = pseudonym::assign(&self.names, &self.marked, &self.batches);
+        self.withheld = pseudonym::withheld(&self.names, &self.marked, &self.batches, &self.tokens);
+        self.tokenised = None;
+        if !self.marked.is_empty() {
+            // Without the copy pseudonymised feedback refuses, so a failure here sends nothing.
+            self.tokenised = self.tokenised_engine().ok();
+        }
+    }
+
+    fn tokenised_engine(&mut self) -> Result<Engine, String> {
+        let mut nonce = [0u8; 16];
+        if !(self.random)(&mut nonce) {
+            return Err(pseudonym::UNDEALT.into());
+        }
+        self.prefix = nonce.iter().fold(String::from("ID_"), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+        self.prefix.push('_');
+        let mut out = Vec::with_capacity(self.batches.len());
+        for batch in &self.batches {
+            let batch = rename_batch(batch, &self.names)?;
+            out.push(pseudonym::tokenise(
+                &batch,
+                &self.names,
+                &self.marked,
+                &self.tokens,
+                &self.prefix,
+            )?);
+        }
+        let mut engine = Engine::open_empty_within(MEMORY_BYTES).map_err(|e| e.to_string())?;
+        engine
+            .register_batch(TABLE, out)
+            .map_err(|e| e.to_string())?;
+        Ok(engine)
     }
 
     pub fn proposals(&self) -> Vec<pseudonym::Proposal> {
@@ -312,11 +391,16 @@ impl Session {
         if self.marked.is_empty() {
             return Ok(pseudonym::omitted(&identifiers, pseudonym::NONE_MARKED));
         }
-        if let Err(reason) = pseudonym::projection_allows(sql, &self.marked) {
+        if let Err(reason) = pseudonym::projection_allows(sql, &self.marked, &self.withheld) {
             return Ok(pseudonym::omitted(&identifiers, reason));
         }
-        let out = self.query(sql).map_err(|f| f.local)?;
-        self.masked(&identifiers, out)
+        let Some(tokenised) = &self.tokenised else {
+            return Ok(pseudonym::omitted(&identifiers, pseudonym::NONE_MARKED));
+        };
+        match self.query_on(tokenised, sql) {
+            Ok(out) => Ok(self.dealt(&identifiers, &out)),
+            Err(f) => Ok(f.feedback),
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -326,11 +410,16 @@ impl Session {
         if self.marked.is_empty() {
             return Ok(pseudonym::omitted(&identifiers, pseudonym::NONE_MARKED));
         }
-        if let Err(reason) = pseudonym::projection_allows(sql, &self.marked) {
+        if let Err(reason) = pseudonym::projection_allows(sql, &self.marked, &self.withheld) {
             return Ok(pseudonym::omitted(&identifiers, reason));
         }
-        let out = self.query(sql).await.map_err(|f| f.local)?;
-        self.masked(&identifiers, out)
+        let Some(tokenised) = &self.tokenised else {
+            return Ok(pseudonym::omitted(&identifiers, pseudonym::NONE_MARKED));
+        };
+        match self.query_on(tokenised, sql).await {
+            Ok(out) => Ok(self.dealt(&identifiers, &out)),
+            Err(f) => Ok(f.feedback),
+        }
     }
 
     pub fn present_bound(
@@ -347,8 +436,34 @@ impl Session {
             narration,
             group,
             decimal,
-            self.tokens.restorations(),
+            self.deal.borrow().restorations(),
         )
+    }
+
+    /// The payload in this ask's tokens. Only a token sent in this ask is ever restored.
+    fn dealt(&self, identifiers: &[String], out: &QueryOut) -> String {
+        pseudonym::payload(
+            identifiers,
+            out,
+            &self.prefix,
+            &self.tokens,
+            &mut self.deal.borrow_mut(),
+            self.random,
+        )
+        .unwrap_or_else(|| pseudonym::omitted(identifiers, pseudonym::UNDEALT))
+    }
+
+    /// Whether the mode's check passes `sql`, from the statement and the marks alone. Only then may
+    /// the model hear that it failed or found no rows.
+    pub fn admits(&self, mode: &str, sql: &str) -> bool {
+        match mode {
+            "aggregates" => measure_sql(sql).is_ok(),
+            "pseudonym" => {
+                !self.marked.is_empty()
+                    && pseudonym::projection_allows(sql, &self.marked, &self.withheld).is_ok()
+            }
+            _ => false,
+        }
     }
 
     fn identifier_names(&self) -> Vec<String> {
@@ -357,13 +472,6 @@ impl Session {
             .filter(|name| self.marked.contains(*name))
             .cloned()
             .collect()
-    }
-
-    fn masked(&self, identifiers: &[String], out: QueryOut) -> Result<String, String> {
-        match pseudonym::mask(&out, &self.tokens, !self.marked.is_empty()) {
-            Ok(rows) => Ok(pseudonym::payload(identifiers, &out, rows)),
-            Err(reason) => Ok(pseudonym::omitted(identifiers, reason)),
-        }
     }
 
     fn guard(&self, sql: &str) -> Result<(), Failure> {
@@ -396,7 +504,7 @@ impl Session {
         } else {
             json!({
                 "error": "the statement planned and then failed while reading rows",
-                "kind": runtime_kind(&e.to_string()),
+                "kind": runtime_kind(e),
                 "note": "the message is not sent, since it can quote a cell",
             })
             .to_string()
@@ -474,21 +582,14 @@ pub struct Failure {
     pub before_rows: bool,
 }
 
-/// A fixed word chosen from the message, so the message itself stays here.
-fn runtime_kind(message: &str) -> &'static str {
-    let m = message.to_ascii_lowercase();
-    if m.contains("overflow") {
-        "overflow"
-    } else if m.contains("divide by zero") || m.contains("division by zero") {
-        "divide_by_zero"
-    } else if m.contains("cast") || m.contains("convert") {
-        "cast_failed"
-    } else if m.contains("cancel") || m.contains("timeout") {
-        "stopped"
-    } else if m.contains("resources exhausted") || m.contains("limit") {
-        "too_big"
-    } else {
-        "failed"
+/// A fixed word for the error's variant. Never its text: `error(text)` writes that from cells.
+fn runtime_kind(e: &burrmill::BurrmillError) -> &'static str {
+    use burrmill::BurrmillError as E;
+    match e {
+        E::Overflow(_) => "overflow",
+        E::LimitExceeded(_) => "too_big",
+        E::Timeout | E::Cancelled => "stopped",
+        _ => "failed",
     }
 }
 
@@ -800,7 +901,7 @@ posted,merchant,amount
                 failed.feedback
             );
             let value: Value = serde_json::from_str(&failed.feedback).unwrap();
-            assert_eq!(value["kind"], "cast_failed", "{sql}: {}", failed.local);
+            assert_eq!(value["kind"], "failed", "{sql}: {}", failed.local);
         }
         let unplanned = s.query("SELECT nosuch FROM t").unwrap_err();
         assert!(
@@ -853,16 +954,38 @@ posted,merchant,amount
     }
 
     #[test]
+    fn a_failure_while_reading_rows_is_named_by_its_variant_not_its_text() {
+        let s = session();
+        for sql in [
+            "SELECT CASE WHEN merchant = 'CANARY_MERCHANT_AAA' AND amount < -50 THEN error('overflow') END FROM t",
+            "SELECT CASE WHEN amount < -95 THEN error('division by zero') END FROM t",
+            "SELECT CASE WHEN amount < -95 THEN error('cannot cast') END FROM t",
+            "SELECT CASE WHEN amount < -95 THEN error('resources exhausted, limit') END FROM t",
+            "SELECT CASE WHEN amount < -95 THEN error('query cancelled, timeout') END FROM t",
+        ] {
+            let failed = s.query(sql).unwrap_err();
+            assert!(!failed.before_rows, "{sql}: {}", failed.local);
+            let value: Value = serde_json::from_str(&failed.feedback).unwrap();
+            assert_eq!(value["kind"], "failed", "{sql}: {}", failed.local);
+        }
+        let overflow = s
+            .query("SELECT CAST(-amount AS BIGINT) + 9223372036854775807 FROM t WHERE amount > -2")
+            .unwrap_err();
+        let value: Value = serde_json::from_str(&overflow.feedback).unwrap();
+        assert_eq!(value["kind"], "overflow", "{}", overflow.local);
+    }
+
+    #[test]
     fn the_card_has_no_cell_and_a_sign_has_no_magnitude() {
         let s = session();
-        let card = s.card(&[], &[]).unwrap();
+        let card = s.card(&[], &[], false).unwrap();
         assert_clean("card", &card);
         assert!(card.contains("\"rows\":4"));
         assert!(card.contains("DECIMAL"));
-        let signed = s.card(&["amount".into()], &[]).unwrap();
+        let signed = s.card(&["amount".into()], &[], false).unwrap();
         assert_clean("sign", &signed);
         assert!(signed.contains("negative"));
-        let dated = s.card(&[], &["posted".into()]).unwrap();
+        let dated = s.card(&[], &["posted".into()], false).unwrap();
         assert!(dated.contains("2024-01-02"), "{dated}");
         assert!(dated.contains("2024-04-05"), "{dated}");
         assert!(!dated.contains("CANARY_MERCHANT_AAA"));

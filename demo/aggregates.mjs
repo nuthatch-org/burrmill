@@ -109,6 +109,7 @@ if (bodies.length !== sentSpent) bad('an ask past the budget sent ' + (bodies.le
 
 if (bodies.length < 2) bad('expected two requests, got ' + bodies.length);
 if (!blurb.includes('Groups of 10')) bad('blurb: ' + blurb);
+if (!blurb.includes('single row')) bad('blurb does not state the limit: ' + blurb);
 if (stored.local) bad('key landed in localStorage');
 if (stored.session) bad('key landed in sessionStorage');
 if (hosts.length) bad('unexpected hosts ' + hosts.join(' '));
@@ -116,7 +117,7 @@ if (bodies[0] && (bodies[0].includes('KEPT_GROUP') || bodies[0].includes('CANARY
   bad('first request already had a group value');
 }
 const second = bodies[1] || '';
-if (!second.includes('\\"dropped\\":9') && !second.includes('"dropped":9')) {
+if (!second.includes('\\"dropped\\":\\"0-9\\"') && !second.includes('"dropped":"0-9"')) {
   bad('dropped count missing');
 }
 if (!second.includes('KEPT_GROUP')) bad('kept group missing');

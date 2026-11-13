@@ -23,7 +23,7 @@ it. The page does the HTTP (`demo/app.js`); the crates do none.
 
 Each request to the model (`promptText` and `requestBody` in `demo/app.js`) carries:
 
-- the card (`Session::card`): table name, row count, CSV dialect (`parquet` or `json` for those
+- the card (`Session::card`): table name, row count (in aggregates mode a bucket, as below), CSV dialect (`parquet` or `json` for those
   files), each column's name, inferred type, null count and note, and ingest issues as row number,
   column and reason. No cell value.
   For a column the user ticks as a sign, one word for its sign; for one ticked as a date, its
@@ -31,11 +31,12 @@ Each request to the model (`promptText` and `requestBody` in `demo/app.js`) carr
 - the grammar (`Session::grammar`): the dialect (DuckDB), the admitted statement kinds, the DuckDB spellings the engine rewrites (`Engine::duckdb_spellings`), the few it refuses by name, the functions refused over DECIMAL, and the registered function names;
 - the question, and on a retry the model's own previous statement with that attempt's feedback.
 
-Feedback after a query that ran is its shape (`feedback_shape`): row count, column names and types,
-and whether it was truncated. A query that failed before reading a row sends its message through
-`redact`, which replaces stored cell strings and quoted spans of four characters or more; one that failed while reading rows sends only a
-fixed kind (`cast_failed`, `divide_by_zero`, `overflow`, `too_big`, `stopped`, `failed`), from
-`Session::failure`. Every statement is first held to table `t` by `inspect::reach_uploads`.
+A query that failed before reading a row sends its message through `redact`, which replaces stored
+cell strings and quoted spans of four characters or more. Whether a failure while reading rows, or
+an answer with no rows, is sent depends on the mode below. A failure that is sent is a fixed kind
+taken from the error's variant, never from its text (`overflow`, `too_big`, `stopped`, `failed`),
+from `Session::failure`; an empty answer that is sent is its shape (`feedback_shape`): row count,
+column names and types, and whether it was truncated. Every statement is first held to table `t` by `inspect::reach_uploads`.
 
 The answer is run, charted and narrated in the tab (`Session::present_bound`); its rows are not sent.
 Its statement can be edited and run again with "Run here", which queries the tab and sends nothing;
@@ -52,9 +53,27 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
   must be one grouped read of `t`; `HAVING`, `LIMIT` and any `group_n` it wrote are removed, and
   `count(*) AS group_n` is added. Each output must be a grouping key, or `count`, `sum` or `avg` of a
   column with arithmetic, `CAST` and `round` over them; `DISTINCT` only in `count`; `FILTER` and
-  `CASE` inside an aggregate are refused, as is a CTE named `t`. The feedback (`filter_payload`) is
-  the groups with `group_n` of at least k and the number dropped. Anything else sends no group and
-  a reason.
+  `CASE` inside an aggregate are refused, as is a CTE named `t`. A count may stand only as itself
+  (cast or rounded) or as what a `sum` or `avg` is divided by: `count(*) * 7` or `count(*) - 45` is
+  refused. The feedback (`filter_payload`) is the groups with `group_n` of at least k and the
+  number dropped. Anything else sends no group and a reason.
+  Every count leaves as a bucket (`bucket`): `0-9` below k, then `10-99`, `100-999` and so on. That
+  is each group's `group_n` and each count the model wrote, the number of groups dropped, and the
+  card's row count. One member added to or taken from a group changes nothing sent unless the
+  count sits exactly on an edge, such as 99 and 100; that is the same bounded leak as comparing two
+  asks. An answer with no row and one whose groups were all dropped send the same thing, the
+  groups go in one order whatever `ORDER BY` said, and a `HAVING` over a count or a limit after
+  `ORDER BY` a count is not applied to what is sent (`not_applied` says so), since either would
+  pick groups by an exact count. `sum` and `avg` are sent exact.
+  **The limit.** Aggregates mode keeps rows from leaving and coarsens counts, but a model that sets
+  out to can learn about a single row from a run of questions: a key or `WHERE` that singles out
+  one person still moves an exact `sum`, `sum(flag)` is that group's exact size, and one member
+  at the edge of k moves a group between sent and dropped. Do not use it on data whose single rows
+  must stay secret. The page says so where the mode is chosen. A statement that fails while reading rows sends only that it failed, with no kind, and
+  one `measure_sql` refuses gets its refusal whether it failed or not. Once the groups have been
+  sent, a later attempt that fails or finds no rows ends the question on the page. Whether a
+  passed statement fails is still one bit per attempt about the data, and can be about one member:
+  `error()`, an overflow or a failed cast in a `WHERE` or a key can turn on one value.
 - **Pseudonymised**. The user marks identifier columns (`Session::bind`; `Session::proposals` offers
   them). Each distinct marked value is a token such as `CUSTOMER_3`; the map stays in the tab
   (`pseudonym::assign`) and narration restores values locally. A marked column (or a name renamed from one)
@@ -62,11 +81,19 @@ the rows on the page, with a `'` before any cell that a spreadsheet would read a
   anywhere else, by name in an expression, `WHERE`, `HAVING`, `QUALIFY`, a join condition,
   `ORDER BY` (also by position or `ALL`) and `DISTINCT ON`, and by a closing scan in any other clause
   (`LIMIT`, a named window). It also refuses a `NATURAL` join, a set operation other than `UNION ALL`
-  over a marked column, and `* REPLACE`, `* RENAME` and a star alias. If allowed, the rows go with marked values as tokens;
-  a cell that still looks like an identifier, or contains a marked value of eight characters or
-  more, sends no rows (`mask`). With
-  nothing marked, no rows are sent.
-- **Local model**. Requests go to `http://127.0.0.1:<port>/v1/messages` with no key, and carry
+  over a marked column, `* REPLACE`, `* RENAME`, a star alias and a column list on the table
+  (`t AS s(a, b)`). If allowed, the statement runs again over a copy of `t` in which each marked
+  value is its token (`pseudonym::tokenise`), and those rows go: a token in them came from a marked
+  column, and a literal in the statement goes as it was written, whatever it is. An unmarked column
+  with a cell that is, contains (eight characters or more) or looks like an identifier is withheld
+  (`pseudonym::withheld`): while one is, a statement that names it anywhere, or uses a star, a
+  column list or a `USING` or `NATURAL` join, sends no rows. That is decided from the table, not the
+  answer, so a literal cannot ask whether it is one of the values. A copy in another spelling, such
+  as `user20 at mail` in an unmarked column, is not recognised and goes as it is. Renaming a column clears the
+  marks. With nothing marked, no rows are sent. Only a statement `projection_allows` passes is told that it
+  failed while reading rows or found no rows (`Session::admits`); a refused one gets its refusal
+  either way, and the page asks nothing more about it.
+- **Local model**. Every failure and empty answer is sent. Requests go to `http://127.0.0.1:<port>/v1/messages` with no key, and carry
   `SELECT * FROM t` as JSON, up to the row cap. The model field holds a name the local server has
   (it starts empty in this mode), and the server must allow the page's origin: for Ollama, set
   `OLLAMA_ORIGINS`. A server that does not shows as a failed fetch.
@@ -123,7 +150,8 @@ From `demo/index.html` and `demo/app.js`:
 - The page: `demo/egress.mjs` drives the page in Chromium with Playwright and fails if a canary cell
   appears in any request body or in the log, if the key is in a body, or if any host other than
   localhost and `api.anthropic.com` is contacted. `aggregates.mjs`, `pseudonym.mjs`, `local.mjs`,
-  `send.mjs`, `warn.mjs`, `offline.mjs` and `persist.mjs` cover the other modes and controls, and
+  `send.mjs`, `warn.mjs`, `offline.mjs` and `persist.mjs` cover the other modes and controls,
+  `guesses.mjs` asks about one person both ways and fails if the two sent different requests, and
   `a11y.mjs` fails on any axe violation. CI's `demo` job builds the engine with `demo/build.sh` and
   runs every `demo/*.mjs`.
 

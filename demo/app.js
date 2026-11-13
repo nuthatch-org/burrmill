@@ -150,6 +150,8 @@ function promptText(question, card, grammar, feedback, previousSql, mode, identi
         ', and how many groups were dropped.',
       'A smaller group is not in that list. Rows that are not groups are not sent.',
       'group_n is the measured size of a group.',
+      'Every count, group_n, the number dropped and the row count of t come back as a range such as 10-99.',
+      'A count leaves only as itself or as what a sum or avg is divided by. HAVING over a count, and a limit after ORDER BY a count, are not applied to what is sent.',
     );
   }
   if (mode === 'pseudonymised') {
@@ -180,7 +182,12 @@ function describeMode() {
   const mode = document.getElementById('mode').value;
   const blurb = document.getElementById('blurb');
   if (mode === 'aggregates') {
-    blurb.textContent = 'Groups of ' + AGGREGATE_K + ' or more can leave. Smaller groups stay.';
+    blurb.textContent =
+      'Groups of ' +
+      AGGREGATE_K +
+      ' or more can leave, with their counts as ranges. Rows and smaller groups stay. A model that ' +
+      'sets out to can still learn about a single row from a run of questions, so do not use this ' +
+      'mode on data whose single rows must stay secret.';
   } else if (mode === 'pseudonymised') {
     blurb.textContent = 'Identifier columns leave as tokens. The values stay here.';
   } else if (mode === 'local-model') {
@@ -237,7 +244,7 @@ function dropStatus(text) {
   } catch {
     return '';
   }
-  if (typeof payload.dropped === 'number') {
+  if (typeof payload.dropped === 'string') {
     return payload.dropped + ' groups under ' + payload.k + ' were left out of the request.';
   }
   if (payload.omitted) return 'No groups were sent.';
@@ -933,7 +940,11 @@ async function ask() {
     if (mode === 'local-model') holdLocal();
     const identifiers = mode === 'pseudonymised' ? ticked('identifier') : [];
     await call('bind', { identifiers });
-    const packed = await call('card', { signs: ticked('sign'), dates: ticked('date') });
+    const packed = await call('card', {
+      signs: ticked('sign'),
+      dates: ticked('date'),
+      coarse: mode === 'aggregates',
+    });
     let rows = '';
     if (mode === 'local-model') {
       const dumped = await call('query', { sql: 'SELECT * FROM t' });
@@ -949,8 +960,7 @@ async function ask() {
     let feedback = '';
     let previousSql = '';
     let lastError = '';
-    let fedGroups = false;
-    let fedTokens = false;
+    let fed = false;
     for (let attempt = 0; attempt < 4; attempt++) {
       const body = requestBody(
         model,
@@ -995,24 +1005,38 @@ async function ask() {
         status(queried.error);
         return;
       }
-      if (queried.error) {
+      if (queried.error && (queried.before_rows || mode === 'local-model')) {
         feedback = queried.feedback;
         status(queried.error);
         continue;
       }
-      if (mode === 'aggregates' && !fedGroups && attempt < 3) {
-        feedback = await call('aggregates', { sql: reply.sql });
-        fedGroups = true;
-        status(dropStatus(feedback));
-        continue;
-      }
-      if (mode === 'pseudonymised' && !fedTokens && attempt < 3) {
-        feedback = await call('pseudonym', { sql: reply.sql });
-        fedTokens = true;
-        status(tokenStatus(feedback));
-        continue;
-      }
-      if (queried.answer.rows.length === 0 && attempt < 3 && mode !== 'schema') {
+      if (mode === 'aggregates' || mode === 'pseudonymised') {
+        const op = mode === 'aggregates' ? 'aggregates' : 'pseudonym';
+        // From here the model hears only the mode's answer, and what the run did only when the
+        // mode passes the statement: a refused one is answered alike whether it failed or not.
+        const admitted = await call('admits', { mode: op, sql: reply.sql });
+        if (queried.error) status(queried.error);
+        if (!fed && attempt < 3) {
+          feedback = await call(op, { sql: reply.sql });
+          if (!(queried.error && admitted)) fed = true;
+          if (!queried.error) status(op === 'aggregates' ? dropStatus(feedback) : tokenStatus(feedback));
+          continue;
+        }
+        // An aggregate's failure or empty answer can turn on one member, so it is not asked about.
+        const told = admitted && mode === 'pseudonymised' && attempt < 3;
+        if (queried.error) {
+          if (told) {
+            feedback = await call(op, { sql: reply.sql });
+            continue;
+          }
+          return;
+        }
+        if (queried.answer.rows.length === 0 && told) {
+          feedback = queried.feedback;
+          status('No rows. Asking again.');
+          continue;
+        }
+      } else if (queried.answer.rows.length === 0 && attempt < 3 && mode !== 'schema') {
         feedback = queried.feedback;
         status('No rows. Asking again.');
         continue;
