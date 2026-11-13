@@ -1,0 +1,120 @@
+# yatr - https://github.com/cargopete/yatr
+#
+# One task per step of .github/workflows/ci.yml, which calls them by name; ci is every job but
+# demo, whose browser tests need wasm-bindgen, node and Playwright's chromium.
+
+[env]
+CARGO_TERM_COLOR = "always"
+
+[settings]
+cache = true
+
+[tasks.fmt]
+desc = "Format the tree"
+run = ["cargo fmt --all"]
+no_cache = true
+
+[tasks.fmt-check]
+desc = "Fail if the tree is unformatted"
+run = ["cargo fmt --all --check"]
+sources = ["crates/**/*.rs"]
+
+[tasks.fuzz-lock]
+desc = "fuzz/ has its own lock; fail if it no longer resolves"
+run = ["cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null"]
+shell = true
+sources = ["fuzz/Cargo.toml", "fuzz/Cargo.lock", "crates/*/Cargo.toml"]
+
+[tasks.lint]
+desc = "Clippy on burrmill, default graph and with datafusion"
+run = [
+    "cargo clippy --locked -p burrmill --all-targets -- -D warnings",
+    "cargo clippy --locked -p burrmill --all-targets --features datafusion -- -D warnings",
+]
+sources = ["crates/burrmill/**", "vendor/**", "corpus/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+
+# The datafusion run includes generated_planner, which rustfmts its output to compare it.
+[tasks.test]
+desc = "burrmill's tests, default graph and with datafusion"
+run = [
+    "cargo test --locked -p burrmill",
+    "cargo test --locked -p burrmill --features datafusion",
+]
+sources = ["crates/burrmill/**", "vendor/**", "corpus/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+watch = ["crates/burrmill/**"]
+
+[tasks.bench-lint]
+desc = "Clippy on the bench, which builds a bundled DuckDB"
+run = ["cargo clippy --locked -p burrmill-bench --all-targets --all-features -- -D warnings"]
+sources = ["crates/burrmill/**", "crates/burrmill-bench/**", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+
+[tasks.deny]
+desc = "Advisories, licences, duplicates and sources, from deny.toml"
+run = ["cargo deny --all-features check"]
+no_cache = true
+
+[tasks.ingest]
+desc = "Clippy and tests on the tab's reader, bare and with json,parquet"
+run = [
+    "cargo clippy --locked -p burrmill-ingest --all-targets -- -D warnings",
+    "cargo clippy --locked -p burrmill-ingest --all-targets --features json,parquet -- -D warnings",
+    "cargo test --locked -p burrmill-ingest",
+    "cargo test --locked -p burrmill-ingest --features json,parquet",
+]
+sources = ["crates/burrmill-ingest/**", "corpus/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+
+[tasks.ingest-size]
+desc = "The reader's wasm32 graph has no C, and its gzip size"
+run = ["docs/bench/ingest-wasm.sh"]
+sources = ["crates/burrmill-ingest/**", "docs/bench/ingest-wasm.sh", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+
+[tasks.tab]
+desc = "Clippy and tests on burrmill-wasm"
+run = [
+    "cargo clippy --locked -p burrmill-wasm --all-targets -- -D warnings",
+    "cargo test --locked -p burrmill-wasm",
+]
+sources = ["crates/burrmill/**", "crates/burrmill-ingest/**", "crates/burrmill-wasm/**", "vendor/**", "corpus/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+
+# What only wasm32 leaves unused is seen by no clippy above.
+[tasks.tab-build]
+desc = "burrmill-wasm for wasm32, warnings refused"
+run = ["cargo build --locked -p burrmill-wasm --target wasm32-unknown-unknown"]
+env = { RUSTFLAGS = "-D warnings" }
+sources = ["crates/burrmill/**", "crates/burrmill-ingest/**", "crates/burrmill-wasm/**", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+
+[tasks.engine-size]
+desc = "The demo's ingest-engine.wasm under 8 MiB gzipped"
+run = [
+    "cargo build -p burrmill-size --locked --target wasm32-unknown-unknown --features engine --bin ingest-engine --profile wasm-size",
+    "gz=$(gzip -9 -c target/wasm32-unknown-unknown/wasm-size/ingest-engine.wasm | wc -c) && echo \"ingest-engine.wasm gzip -9: $gz\" && test \"$gz\" -le 8388608",
+]
+shell = true
+sources = ["crates/burrmill/**", "crates/burrmill-ingest/**", "crates/burrmill-size/**", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+
+[tasks.demo-build]
+desc = "demo/pkg: burrmill-wasm and its JS glue (needs the pinned wasm-bindgen)"
+run = ["demo/build.sh"]
+sources = ["crates/burrmill/**", "crates/burrmill-ingest/**", "crates/burrmill-wasm/**", "vendor/**", "demo/build.sh", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+outputs = ["demo/pkg"]
+
+[tasks.demo-test]
+desc = "Every demo/*.mjs against the built engine on a static server"
+depends = ["demo-build"]
+cwd = "demo"
+shell = true
+run = ["""
+npm ci && npx playwright install chromium
+python3 -m http.server 18747 --bind 127.0.0.1 >/dev/null 2>&1 & server=$!
+trap 'kill $server' EXIT
+until curl -sf http://127.0.0.1:18747/ >/dev/null; do sleep 1; done
+failed=0
+for t in *.mjs; do node "$t" 18747 || { failed=1; echo "$t failed"; }; done
+exit $failed
+"""]
+no_cache = true
+
+[tasks.ci]
+desc = "Every CI job but demo"
+depends = ["fmt-check", "fuzz-lock", "lint", "test", "bench-lint", "deny", "ingest", "ingest-size", "tab", "tab-build", "engine-size"]
+run = []
