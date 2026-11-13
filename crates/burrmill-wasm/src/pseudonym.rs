@@ -16,8 +16,6 @@ use sqlparser::ast::{
     Select, SelectItem, SetExpr, SetOperator, SetQuantifier, Statement, TableAlias, TableFactor,
     Value as SqlValue, Visit, Visitor,
 };
-use sqlparser::dialect::DuckDbDialect;
-use sqlparser::parser::Parser;
 
 use crate::format::cell_string;
 use crate::session::QueryOut;
@@ -233,7 +231,7 @@ pub fn projection_allows(
     marked: &BTreeSet<String>,
     withheld: &BTreeSet<String>,
 ) -> Result<(), &'static str> {
-    let mut statements = Parser::parse_sql(&DuckDbDialect {}, sql).map_err(|_| NOT_ONE)?;
+    let mut statements = burrmill::inspect::parse(sql).map_err(|_| NOT_ONE)?;
     if statements.len() != 1 {
         return Err(NOT_ONE);
     }
@@ -1111,6 +1109,23 @@ OTHER_MERCHANT,canary.two@example.com,DE89370400440532013000,+359 888 100002,-3.
         assert_no("renamed passthrough", &renamed);
         assert!(renamed.contains("CUSTOMER_"), "{renamed}");
         assert!(renamed.contains("KEPT_MERCHANT"), "{renamed}");
+    }
+
+    #[test]
+    fn the_engines_own_syntax_is_checked_and_a_refused_form_sends_nothing() {
+        let s = bound();
+        let payload = s
+            .pseudonym_feedback("SELECT merchant, amount FROM t WHERE merchant ^@ 'KEPT'")
+            .unwrap();
+        assert_no("engine syntax", &payload);
+        assert!(payload.contains("KEPT_MERCHANT"), "{payload}");
+        let payload = s
+            .pseudonym_feedback("SELECT merchant, amount FROM t WHERE merchant GLOB 'KEPT*'")
+            .unwrap();
+        assert_no("glob", &payload);
+        assert!(!payload.contains("KEPT_MERCHANT"), "{payload}");
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        assert!(value["omitted"].is_string(), "{payload}");
     }
 
     #[test]

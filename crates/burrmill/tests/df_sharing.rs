@@ -272,3 +272,34 @@ fn a_shared_aggregate_is_charged_its_size_once() {
         m.peak_memory_bytes
     );
 }
+
+/// A shared definition's built values are charged to the pool once, by the values themselves; held
+/// for the definition's other readers, they are not charged again.
+#[test]
+fn held_built_values_are_charged_once() {
+    let e = Engine::builder()
+        .budget(burrmill::Budget {
+            memory_bytes: 1 << 30,
+            threads: 1,
+            spill: None,
+        })
+        .open()
+        .unwrap();
+    let sql = "WITH g AS (SELECT k, repeat('x', 1000 + k % 2) AS w FROM
+                          (SELECT range % 20000 AS k, count(*) AS c FROM range(40000) GROUP BY 1))
+               SELECT max(length(w)) FROM g UNION ALL SELECT min(length(w)) FROM g";
+    let plan: String = e
+        .sql(&format!("EXPLAIN {sql}"))
+        .unwrap()
+        .iter()
+        .flat_map(|b| burrmill::df::encode::rows(b).unwrap())
+        .map(|r| r.to_string())
+        .collect();
+    assert!(plan.contains("SharedExec"), "not shared: {plan}");
+    e.take_memory_peak();
+    let got = e.sql(sql).unwrap();
+    assert_eq!(got.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
+    let peak = e.take_memory_peak();
+    // 20,000 values of 1,000 bytes are 20 MB, held once.
+    assert!(peak < 26 << 20, "a 20 MB definition peaked at {peak}");
+}

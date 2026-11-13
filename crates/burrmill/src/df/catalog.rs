@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
@@ -211,9 +211,13 @@ pub(super) fn listed(plan: &Arc<dyn ExecutionPlan>, partition: usize) -> usize {
         })
 }
 
-/// The pool reservations of one scan's running partitions. Its reader factory charges a segment
-/// to its partition's as the segment opens, so a scan holds for what it has opened and not for
-/// every segment of the table before its first row (#156).
+/// The pool reservations of one scan's partition runs. Its reader factory charges a segment to its
+/// partition's run as the segment opens, so a scan holds for what it has opened and not for every
+/// segment of the table before its first row (#156).
+///
+/// A run's charge lasts as long as this does. DataFusion registers each opened segment's metrics in
+/// the scan's one metrics set, which the plan and every partition's reader hold, as they hold this:
+/// the bytes are freed with the last of them, not as each segment or partition finishes.
 #[derive(Debug, Default)]
 pub(super) struct Opened(Mutex<HashMap<usize, Vec<Running>>>);
 
@@ -221,42 +225,39 @@ type Held = datafusion_execution::memory_pool::MemoryReservation;
 
 #[derive(Debug)]
 struct Running {
-    held: Weak<Held>,
+    held: Held,
     /// A segment's bloom filters are read through a second reader, which must not charge it twice.
     charged: HashSet<u64>,
 }
 
 impl Opened {
-    /// `held` is what `partition` charges from here on, until its stream drops it.
-    pub(super) fn running(&self, partition: usize, held: &Arc<Held>) {
+    /// `held` is what `partition` charges from here on.
+    pub(super) fn running(&self, partition: usize, held: Held) {
         let mut all = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        let runs = all.entry(partition).or_default();
-        runs.retain(|r| r.held.strong_count() > 0);
-        runs.push(Running {
-            held: Arc::downgrade(held),
+        all.entry(partition).or_default().push(Running {
+            held,
             charged: HashSet::new(),
         });
     }
 
-    fn opened(&self, partition: usize, file: &PartitionedFile) {
+    fn opened(&self, partition: usize, file: &PartitionedFile) -> DFResult<()> {
         let location = file.object_meta.location.as_ref();
         let mut all = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        // A plan run again while its first run is still read charges the newer run.
-        let Some((run, held)) = all
-            .get_mut(&partition)
-            .into_iter()
-            .flatten()
-            .rev()
-            .find_map(|r| r.held.upgrade().map(|h| (r, h)))
-        else {
-            return;
+        // A plan run again charges its newer run.
+        let Some(run) = all.get_mut(&partition).and_then(|runs| runs.last_mut()) else {
+            return Ok(());
         };
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hash::hash(location, &mut h);
         if run.charged.insert(std::hash::Hasher::finish(&h)) {
-            // Charged whether or not it fits, so the operators that can spill make room for it.
-            held.grow(PER_SEGMENT - LISTED);
+            run.held.try_grow(PER_SEGMENT - LISTED).map_err(|e| {
+                e.context(format!(
+                    "a scan's bookkeeping for the segments it has opened ({} so far in this partition)",
+                    run.charged.len()
+                ))
+            })?;
         }
+        Ok(())
     }
 }
 
@@ -277,7 +278,7 @@ impl ParquetFileReaderFactory for Unmetered {
         metadata_size_hint: Option<usize>,
         _metrics: &ExecutionPlanMetricsSet,
     ) -> DFResult<Box<dyn AsyncFileReader + Send>> {
-        self.2.opened(partition_index, &file);
+        self.2.opened(partition_index, &file)?;
         let unread = ExecutionPlanMetricsSet::new();
         let inner = self
             .0
@@ -316,6 +317,243 @@ pub(super) struct Selection {
     store: Arc<dyn object_store::ObjectStore>,
     footers: Arc<FileMetadataCache>,
     files: Vec<object_store::ObjectMeta>,
+    /// Files on this machine, whose [`Summary`] may already be kept.
+    local: bool,
+    /// The columns the pruning predicate reads, whose statistics a kept summary must hold.
+    pruned_by: Option<HashSet<String>>,
+}
+
+/// What a metered statement needs of a local segment's footer: each row group's row count and each
+/// leaf column's compressed bytes, and for the columns predicates have named, their statistics.
+/// A few hundred bytes a segment where the footer is many kilobytes, so they stay when the footer
+/// cache cannot keep the footers.
+struct Summary {
+    descr: Arc<parquet::schema::types::SchemaDescriptor>,
+    rows: Arc<[i64]>,
+    /// Row group by row group, a value a leaf.
+    sizes: Arc<[u64]>,
+    /// By leaf, a row group at a time, for the leaves a predicate has needed.
+    stats: HashMap<usize, Arc<[Option<parquet::file::statistics::Statistics>]>>,
+}
+
+impl Summary {
+    fn leaves(&self) -> usize {
+        self.descr.num_columns()
+    }
+
+    /// The row groups the footer held, with the statistics kept: all the pruning reads.
+    fn groups(&self) -> DFResult<Vec<parquet::file::metadata::RowGroupMetaData>> {
+        use parquet::file::metadata::{ColumnChunkMetaData, RowGroupMetaData};
+        let n = self.leaves();
+        self.rows
+            .iter()
+            .enumerate()
+            .map(|(g, rows)| {
+                let columns = (0..n)
+                    .map(|i| {
+                        let mut c = ColumnChunkMetaData::builder(self.descr.column(i))
+                            .set_total_compressed_size(self.sizes[g * n + i] as i64);
+                        if let Some(s) = self.stats.get(&i).and_then(|s| s[g].clone()) {
+                            c = c.set_statistics(s);
+                        }
+                        c.build()
+                    })
+                    .collect::<parquet::errors::Result<Vec<_>>>()?;
+                RowGroupMetaData::builder(Arc::clone(&self.descr))
+                    .set_num_rows(*rows)
+                    .set_column_metadata(columns)
+                    .build()
+            })
+            .collect::<parquet::errors::Result<Vec<_>>>()
+            .map_err(|e| datafusion_common::DataFusionError::External(Box::new(e)))
+    }
+}
+
+/// The leaves under the top-level columns `names`, in `descr`'s order.
+fn leaves_of(
+    descr: &parquet::schema::types::SchemaDescriptor,
+    names: &HashSet<String>,
+) -> Vec<usize> {
+    (0..descr.num_columns())
+        .filter(|&i| {
+            descr
+                .column(i)
+                .path()
+                .parts()
+                .first()
+                .is_some_and(|root| names.contains(root))
+        })
+        .collect()
+}
+
+/// A file's length and modification time, which a file rewritten at the same path would not share.
+pub(super) type Stamp = (u64, chrono::DateTime<chrono::Utc>);
+
+#[derive(Default)]
+struct Summaries {
+    by_file: HashMap<String, (Stamp, Arc<Summary>, usize)>,
+    /// One copy of each distinct footer schema.
+    descrs: Vec<Arc<parquet::schema::types::SchemaDescriptor>>,
+    /// About what the map holds: its keys, entries, sizes and statistics, and each distinct schema.
+    bytes: usize,
+}
+
+/// What one distinct footer schema costs the map, a column at a time.
+const DESCR_COLUMN_BYTES: usize = 256;
+
+/// What an entry holds beyond its key, sizes and row counts.
+const ENTRY_BYTES: usize = 170;
+
+/// What one kept column's statistics hold beyond each row group's own.
+const STATS_BYTES: usize = 173;
+
+static SUMMARIES: std::sync::LazyLock<Mutex<Summaries>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Footers the metered pass has read, for a test that a statement run again reads none.
+pub(super) static SELECTION_FOOTER_READS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The length and modification time of the local file at `path`.
+pub(super) fn stamp_of(path: &Path) -> Option<Stamp> {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.len(), m.modified().ok()?.into()))
+}
+
+/// What one kept statistic costs beyond its own bytes.
+fn statistic_bytes(s: &Option<parquet::file::statistics::Statistics>) -> usize {
+    std::mem::size_of::<Option<parquet::file::statistics::Statistics>>()
+        + s.as_ref().map_or(0, |s| {
+            s.min_bytes_opt().map_or(0, <[u8]>::len) + s.max_bytes_opt().map_or(0, <[u8]>::len)
+        })
+}
+
+/// Keeps the summary of the local segment at `location` from its footer, with the statistics of
+/// `leaves` beside any it already holds.
+pub(super) fn note_summary(
+    location: &str,
+    stamp: Stamp,
+    meta: &parquet::file::metadata::ParquetMetaData,
+    leaves: &[usize],
+) {
+    let groups = meta.row_groups();
+    let mut cache = SUMMARIES.lock().unwrap_or_else(|p| p.into_inner());
+    // Full, it keeps what it has rather than starting again, and a segment it cannot keep is costed
+    // from its footer as before. Emptied only when the limit has fallen below what it holds.
+    let limit = super::session::local_sizes_limit();
+    if cache.bytes > limit {
+        *cache = Summaries::default();
+    }
+    let held = cache
+        .by_file
+        .get(location)
+        .filter(|(s, ..)| *s == stamp)
+        .map(|(_, sum, b)| (Arc::clone(sum), *b));
+    // What a replaced entry was counted, stale or not, is given back.
+    let replaced = cache.by_file.get(location).map_or(0, |(.., b)| *b);
+    let mut schema = 0;
+    let kept = held.is_some();
+    let (base, mut bytes) = match held {
+        Some((sum, b)) => (sum, b),
+        None => {
+            let descr = meta.file_metadata().schema_descr_ptr();
+            let n = descr.num_columns();
+            let descr = match cache.descrs.iter().find(|d| ***d == *descr) {
+                Some(d) => Arc::clone(d),
+                None => {
+                    schema = DESCR_COLUMN_BYTES * n;
+                    descr
+                }
+            };
+            let sizes: Arc<[u64]> = groups
+                .iter()
+                .flat_map(|g| {
+                    g.columns()
+                        .iter()
+                        .map(|c| c.compressed_size().max(0) as u64)
+                })
+                .collect();
+            let rows: Arc<[i64]> = groups.iter().map(|g| g.num_rows()).collect();
+            let sum = Arc::new(Summary {
+                descr,
+                rows,
+                sizes,
+                stats: HashMap::new(),
+            });
+            (sum, entry_bytes(location.len(), groups.len(), n))
+        }
+    };
+    let missing: Vec<usize> = leaves
+        .iter()
+        .copied()
+        .filter(|i| !base.stats.contains_key(i))
+        .collect();
+    if kept && missing.is_empty() {
+        return;
+    }
+    let mut stats = base.stats.clone();
+    for &i in &missing {
+        let per: Arc<[_]> = groups
+            .iter()
+            .map(|g| g.column(i).statistics().cloned())
+            .collect();
+        bytes += STATS_BYTES + per.iter().map(statistic_bytes).sum::<usize>();
+        stats.insert(i, per);
+    }
+    if cache.bytes - replaced + bytes + schema > limit {
+        return;
+    }
+    if schema > 0 {
+        cache.descrs.push(Arc::clone(&base.descr));
+    }
+    let sum = Arc::new(Summary {
+        descr: Arc::clone(&base.descr),
+        rows: Arc::clone(&base.rows),
+        sizes: Arc::clone(&base.sizes),
+        stats,
+    });
+    // A schema is counted once, when it is first kept, and stays counted while it is.
+    cache.bytes = cache.bytes - replaced + bytes + schema;
+    cache
+        .by_file
+        .insert(location.to_string(), (stamp, sum, bytes));
+}
+
+/// What an entry holds on the heap before any statistics: its key, the map's slot, the summary and
+/// its sizes and row counts. Measured by `tests/df_metersizes_bytes.rs`.
+fn entry_bytes(path: usize, groups: usize, leaves: usize) -> usize {
+    path + 8 * groups * (leaves + 1) + ENTRY_BYTES
+}
+
+/// Keeps the summaries of the local segments at `paths` as a host's bind does, with the statistics
+/// of `columns`, and returns what the map then counts.
+pub(super) fn keep_summaries(paths: &[PathBuf], columns: &[&str]) -> usize {
+    let names: HashSet<String> = columns.iter().map(|c| c.to_string()).collect();
+    let mut parents = HashMap::new();
+    for p in paths {
+        let meta = std::fs::File::open(p)
+            .ok()
+            .and_then(|f| ArrowReaderMetadata::load(&f, ArrowReaderOptions::new()).ok());
+        if let (Some(meta), Ok(loc), Some(stamp)) =
+            (meta, local_location(p, &mut parents), stamp_of(p))
+        {
+            let leaves = leaves_of(meta.metadata().file_metadata().schema_descr(), &names);
+            note_summary(loc.as_ref(), stamp, meta.metadata(), &leaves);
+        }
+    }
+    SUMMARIES.lock().unwrap_or_else(|p| p.into_inner()).bytes
+}
+
+/// The kept summary of the segment at `location`, if it holds the statistics of `leaves`.
+fn summary(location: &str, stamp: Stamp, names: Option<&HashSet<String>>) -> Option<Arc<Summary>> {
+    let cache = SUMMARIES.lock().unwrap_or_else(|p| p.into_inner());
+    let (_, sum, _) = cache.by_file.get(location).filter(|(s, ..)| *s == stamp)?;
+    let complete = names.is_none_or(|n| {
+        leaves_of(&sum.descr, n)
+            .iter()
+            .all(|i| sum.stats.contains_key(i))
+    });
+    complete.then(|| Arc::clone(sum))
 }
 
 /// The footer cache a scan of `url` reads: the process's for files on this machine, the engine's
@@ -373,12 +611,20 @@ pub(super) fn selections(
             }
             names
         });
+        let pruned_by = pruning.as_ref().and(predicate.as_ref()).map(|e| {
+            collect_columns(e)
+                .into_iter()
+                .map(|c| c.name().to_string())
+                .collect()
+        });
         out.push(Selection {
             schema,
             pruning,
+            pruned_by,
             columns,
             store: env.object_store(&c.object_store_url)?,
             footers: footers_for(&c.object_store_url, env),
+            local: c.object_store_url == ObjectStoreUrl::local_filesystem(),
             files: c
                 .file_groups
                 .iter()
@@ -389,17 +635,46 @@ pub(super) fn selections(
     Ok(out)
 }
 
+/// The bytes one segment's row groups select for `s`: what its static predicate keeps by their
+/// statistics, of the leaves it projects. The footer and a kept summary are read the same way.
+fn selected_in(
+    s: &Selection,
+    descr: &parquet::schema::types::SchemaDescriptor,
+    groups: &[parquet::file::metadata::RowGroupMetaData],
+    unread: &datafusion_datasource_parquet::ParquetFileMetrics,
+) -> u64 {
+    use datafusion_datasource_parquet::{ParquetAccessPlan, RowGroupAccessPlanFilter};
+    use parquet::arrow::ProjectionMask;
+
+    let mut keep = RowGroupAccessPlanFilter::new(ParquetAccessPlan::new_all(groups.len()));
+    if let Some(p) = &s.pruning {
+        keep.prune_by_statistics(&s.schema, descr, groups, p, unread);
+    }
+    let mask = s
+        .columns
+        .as_ref()
+        .map(|n| ProjectionMask::columns(descr, n.iter().map(String::as_str)));
+    keep.row_group_indexes()
+        .map(|g| {
+            groups[g]
+                .columns()
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask.as_ref().is_none_or(|m| m.leaf_included(*i)))
+                .map(|(_, c)| c.compressed_size().max(0) as u64)
+                .sum::<u64>()
+        })
+        .sum()
+}
+
 /// The data bytes the scans select: the projected and filtered column chunks of every row group
 /// their row-group statistics keep, read from the footers. Unlike the bytes a scan reads, which a
 /// TopK's dynamic filter or a `LIMIT` cut by how the partitions race, this repeats for the same
 /// statement over the same segments.
 pub(super) async fn selected_bytes(scans: Vec<Selection>) -> DFResult<u64> {
+    use datafusion_datasource_parquet::ParquetFileMetrics;
     use datafusion_datasource_parquet::metadata::DFParquetMetadata;
-    use datafusion_datasource_parquet::{
-        ParquetAccessPlan, ParquetFileMetrics, RowGroupAccessPlanFilter,
-    };
     use futures::{StreamExt, TryStreamExt};
-    use parquet::arrow::ProjectionMask;
 
     let unread = Arc::new(ParquetFileMetrics::new(
         0,
@@ -415,32 +690,30 @@ pub(super) async fn selected_bytes(scans: Vec<Selection>) -> DFResult<u64> {
         .map(|(s, f)| {
             let unread = Arc::clone(&unread);
             async move {
+                // A listing stamps each local file; one without a stamp is not kept.
+                let stamp = (s.local && f.last_modified.timestamp_nanos_opt() != Some(0))
+                    .then_some((f.size, f.last_modified));
+                let cached =
+                    stamp.and_then(|st| summary(f.location.as_ref(), st, s.pruned_by.as_ref()));
+                if let Some(sum) = cached {
+                    let groups = sum.groups()?;
+                    return DFResult::Ok(selected_in(&s, &sum.descr, &groups, &unread));
+                }
+                SELECTION_FOOTER_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let meta = DFParquetMetadata::new(s.store.as_ref(), &f)
                     .with_file_metadata_cache(Some(Arc::clone(&s.footers)))
                     .with_page_index_policy(Some(parquet::file::metadata::PageIndexPolicy::Skip))
                     .fetch_metadata()
                     .await?;
-                let groups = meta.row_groups();
                 let descr = meta.file_metadata().schema_descr();
-                let mut keep =
-                    RowGroupAccessPlanFilter::new(ParquetAccessPlan::new_all(groups.len()));
-                if let Some(p) = &s.pruning {
-                    keep.prune_by_statistics(&s.schema, descr, groups, p, &unread);
+                if let Some(st) = stamp {
+                    let leaves = s
+                        .pruned_by
+                        .as_ref()
+                        .map_or_else(Vec::new, |n| leaves_of(descr, n));
+                    note_summary(f.location.as_ref(), st, &meta, &leaves);
                 }
-                let mask = s
-                    .columns
-                    .as_ref()
-                    .map(|n| ProjectionMask::columns(descr, n.iter().map(String::as_str)));
-                let mut bytes = 0u64;
-                for g in keep.row_group_indexes() {
-                    bytes += groups[g]
-                        .columns()
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| mask.as_ref().is_none_or(|m| m.leaf_included(*i)))
-                        .map(|(_, c)| c.compressed_size().max(0) as u64)
-                        .sum::<u64>();
-                }
+                let bytes = selected_in(&s, descr, meta.row_groups(), &unread);
                 DFResult::Ok(bytes)
             }
         })
@@ -511,7 +784,14 @@ impl Listed {
                 } else {
                     local_location(p, &mut parents)?
                 };
-                Ok(PartitionedFile::new(loc.to_string(), *size))
+                let mut file = PartitionedFile::new(loc.to_string(), *size);
+                // With its modification time, a file rewritten at the same path and length is not
+                // taken for the one whose footer or sizes were kept. A list reused for the same files
+                // (#153) keeps its stamps; sealed segments are not rewritten in place.
+                if let Some((_, modified)) = (!keyed).then(|| stamp_of(p)).flatten() {
+                    file.object_meta.last_modified = modified;
+                }
+                Ok(file)
             })
             .collect::<crate::Result<Vec<_>>>()?;
         Ok(Self {
@@ -714,7 +994,7 @@ pub async fn footer_schema(
 
 /// What `store_location` gives a local file, canonicalising its directory once per `parents`.
 #[cfg(not(target_arch = "wasm32"))]
-fn local_location(
+pub(super) fn local_location(
     p: &Path,
     parents: &mut HashMap<PathBuf, PathBuf>,
 ) -> crate::Result<object_store::path::Path> {
@@ -740,7 +1020,7 @@ fn local_location(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn local_location(
+pub(super) fn local_location(
     p: &Path,
     _: &mut HashMap<PathBuf, PathBuf>,
 ) -> crate::Result<object_store::path::Path> {
@@ -795,33 +1075,36 @@ mod tests {
     #[test]
     fn a_segment_is_charged_once_to_the_run_that_opens_it() {
         use datafusion_execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
-        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
-        let run = |name: &str| Arc::new(MemoryConsumer::new(name).register(&pool));
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(4 * PER_SEGMENT));
+        let run = |name: &str| MemoryConsumer::new(name).register(&pool);
         let opened = Opened::default();
         let (a, b) = (
             PartitionedFile::new("/s/a.parquet", 1),
             PartitionedFile::new("/s/b.parquet", 1),
         );
         // No partition is running: nothing to charge.
-        opened.opened(0, &a);
+        opened.opened(0, &a).unwrap();
         assert_eq!(pool.reserved(), 0);
-        let first = run("first");
-        opened.running(0, &first);
-        opened.opened(0, &a);
+        opened.running(0, run("first"));
+        opened.opened(0, &a).unwrap();
         // The reader its bloom filters are read through.
-        opened.opened(0, &a);
-        opened.opened(1, &b);
-        assert_eq!(first.size(), PER_SEGMENT - LISTED);
-        opened.opened(0, &b);
-        assert_eq!(first.size(), 2 * (PER_SEGMENT - LISTED));
-        // The plan run again: the newer run is charged, and the older again once that has gone.
-        let second = run("second");
-        opened.running(0, &second);
-        opened.opened(0, &a);
-        assert_eq!(second.size(), PER_SEGMENT - LISTED);
-        drop(second);
-        assert_eq!(pool.reserved(), first.size());
-        opened.opened(0, &PartitionedFile::new("/s/c.parquet", 1));
-        assert_eq!(first.size(), 3 * (PER_SEGMENT - LISTED));
+        opened.opened(0, &a).unwrap();
+        opened.opened(1, &b).unwrap();
+        assert_eq!(pool.reserved(), PER_SEGMENT - LISTED);
+        opened.opened(0, &b).unwrap();
+        assert_eq!(pool.reserved(), 2 * (PER_SEGMENT - LISTED));
+        // The plan run again: the newer run is charged, and the older run's charge stays.
+        opened.running(0, run("second"));
+        opened.opened(0, &a).unwrap();
+        assert_eq!(pool.reserved(), 3 * (PER_SEGMENT - LISTED));
+        // Past the pool the scan is refused by name, not charged over it.
+        let e = opened
+            .opened(0, &PartitionedFile::new("/s/c.parquet", 1))
+            .and_then(|_| opened.opened(0, &PartitionedFile::new("/s/d.parquet", 1)))
+            .unwrap_err();
+        assert!(e.to_string().contains("a scan's bookkeeping"), "{e}");
+        assert!(pool.reserved() <= 4 * PER_SEGMENT);
+        drop(opened);
+        assert_eq!(pool.reserved(), 0);
     }
 }

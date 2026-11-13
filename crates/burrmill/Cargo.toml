@@ -147,6 +147,16 @@ path = "tests/df_fold.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_foldbudget"
+path = "tests/df_foldbudget.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_spillrepartition"
+path = "tests/df_spillrepartition.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_lambda"
 path = "tests/df_lambda.rs"
 required-features = ["datafusion"]
@@ -257,6 +267,31 @@ path = "tests/df_metrics.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_metersizes"
+path = "tests/df_metersizes.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_metersizes_cap"
+path = "tests/df_metersizes_cap.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_metersizes_bytes"
+path = "tests/df_metersizes_bytes.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_meterstamp"
+path = "tests/df_meterstamp.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_meterstats"
+path = "tests/df_meterstats.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_scancpu"
 path = "tests/df_scancpu.rs"
 required-features = ["datafusion"]
@@ -269,6 +304,11 @@ required-features = ["datafusion"]
 [[test]]
 name = "df_scanpool"
 path = "tests/df_scanpool.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_scansort"
+path = "tests/df_scansort.rs"
 required-features = ["datafusion"]
 
 [[test]]

@@ -43,6 +43,8 @@ pub(crate) fn engine_parses(sql: &str) -> bool {
     dialect::parse_statements(sql).is_ok()
 }
 
+pub(crate) use dialect::refuse_asof;
+
 pub(crate) fn duck_dialect() -> dialect::Duck {
     dialect::Duck
 }
@@ -103,17 +105,34 @@ pub struct Budget {
 /// A memory pool several engines draw on, so one budget bounds their statements together rather
 /// than each of them (nuthatch #1792). The footer caches stay outside it.
 #[derive(Debug, Clone)]
-pub struct SharedPool(Arc<dyn datafusion_execution::memory_pool::MemoryPool>);
+pub struct SharedPool {
+    pub(crate) pool: Arc<dyn datafusion_execution::memory_pool::MemoryPool>,
+    /// Built by [`SharedPool::spilling`], for engines with a spill directory.
+    pub(crate) spills: bool,
+}
 
 impl SharedPool {
-    /// The pool a budget of `memory_bytes` gives its statements, as one budgeted engine builds.
+    /// The pool a budget of `memory_bytes` with no spill directory gives its statements, as one
+    /// budgeted engine builds.
     pub fn new(memory_bytes: usize) -> Self {
-        Self(session::budget_pool(memory_bytes))
+        Self {
+            pool: session::budget_pool(memory_bytes, false),
+            spills: false,
+        }
+    }
+
+    /// As [`SharedPool::new`], for engines whose budgets have a spill directory: operators that can
+    /// spill share what the others leave rather than the first taking it all.
+    pub fn spilling(memory_bytes: usize) -> Self {
+        Self {
+            pool: session::budget_pool(memory_bytes, true),
+            spills: true,
+        }
     }
 
     /// Bytes the statements of every engine on it hold.
     pub fn reserved(&self) -> usize {
-        self.0.reserved()
+        self.pool.reserved()
     }
 }
 
@@ -135,6 +154,19 @@ pub fn file_lists_built() -> u64 {
 #[doc(hidden)]
 pub fn folds_running() -> usize {
     fold::RUNNING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Keeps the summaries of local segments as a bind does, with the statistics of `columns`, and
+/// returns what their map counts, for a test that the count is the heap they take.
+#[doc(hidden)]
+pub fn keep_summaries(paths: &[std::path::PathBuf], columns: &[&str]) -> usize {
+    catalog::keep_summaries(paths, columns)
+}
+
+/// Footers the metered pass has read in this process, for a test that a statement run again reads none.
+#[doc(hidden)]
+pub fn selection_footer_reads() -> u64 {
+    catalog::SELECTION_FOOTER_READS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Local segment footers read in this process, for a test that a second engine reads none again.
@@ -258,8 +290,13 @@ impl Engine {
         };
         let mut fold_tables = std::collections::HashMap::new();
         // The owned fold opens segment files itself, so a table in a store has none; the
-        // substitution then declines and DataFusion's aggregate runs instead.
-        for t in tables.iter().filter(|t| !t.files.is_empty() && !t.keyed) {
+        // substitution then declines and DataFusion's aggregate runs instead. Under a budget that
+        // may spill it declines too: that aggregate spills where the fold, held to the pool, refuses.
+        let spills = budget.as_ref().is_some_and(|b| b.spill.is_some());
+        for t in tables
+            .iter()
+            .filter(|t| !spills && !t.files.is_empty() && !t.keyed)
+        {
             let name = if t.wide.is_empty() {
                 t.name.clone()
             } else {
