@@ -189,6 +189,7 @@ impl MiniSession {
             // A repartition's shared spill pool reads its files in turn and waits on an unfinished one
             // for a batch that went to another; with its writers held back by that same reader the
             // statement never ends. A file a batch, finished as it is written, is never waited on.
+            // Set under every budget; only a repartition that spills reads it.
             config.options_mut().execution.max_spill_file_size_bytes =
                 datafusion_common::config::ConfigNonZeroUsize::try_new(1).expect("one");
             // A projection is not a pool consumer, so a batch of wide cells exists whole before
@@ -212,7 +213,7 @@ impl MiniSession {
                 // The peak is this engine's own; `reserved` is the shared pool's.
                 .with_memory_pool(Arc::new(PeakRecordingPool::new(shared.map_or_else(
                     || budget_pool(b.memory_bytes, b.spill.is_some()),
-                    |p| Arc::clone(&p.0),
+                    |p| Arc::clone(&p.pool),
                 ))))
                 .with_disk_manager_builder(match &b.spill {
                     None => DiskManagerBuilder::default().with_mode(DiskManagerMode::Disabled),

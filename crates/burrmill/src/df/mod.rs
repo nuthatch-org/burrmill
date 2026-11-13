@@ -103,24 +103,34 @@ pub struct Budget {
 /// A memory pool several engines draw on, so one budget bounds their statements together rather
 /// than each of them (nuthatch #1792). The footer caches stay outside it.
 #[derive(Debug, Clone)]
-pub struct SharedPool(Arc<dyn datafusion_execution::memory_pool::MemoryPool>);
+pub struct SharedPool {
+    pub(crate) pool: Arc<dyn datafusion_execution::memory_pool::MemoryPool>,
+    /// Built by [`SharedPool::spilling`], for engines with a spill directory.
+    pub(crate) spills: bool,
+}
 
 impl SharedPool {
     /// The pool a budget of `memory_bytes` with no spill directory gives its statements, as one
     /// budgeted engine builds.
     pub fn new(memory_bytes: usize) -> Self {
-        Self(session::budget_pool(memory_bytes, false))
+        Self {
+            pool: session::budget_pool(memory_bytes, false),
+            spills: false,
+        }
     }
 
     /// As [`SharedPool::new`], for engines whose budgets have a spill directory: operators that can
     /// spill share what the others leave rather than the first taking it all.
     pub fn spilling(memory_bytes: usize) -> Self {
-        Self(session::budget_pool(memory_bytes, true))
+        Self {
+            pool: session::budget_pool(memory_bytes, true),
+            spills: true,
+        }
     }
 
     /// Bytes the statements of every engine on it hold.
     pub fn reserved(&self) -> usize {
-        self.0.reserved()
+        self.pool.reserved()
     }
 }
 
