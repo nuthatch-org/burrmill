@@ -165,8 +165,8 @@ pub(super) fn budget_pool(memory_bytes: usize, spills: bool) -> Arc<dyn MemoryPo
     }
 }
 
-/// A pool where every consumer that can spill is sure of half a fair share, and may take whatever
-/// else is free.
+/// A pool where every consumer that can spill is sure of half a fair share, and may borrow past its
+/// share whatever is free once the others' floors and a quarter of the pool are kept.
 ///
 /// `FairSpillPool` caps each at its share of every registered spiller, and a plan registers them
 /// all at once: a stacked view's repartitions, sorts and finished aggregates made 49 on nuthatch's
@@ -201,29 +201,29 @@ impl FloorSpillPool {
 }
 
 impl Floors {
-    /// How much more the spilling consumer `id` may take: no more than is free once every other
-    /// spiller's floor is kept, nor than its share of what the idle ones leave to those holding.
-    fn spill_room(&self, id: usize, reserved: usize, pool_size: usize) -> usize {
+    /// What the spilling consumer `id` may take of `additional`: what is free once every other
+    /// spiller's floor is kept, and past its own fair share, less a quarter of the pool never lent,
+    /// so spillers that register later still find their floors.
+    fn spill_room(&self, id: usize, additional: usize, pool_size: usize) -> usize {
         let free = pool_size.saturating_sub(self.spillable + self.unspillable);
-        // A reservation holding nothing has nothing to spill, so refusing it what is free ends the
-        // statement: a sort that had spilled could not take its next batch.
-        if reserved == 0 {
-            return free;
-        }
         let spill_available = pool_size.saturating_sub(self.unspillable);
         let spillers = self.spillers.max(1);
         let fair = spill_available / spillers;
         let floor = fair / 2;
         let mut holding = 0;
-        let mut short = 0;
+        let mut owed = 0;
         for (_, b) in self.held.iter().filter(|(k, _)| **k != id) {
             holding += 1;
-            short += floor.saturating_sub(*b);
+            owed += floor.saturating_sub(*b);
         }
-        let idle = spillers.saturating_sub(1).saturating_sub(holding) * floor;
-        let share = (spill_available.saturating_sub(idle) / (holding + 1)).max(fair);
-        free.saturating_sub(idle + short)
-            .min(share.saturating_sub(reserved))
+        owed += spillers.saturating_sub(1).saturating_sub(holding) * floor;
+        let held = self.held.get(&id).copied().unwrap_or(0);
+        let kept = if held + additional > fair {
+            owed + spill_available / 4
+        } else {
+            owed
+        };
+        free.saturating_sub(kept)
     }
 
     fn add(&mut self, c: &MemoryConsumer, bytes: usize) {
@@ -289,7 +289,7 @@ impl MemoryPool for FloorSpillPool {
         let mut s = self.state();
         let c = r.consumer();
         let available = if c.can_spill() {
-            s.spill_room(c.id(), r.size(), self.pool_size)
+            s.spill_room(c.id(), additional, self.pool_size)
         } else {
             self.pool_size.saturating_sub(s.spillable + s.unspillable)
         };
@@ -1228,5 +1228,101 @@ impl Session for MiniSession {
             self.window.clone(),
             Arc::clone(&self.runtime),
         ))
+    }
+}
+
+#[cfg(test)]
+mod floor_pool {
+    use super::*;
+
+    fn pool(size: usize) -> Arc<dyn MemoryPool> {
+        Arc::new(FloorSpillPool::new(size))
+    }
+
+    fn spiller(p: &Arc<dyn MemoryPool>, n: &str) -> MemoryReservation {
+        MemoryConsumer::new(n).with_can_spill(true).register(p)
+    }
+
+    #[test]
+    fn a_spiller_holding_nothing_leaves_its_peers_their_floors() {
+        let p = pool(1000);
+        let a = spiller(&p, "a");
+        let b = spiller(&p, "b");
+        let _c = spiller(&p, "c");
+        let d = spiller(&p, "d");
+        a.try_grow(10).unwrap();
+        assert!(d.try_grow(990).is_err());
+        b.try_grow(125).unwrap();
+    }
+
+    #[test]
+    fn spillers_registered_after_a_loan_still_reach_their_floors() {
+        let p = pool(1000);
+        let a = spiller(&p, "a");
+        let _b = spiller(&p, "b");
+        while a.try_grow(10).is_ok() {}
+        let late: Vec<_> = (0..8).map(|i| spiller(&p, &format!("late{i}"))).collect();
+        for r in &late {
+            r.try_grow(50).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_loan_leaves_a_later_statement_room_to_finish() {
+        let p = pool(1000);
+        let a = spiller(&p, "a");
+        let _b = spiller(&p, "b");
+        while a.try_grow(10).is_ok() {}
+        MemoryConsumer::new("final")
+            .register(&p)
+            .try_grow(400)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_spiller_borrows_past_its_share_from_idle_ones() {
+        let p = pool(1000);
+        let a = spiller(&p, "a");
+        let _idle: Vec<_> = (0..39).map(|i| spiller(&p, &format!("idle{i}"))).collect();
+        // A fair share is 25 and a floor 12: the replay of a spilled aggregate asks past both.
+        a.try_grow(100).unwrap();
+        a.new_empty().try_grow(100).unwrap();
+    }
+
+    #[test]
+    fn concurrent_accounting_stays_within_the_pool() {
+        let p = pool(1 << 20);
+        let threads: Vec<_> = (0..16u64)
+            .map(|t| {
+                let p = Arc::clone(&p);
+                std::thread::spawn(move || {
+                    let mut x = t + 1;
+                    for _ in 0..50 {
+                        let mut r = MemoryConsumer::new(format!("c{t}"))
+                            .with_can_spill(t % 4 != 0)
+                            .register(&p);
+                        let s = r.split(0);
+                        for _ in 0..2000 {
+                            x ^= x << 13;
+                            x ^= x >> 7;
+                            x ^= x << 17;
+                            let n = (x % 20_000) as usize;
+                            match x % 5 {
+                                0 => drop(r.try_grow(n)),
+                                1 => drop(s.try_grow(n)),
+                                2 => r.shrink(n.min(r.size())),
+                                3 => s.shrink(n.min(s.size())),
+                                _ => drop(r.take()),
+                            }
+                            assert!(p.reserved() <= 1 << 20, "reserved {}", p.reserved());
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(p.reserved(), 0);
     }
 }
