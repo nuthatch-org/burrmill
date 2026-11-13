@@ -374,3 +374,8 @@ required-features = ["datafusion"]
 name = "df_having"
 path = "tests/df_having.rs"
 required-features = ["datafusion"]
+
+[[test]]
+name = "df_fairshare"
+path = "tests/df_fairshare.rs"
+required-features = ["datafusion"]
