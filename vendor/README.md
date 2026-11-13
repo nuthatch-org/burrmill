@@ -22,8 +22,10 @@ The change:
   struct, sharing the partition's counters.
 - `src/source.rs`: `create_morselizer` sets `partition_metrics`.
 
-What `EXPLAIN ANALYZE` loses: per-file rows of the parquet metrics, which DataFusion sums by name
-when it prints, so the totals are the same. The `filename` label now reads `(every file)`.
-`scan_efficiency_ratio`, which sets a total per file, is not summed across files: it reports the
-last file's total against the partition's bytes. Timings and the baseline metrics' `end_time`
-are the partition's, not the last file's.
+What `EXPLAIN ANALYZE` loses: per-file rows of the parquet metrics. Counters and timings are
+summed by name when it prints, so their totals are the same. The gauges are not:
+`predicate_cache_inner_records` and `predicate_cache_records` are set per file, so a shared one
+shows only the last file's value, and `scan_efficiency_ratio` adds the partition's running
+`bytes_scanned` for every file, so it overstates. These are display only; no budget reads them.
+The `filename` label now reads `(every file)`, and the baseline metrics' `end_time` is the
+partition's, not the last file's.
