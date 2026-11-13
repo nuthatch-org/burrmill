@@ -166,7 +166,7 @@ pub(super) fn budget_pool(memory_bytes: usize, spills: bool) -> Arc<dyn MemoryPo
 }
 
 /// A pool where a consumer that can spill takes what is free up to its fair share, and past it
-/// borrows only while half the pool stays free, in an even split with the others holding.
+/// borrows what is free beyond one fair share, in an even split with the others holding.
 ///
 /// `FairSpillPool` caps each at its share of every registered spiller, and a plan registers them
 /// all at once: a stacked view's repartitions, sorts and finished aggregates made 49 on nuthatch's
@@ -202,10 +202,11 @@ impl LendingSpillPool {
 
 impl Loans {
     /// What the spilling consumer `id` may take of `additional`. Within its fair share, whatever is
-    /// free. Past it, a loan: only while half the pool stays free, since nothing can make a borrower
-    /// give it back and spillers registered later still need their shares; and no more than an even
-    /// split of that half with the others holding, the small counting only what they hold, since a
-    /// partial aggregate that could emit early borrowed 53 MB and left the replay none.
+    /// free. Past it, a loan of what is free beyond one fair share, kept because nothing can make a
+    /// borrower give memory back and a consumer holding nothing cannot spill to find it; and no more
+    /// than an even split of the pool with the others holding, the small counting only what they
+    /// hold, since a partial aggregate that could emit early borrowed 53 MB and left the replay none.
+    /// Keeping half the pool instead refused three times as often on the QoS nest.
     fn spill_room(&self, id: usize, additional: usize, pool_size: usize) -> usize {
         let free = pool_size.saturating_sub(self.spillable + self.unspillable);
         let spill_available = pool_size.saturating_sub(self.unspillable);
@@ -214,7 +215,7 @@ impl Loans {
         if held + additional <= fair {
             return free;
         }
-        let kept = spill_available / 2;
+        let kept = fair;
         let mut lendable = spill_available - kept;
         let mut others: Vec<usize> = self
             .held

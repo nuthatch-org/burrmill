@@ -96,7 +96,7 @@ fn a_spilled_aggregate_replays_within_what_the_pool_has_free() {
     let budgeted = Engine::builder()
         .segments(&segs)
         .budget(Budget {
-            memory_bytes: 576 << 20,
+            memory_bytes: 512 << 20,
             threads: 4,
             spill: Some((spill, 4 << 30)),
         })
