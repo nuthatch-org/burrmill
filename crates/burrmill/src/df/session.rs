@@ -166,12 +166,11 @@ pub(super) fn budget_pool(memory_bytes: usize, spills: bool) -> Arc<dyn MemoryPo
 }
 
 /// A pool where a consumer that can spill takes what is free up to its fair share, and past it
-/// borrows what is free beyond one fair share, in an even split with the others holding.
+/// borrows, leaving one share free, no more than an even split with the others holding.
 ///
-/// `FairSpillPool` caps each at its share of every registered spiller, and a plan registers them
-/// all at once: a stacked view's repartitions, sorts and finished aggregates made 49 on nuthatch's
-/// QoS nest, and a final aggregate replaying its spills, which cannot spill again, was refused at
-/// 12.4 MB of a pool with 560 MB free.
+/// `FairSpillPool` caps each at a share of every spiller registered, finished or idle, which was 49
+/// on nuthatch's QoS nest: a final aggregate replaying its spills, which cannot spill again, was
+/// refused at 12.4 MB of a pool with 560 MB free.
 #[derive(Debug)]
 pub(super) struct LendingSpillPool {
     pool_size: usize,
@@ -201,12 +200,9 @@ impl LendingSpillPool {
 }
 
 impl Loans {
-    /// What the spilling consumer `id` may take of `additional`. Within its fair share, whatever is
-    /// free. Past it, a loan of what is free beyond one fair share, kept because nothing can make a
-    /// borrower give memory back and a consumer holding nothing cannot spill to find it; and no more
-    /// than an even split of the pool with the others holding, the small counting only what they
-    /// hold, since a partial aggregate that could emit early borrowed 53 MB and left the replay none.
-    /// Keeping half the pool instead refused three times as often on the QoS nest.
+    /// What the spilling consumer `id` may take of `additional`. A loan leaves a share free because
+    /// nothing makes a borrower give it back; the split counts small holders at what they hold, as a
+    /// partial aggregate that could emit early once borrowed 53 MB and left a replay none.
     fn spill_room(&self, id: usize, additional: usize, pool_size: usize) -> usize {
         let free = pool_size.saturating_sub(self.spillable + self.unspillable);
         let spill_available = pool_size.saturating_sub(self.unspillable);
