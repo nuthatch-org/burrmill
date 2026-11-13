@@ -277,6 +277,11 @@ path = "tests/df_metersizes_cap.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_metersizes_bytes"
+path = "tests/df_metersizes_bytes.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_meterstamp"
 path = "tests/df_meterstamp.rs"
 required-features = ["datafusion"]

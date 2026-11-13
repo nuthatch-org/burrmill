@@ -154,6 +154,13 @@ pub fn folds_running() -> usize {
     fold::RUNNING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Keeps the column sizes of local segments as a bind does and returns what their map counts, for
+/// a test that the count is the heap they take.
+#[doc(hidden)]
+pub fn keep_sizes(paths: &[std::path::PathBuf]) -> usize {
+    catalog::keep_sizes(paths)
+}
+
 /// Footers the metered pass has read in this process, for a test that a statement run again reads none.
 #[doc(hidden)]
 pub fn selection_footer_reads() -> u64 {

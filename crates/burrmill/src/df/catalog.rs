@@ -333,7 +333,8 @@ pub(super) type Stamp = (u64, chrono::DateTime<chrono::Utc>);
 
 #[derive(Default)]
 struct SizesCache {
-    by_file: HashMap<String, (Stamp, Arc<Sizes>)>,
+    /// With what each entry is counted, so a replaced one gives back what it took.
+    by_file: HashMap<String, (Stamp, Arc<Sizes>, usize)>,
     /// One copy of each distinct footer schema.
     descrs: Vec<Arc<parquet::schema::types::SchemaDescriptor>>,
     /// About what the map holds: its keys, sizes and entries, and each distinct schema.
@@ -342,6 +343,9 @@ struct SizesCache {
 
 /// What one distinct footer schema costs the map, a column at a time.
 const DESCR_COLUMN_BYTES: usize = 256;
+
+/// What an entry holds beyond its key and its sizes.
+const ENTRY_BYTES: usize = 170;
 
 static SIZES: std::sync::LazyLock<Mutex<SizesCache>> = std::sync::LazyLock::new(Default::default);
 
@@ -368,7 +372,7 @@ pub(super) fn note_sizes(
             leaves[i] += c.compressed_size().max(0) as u64;
         }
     }
-    let mut bytes = location.len() + 8 * leaves.len() + 96;
+    let bytes = entry_bytes(location.len(), leaves.len());
     let mut cache = SIZES.lock().unwrap_or_else(|p| p.into_inner());
     // Full, it keeps what it has rather than starting again, and a segment it cannot keep is costed
     // from its footer as before. Emptied only when the limit has fallen below what it holds.
@@ -377,10 +381,13 @@ pub(super) fn note_sizes(
         *cache = SizesCache::default();
     }
     let known = cache.descrs.iter().find(|d| ***d == *descr).cloned();
-    if known.is_none() {
-        bytes += DESCR_COLUMN_BYTES * descr.num_columns();
-    }
-    if cache.bytes + bytes > limit {
+    let schema = if known.is_none() {
+        DESCR_COLUMN_BYTES * descr.num_columns()
+    } else {
+        0
+    };
+    let replaced = cache.by_file.get(location).map_or(0, |(_, _, b)| *b);
+    if cache.bytes - replaced + bytes + schema > limit {
         return;
     }
     let descr = match known {
@@ -394,13 +401,34 @@ pub(super) fn note_sizes(
         descr,
         leaves: leaves.into_boxed_slice(),
     });
-    if cache
+    // A schema is counted once, when it is first kept, and stays counted while it is.
+    cache.bytes = cache.bytes - replaced + bytes + schema;
+    cache
         .by_file
-        .insert(location.to_string(), (stamp, sizes))
-        .is_none()
-    {
-        cache.bytes += bytes;
+        .insert(location.to_string(), (stamp, sizes, bytes));
+}
+
+/// What an entry of `leaves` sizes under a location of `path` bytes holds on the heap: the key, the
+/// map's slot, the shared summary and its sizes. Measured by `tests/df_metersizes_bytes.rs`.
+fn entry_bytes(path: usize, leaves: usize) -> usize {
+    path + 8 * leaves + ENTRY_BYTES
+}
+
+/// Keeps the column sizes of the local segments at `paths` as a host's bind does, and returns what
+/// the map then counts.
+pub(super) fn keep_sizes(paths: &[PathBuf]) -> usize {
+    let mut parents = HashMap::new();
+    for p in paths {
+        let meta = std::fs::File::open(p)
+            .ok()
+            .and_then(|f| ArrowReaderMetadata::load(&f, ArrowReaderOptions::new()).ok());
+        if let (Some(meta), Ok(loc), Some(stamp)) =
+            (meta, local_location(p, &mut parents), stamp_of(p))
+        {
+            note_sizes(loc.as_ref(), stamp, meta.metadata());
+        }
     }
+    SIZES.lock().unwrap_or_else(|p| p.into_inner()).bytes
 }
 
 fn sizes(location: &str, stamp: Stamp) -> Option<Arc<Sizes>> {
@@ -408,8 +436,8 @@ fn sizes(location: &str, stamp: Stamp) -> Option<Arc<Sizes>> {
     cache
         .by_file
         .get(location)
-        .filter(|(s, _)| *s == stamp)
-        .map(|(_, s)| Arc::clone(s))
+        .filter(|(s, ..)| *s == stamp)
+        .map(|(_, s, _)| Arc::clone(s))
 }
 
 /// The footer cache a scan of `url` reads: the process's for files on this machine, the engine's
