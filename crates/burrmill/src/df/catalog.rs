@@ -179,11 +179,10 @@ pub fn apply_schema_text(tables: &mut Vec<NestTable>, raw: &str) -> crate::Resul
     Ok(())
 }
 
-/// What a scan holds for each segment until the scan ends, beside two copies of its path: `LISTED`
-/// of it from the start, for the segment's place in the plan's file lists, and the rest once it
-/// opens the segment, for DataFusion's per-file metrics and the opener's state.
-/// `tests/df_scanpool.rs` measures both.
-const PER_SEGMENT: usize = 5_632;
+/// What a scan holds for each segment until the plan drops, beside two copies of its path: the
+/// segment's place in the plan's file lists. DataFusion's per-file metrics are folded into one set
+/// a partition (vendor/README.md), so opening a segment adds nothing that lasts.
+/// `tests/df_scanpool.rs` measures it.
 const LISTED: usize = 1_024;
 const FOOTERS_IN_FLIGHT: usize = 32;
 
@@ -211,52 +210,35 @@ pub(super) fn listed(plan: &Arc<dyn ExecutionPlan>, partition: usize) -> usize {
         })
 }
 
-/// The pool reservations of one scan's partition runs. Its reader factory charges a segment to its
-/// partition's run as the segment opens, so a scan holds for what it has opened and not for every
-/// segment of the table before its first row (#156).
+/// The pool reservation of each of one scan's partitions, for its file lists.
 ///
-/// A run's charge lasts as long as this does. DataFusion registers each opened segment's metrics in
-/// the scan's one metrics set, which the plan and every partition's reader hold, as they hold this:
-/// the bytes are freed with the last of them, not as each segment or partition finishes.
+/// The lists are the plan's, held once however often a partition runs, so they are charged once.
+/// The charge lasts as long as this does, and the plan and every partition's reader hold it.
 #[derive(Debug, Default)]
-pub(super) struct Opened(Mutex<HashMap<usize, Vec<Running>>>);
-
-type Held = datafusion_execution::memory_pool::MemoryReservation;
-
-#[derive(Debug)]
-struct Running {
-    held: Held,
-    /// A segment's bloom filters are read through a second reader, which must not charge it twice.
-    charged: HashSet<u64>,
-}
+pub(super) struct Opened(
+    Mutex<HashMap<usize, datafusion_execution::memory_pool::MemoryReservation>>,
+);
 
 impl Opened {
-    /// `held` is what `partition` charges from here on.
-    pub(super) fn running(&self, partition: usize, held: Held) {
+    /// The first run of `partition` charges `listed` to a new reservation from `pool`; a scan that
+    /// does not fit is refused by name, rather than taking the pool past its bound.
+    pub(super) fn running(
+        &self,
+        partition: usize,
+        pool: &Arc<dyn datafusion_execution::memory_pool::MemoryPool>,
+        listed: usize,
+    ) -> DFResult<()> {
         let mut all = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        all.entry(partition).or_default().push(Running {
-            held,
-            charged: HashSet::new(),
-        });
-    }
-
-    fn opened(&self, partition: usize, file: &PartitionedFile) -> DFResult<()> {
-        let location = file.object_meta.location.as_ref();
-        let mut all = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        // A plan run again charges its newer run.
-        let Some(run) = all.get_mut(&partition).and_then(|runs| runs.last_mut()) else {
+        if all.contains_key(&partition) {
             return Ok(());
-        };
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        std::hash::Hash::hash(location, &mut h);
-        if run.charged.insert(std::hash::Hasher::finish(&h)) {
-            run.held.try_grow(PER_SEGMENT - LISTED).map_err(|e| {
-                e.context(format!(
-                    "a scan's bookkeeping for the segments it has opened ({} so far in this partition)",
-                    run.charged.len()
-                ))
-            })?;
         }
+        let r = datafusion_execution::memory_pool::MemoryConsumer::new(format!(
+            "SegmentScan[{partition}]"
+        ))
+        .register(pool);
+        r.try_grow(listed)
+            .map_err(|e| e.context("a scan's bookkeeping for its segments' file lists"))?;
+        all.insert(partition, r);
         Ok(())
     }
 }
@@ -265,7 +247,12 @@ impl Opened {
 /// Kept, they held 4 KiB a segment until the scan ended (#86). The data bytes it reads go to the
 /// scan's one counter instead, which [`crate::QueryMetrics`] reports.
 #[derive(Debug)]
-struct Unmetered(Arc<dyn ParquetFileReaderFactory>, Count, Arc<Opened>);
+struct Unmetered {
+    inner: Arc<dyn ParquetFileReaderFactory>,
+    bytes: Count,
+    /// Held so the scan's charges last as long as its readers do.
+    _opened: Arc<Opened>,
+}
 
 /// The [`crate::QueryMetrics::sealed_bytes_scanned`] counter in a scan's metrics.
 pub(super) const SEALED_BYTES: &str = "sealed_bytes_scanned";
@@ -278,14 +265,13 @@ impl ParquetFileReaderFactory for Unmetered {
         metadata_size_hint: Option<usize>,
         _metrics: &ExecutionPlanMetricsSet,
     ) -> DFResult<Box<dyn AsyncFileReader + Send>> {
-        self.2.opened(partition_index, &file)?;
         let unread = ExecutionPlanMetricsSet::new();
         let inner = self
-            .0
+            .inner
             .create_reader(partition_index, file, metadata_size_hint, &unread)?;
         Ok(Box::new(Counted {
             inner,
-            bytes: self.1.clone(),
+            bytes: self.bytes.clone(),
         }))
     }
 }
@@ -888,11 +874,11 @@ impl TableProvider for SegmentTable {
         let source = ParquetSource::new(self.schema.clone()).with_table_parquet_options(opts);
         let bytes = MetricBuilder::new(source.metrics()).global_counter(SEALED_BYTES);
         let opened = Arc::new(Opened::default());
-        let mut source = source.with_parquet_file_reader_factory(Arc::new(Unmetered(
-            Arc::new(CachedParquetFileReaderFactory::new(store, footers)),
+        let mut source = source.with_parquet_file_reader_factory(Arc::new(Unmetered {
+            inner: Arc::new(CachedParquetFileReaderFactory::new(store, footers)),
             bytes,
-            Arc::clone(&opened),
-        )));
+            _opened: Arc::clone(&opened),
+        }));
         let filters = filters
             .iter()
             .map(|f| unlowered(f.clone(), &self.lowercase))
@@ -1073,37 +1059,18 @@ mod tests {
     }
 
     #[test]
-    fn a_segment_is_charged_once_to_the_run_that_opens_it() {
-        use datafusion_execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
-        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(4 * PER_SEGMENT));
-        let run = |name: &str| MemoryConsumer::new(name).register(&pool);
+    fn a_partition_run_again_is_charged_its_lists_once() {
+        use datafusion_execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(4_000));
         let opened = Opened::default();
-        let (a, b) = (
-            PartitionedFile::new("/s/a.parquet", 1),
-            PartitionedFile::new("/s/b.parquet", 1),
-        );
-        // No partition is running: nothing to charge.
-        opened.opened(0, &a).unwrap();
-        assert_eq!(pool.reserved(), 0);
-        opened.running(0, run("first"));
-        opened.opened(0, &a).unwrap();
-        // The reader its bloom filters are read through.
-        opened.opened(0, &a).unwrap();
-        opened.opened(1, &b).unwrap();
-        assert_eq!(pool.reserved(), PER_SEGMENT - LISTED);
-        opened.opened(0, &b).unwrap();
-        assert_eq!(pool.reserved(), 2 * (PER_SEGMENT - LISTED));
-        // The plan run again: the newer run is charged, and the older run's charge stays.
-        opened.running(0, run("second"));
-        opened.opened(0, &a).unwrap();
-        assert_eq!(pool.reserved(), 3 * (PER_SEGMENT - LISTED));
-        // Past the pool the scan is refused by name, not charged over it.
-        let e = opened
-            .opened(0, &PartitionedFile::new("/s/c.parquet", 1))
-            .and_then(|_| opened.opened(0, &PartitionedFile::new("/s/d.parquet", 1)))
-            .unwrap_err();
+        for _ in 0..3 {
+            opened.running(0, &pool, 1_000).unwrap();
+        }
+        opened.running(1, &pool, 2_000).unwrap();
+        assert_eq!(pool.reserved(), 3_000);
+        let e = opened.running(2, &pool, 2_000).unwrap_err();
         assert!(e.to_string().contains("a scan's bookkeeping"), "{e}");
-        assert!(pool.reserved() <= 4 * PER_SEGMENT);
+        assert_eq!(pool.reserved(), 3_000);
         drop(opened);
         assert_eq!(pool.reserved(), 0);
     }
