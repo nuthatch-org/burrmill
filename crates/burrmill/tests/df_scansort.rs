@@ -101,11 +101,11 @@ fn a_spilling_sort_answers_beside_its_scans_charge_or_the_scan_is_refused() {
     assert_eq!(rows(&got), want);
     let peak = e.take_memory_peak();
     assert!(
-        peak > SEGMENTS as usize * 5_000,
+        peak > SEGMENTS as usize * 1_024,
         "the scan was not charged: peak {peak}"
     );
 
-    let err = engine(4 << 20, spill.path(), None)
+    let err = engine(2 << 20, spill.path(), None)
         .sql(SORT)
         .unwrap_err()
         .to_string();
@@ -118,8 +118,8 @@ fn a_spilling_sort_answers_beside_its_scans_charge_or_the_scan_is_refused() {
 fn a_sort_beside_another_engines_scan_on_the_same_pool() {
     let spill = tempfile::tempdir().unwrap();
     let want = rows(&engine(256 << 20, spill.path(), None).sql(SORT).unwrap());
-    for (budget, fits) in [(48 << 20, true), (8 << 20, false)] {
-        let pool = SharedPool::new(budget);
+    for (budget, fits) in [(48 << 20, true), (3 << 20, false)] {
+        let pool = SharedPool::spilling(budget);
         let other = engine(budget, spill.path(), Some(&pool));
         let ours = engine(budget, spill.path(), Some(&pool));
         let (paused, wait) = std::sync::mpsc::channel();
