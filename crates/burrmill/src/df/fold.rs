@@ -124,11 +124,12 @@ fn null_rejecting(pred: &Expr, a: &Aggregate) -> bool {
         }
         _ => false,
     };
+    // A HAVING with no aggregate filters an Aggregate whose schema holds only its keys.
+    if a.aggr_expr.len() != 1 {
+        return false;
+    }
     let sum_field = a.schema.field(a.group_expr.len()).name();
-    comparison
-        && a.aggr_expr.len() == 1
-        && matches!(left.as_ref(), Expr::Column(c) if c.name == *sum_field)
-        && literal(right)
+    comparison && matches!(left.as_ref(), Expr::Column(c) if c.name == *sum_field) && literal(right)
 }
 
 /// `sum <> 0`: the fold can drop those rows itself, so the filter above selects everything and

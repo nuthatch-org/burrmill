@@ -51,6 +51,9 @@ pub enum BurrmillError {
     /// The engine was asked to open in a way that cannot work: a shared pool with no budget, a store
     /// source opened without `open_async`. Nothing about any statement.
     Config(String),
+    /// The engine panicked planning or running the statement: a fault in Burrmill or below it, not
+    /// in the statement. Caught where the statement leaves the engine, so the caller does not unwind.
+    Internal(String),
 }
 
 impl fmt::Display for BurrmillError {
@@ -67,6 +70,7 @@ impl fmt::Display for BurrmillError {
             Self::Parse(m) => write!(f, "parse error: {m}"),
             Self::NoSegments(m) => write!(f, "no segments: {m}"),
             Self::Config(m) => write!(f, "invalid engine configuration: {m}"),
+            Self::Internal(m) => write!(f, "internal error: {m}"),
         }
     }
 }
