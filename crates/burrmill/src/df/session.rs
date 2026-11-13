@@ -15,7 +15,9 @@ use datafusion_catalog::{
 use datafusion_common::alias::AliasGenerator;
 use datafusion_common::config::{ConfigOptions, TableOptions};
 use datafusion_common::display::{PlanType, ToStringifiedPlan};
-use datafusion_common::{DFSchema, Result as DFResult, TableReference, plan_datafusion_err};
+use datafusion_common::{
+    DFSchema, Result as DFResult, TableReference, plan_datafusion_err, resources_datafusion_err,
+};
 use datafusion_execution::TaskContext;
 use datafusion_execution::cache::Cache;
 use datafusion_execution::cache::cache_manager::{
@@ -25,7 +27,8 @@ use datafusion_execution::cache::default_cache::DefaultCache;
 use datafusion_execution::config::SessionConfig;
 use datafusion_execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
 use datafusion_execution::memory_pool::{
-    FairSpillPool, GreedyMemoryPool, MemoryPool, PeakRecordingPool, TrackConsumersPool,
+    GreedyMemoryPool, MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation,
+    PeakRecordingPool, TrackConsumersPool, human_readable_size,
 };
 use datafusion_execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
 use datafusion_expr::execution_props::ExecutionProps;
@@ -156,9 +159,156 @@ pub(super) fn budget_pool(memory_bytes: usize, spills: bool) -> Arc<dyn MemoryPo
     let size = memory_bytes - memory_bytes / 8;
     let five = NonZeroUsize::new(5).expect("five");
     if spills {
-        Arc::new(TrackConsumersPool::new(FairSpillPool::new(size), five))
+        Arc::new(TrackConsumersPool::new(FloorSpillPool::new(size), five))
     } else {
         Arc::new(TrackConsumersPool::new(GreedyMemoryPool::new(size), five))
+    }
+}
+
+/// A pool where every consumer that can spill is sure of half a fair share, and may take whatever
+/// else is free.
+///
+/// `FairSpillPool` caps each at its share of every registered spiller, and a plan registers them
+/// all at once: a stacked view's repartitions, sorts and finished aggregates made 49 on nuthatch's
+/// QoS nest, and a final aggregate replaying its spills, which cannot spill again, was refused at
+/// 12.4 MB of a pool with 560 MB free.
+#[derive(Debug)]
+pub(super) struct FloorSpillPool {
+    pool_size: usize,
+    state: Mutex<Floors>,
+}
+
+#[derive(Debug, Default)]
+struct Floors {
+    spillers: usize,
+    /// Bytes by spilling consumer, across its reservations; one holding nothing is absent.
+    held: HashMap<usize, usize>,
+    spillable: usize,
+    unspillable: usize,
+}
+
+impl FloorSpillPool {
+    pub(super) fn new(pool_size: usize) -> Self {
+        Self {
+            pool_size,
+            state: Mutex::new(Floors::default()),
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, Floors> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+impl Floors {
+    /// How much more the spilling consumer `id` may take: no more than is free once every other
+    /// spiller's floor is kept, nor than its share of what the idle ones leave to those holding.
+    fn spill_room(&self, id: usize, reserved: usize, pool_size: usize) -> usize {
+        let free = pool_size.saturating_sub(self.spillable + self.unspillable);
+        let spill_available = pool_size.saturating_sub(self.unspillable);
+        let spillers = self.spillers.max(1);
+        let fair = spill_available / spillers;
+        let floor = fair / 2;
+        let mut holding = 0;
+        let mut short = 0;
+        for (_, b) in self.held.iter().filter(|(k, _)| **k != id) {
+            holding += 1;
+            short += floor.saturating_sub(*b);
+        }
+        let idle = spillers.saturating_sub(1).saturating_sub(holding) * floor;
+        let share = (spill_available.saturating_sub(idle) / (holding + 1)).max(fair);
+        free.saturating_sub(idle + short)
+            .min(share.saturating_sub(reserved))
+    }
+
+    fn add(&mut self, c: &MemoryConsumer, bytes: usize) {
+        if c.can_spill() {
+            *self.held.entry(c.id()).or_default() += bytes;
+            self.spillable += bytes;
+        } else {
+            self.unspillable += bytes;
+        }
+    }
+}
+
+impl std::fmt::Display for FloorSpillPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "fair(pool_size: {})",
+            human_readable_size(self.pool_size)
+        )
+    }
+}
+
+impl MemoryPool for FloorSpillPool {
+    fn name(&self) -> &str {
+        "fair"
+    }
+
+    fn register(&self, c: &MemoryConsumer) {
+        if c.can_spill() {
+            self.state().spillers += 1;
+        }
+    }
+
+    fn unregister(&self, c: &MemoryConsumer) {
+        if c.can_spill() {
+            let mut s = self.state();
+            s.spillers = s.spillers.saturating_sub(1);
+            s.held.remove(&c.id());
+        }
+    }
+
+    fn grow(&self, r: &MemoryReservation, additional: usize) {
+        self.state().add(r.consumer(), additional);
+    }
+
+    fn shrink(&self, r: &MemoryReservation, shrink: usize) {
+        let mut s = self.state();
+        let c = r.consumer();
+        if c.can_spill() {
+            s.spillable = s.spillable.saturating_sub(shrink);
+            if let Some(b) = s.held.get_mut(&c.id()) {
+                *b = b.saturating_sub(shrink);
+                if *b == 0 {
+                    s.held.remove(&c.id());
+                }
+            }
+        } else {
+            s.unspillable = s.unspillable.saturating_sub(shrink);
+        }
+    }
+
+    fn try_grow(&self, r: &MemoryReservation, additional: usize) -> DFResult<()> {
+        let mut s = self.state();
+        let c = r.consumer();
+        let available = if c.can_spill() {
+            s.spill_room(c.id(), r.size(), self.pool_size)
+        } else {
+            self.pool_size.saturating_sub(s.spillable + s.unspillable)
+        };
+        if additional > available {
+            return Err(resources_datafusion_err!(
+                "Failed to allocate additional {} for {} with {} already allocated for this reservation - {} remain available for the total memory pool: {}",
+                human_readable_size(additional),
+                c.name(),
+                human_readable_size(r.size()),
+                human_readable_size(available),
+                self
+            ));
+        }
+        s.add(c, additional);
+        Ok(())
+    }
+
+    fn reserved(&self) -> usize {
+        let s = self.state();
+        s.spillable + s.unspillable
+    }
+
+    fn memory_limit(&self) -> MemoryLimit {
+        MemoryLimit::Finite(self.pool_size)
     }
 }
 
