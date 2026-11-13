@@ -14,6 +14,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The commands the jobs run live in yatr.toml. Bump deliberately.
+  YATR_VERSION: "1.1.0"
 
 jobs:
   fmt:
@@ -24,11 +26,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
         with:
           components: rustfmt
-      - run: cargo fmt --all --check
+      - name: Cache yatr
+        id: cache-yatr
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/yatr
+          key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
+      - name: Install yatr
+        if: steps.cache-yatr.outputs.cache-hit != 'true'
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        env:
+          RUSTFLAGS: ""
+      - run: yatr fmt-check
       # fuzz/ has its own lock and only the nightly job builds it: a pin bumped here that the
       # lock there does not follow would otherwise first fail at night.
       - name: fuzz lock resolves
-        run: cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
+        run: yatr fuzz-lock
 
   # The library both ways: the default graph is pure Rust and must build on its own, and
   # `datafusion` is what nuthatch embeds.
@@ -45,15 +58,22 @@ jobs:
           key: burrmill
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: clippy (default)
-        run: cargo clippy --locked -p burrmill --all-targets -- -D warnings
-      - name: clippy (datafusion)
-        run: cargo clippy --locked -p burrmill --all-targets --features datafusion -- -D warnings
-      - name: test (default)
-        run: cargo test --locked -p burrmill
+      - name: Cache yatr
+        id: cache-yatr
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/yatr
+          key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
+      - name: Install yatr
+        if: steps.cache-yatr.outputs.cache-hit != 'true'
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        env:
+          RUSTFLAGS: ""
+      - name: clippy (default and datafusion)
+        run: yatr lint
       # Includes generated_planner, which rustfmts its output to compare it with the committed file.
-      - name: test (datafusion)
-        run: cargo test --locked -p burrmill --features datafusion
+      - name: test (default and datafusion)
+        run: yatr test
 
   # Lint only: the bench has no tests, and its own job keeps the bundled DuckDB build off the
   # library's critical path.
@@ -70,8 +90,19 @@ jobs:
           key: bench
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Cache yatr
+        id: cache-yatr
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/yatr
+          key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
+      - name: Install yatr
+        if: steps.cache-yatr.outputs.cache-hit != 'true'
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        env:
+          RUSTFLAGS: ""
       - name: clippy
-        run: cargo clippy --locked -p burrmill-bench --all-targets --all-features -- -D warnings
+        run: yatr bench-lint
 
   # Advisories, licences, duplicate versions and sources, from deny.toml.
   deny:
@@ -99,14 +130,21 @@ jobs:
           key: ingest-wasm
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Cache yatr
+        id: cache-yatr
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/yatr
+          key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
+      - name: Install yatr
+        if: steps.cache-yatr.outputs.cache-hit != 'true'
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        env:
+          RUSTFLAGS: ""
       - name: test and clippy
-        run: |
-          cargo clippy --locked -p burrmill-ingest --all-targets -- -D warnings
-          cargo clippy --locked -p burrmill-ingest --all-targets --features json,parquet -- -D warnings
-          cargo test --locked -p burrmill-ingest
-          cargo test --locked -p burrmill-ingest --features json,parquet
+        run: yatr ingest
       - name: wasm graph and gzip size
-        run: docs/bench/ingest-wasm.sh
+        run: yatr ingest-size
 
   # The tab: the code that decides what leaves it, and the engine it downloads.
   tab-wasm:
@@ -123,23 +161,26 @@ jobs:
           key: tab-wasm
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: test and clippy
-        run: |
-          cargo clippy --locked -p burrmill-wasm --all-targets -- -D warnings
-          cargo test --locked -p burrmill-wasm
-      # Warnings refuse: what only wasm32 leaves unused is seen by no clippy step above.
-      - name: build for wasm32
+      - name: Cache yatr
+        id: cache-yatr
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/yatr
+          key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
+      - name: Install yatr
+        if: steps.cache-yatr.outputs.cache-hit != 'true'
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
         env:
-          RUSTFLAGS: -D warnings
-        run: cargo build --locked -p burrmill-wasm --target wasm32-unknown-unknown
+          RUSTFLAGS: ""
+      - name: test and clippy
+        run: yatr tab
+      # Warnings refuse (RUSTFLAGS in yatr.toml): what only wasm32 leaves unused is seen by no
+      # clippy step above.
+      - name: build for wasm32
+        run: yatr tab-build
       # The demo downloads ingest and the engine as one module.
       - name: engine gzip under 8 MiB
-        run: |
-          cargo build -p burrmill-size --locked --target wasm32-unknown-unknown \
-            --features engine --bin ingest-engine --profile wasm-size
-          gz=$(gzip -9 -c target/wasm32-unknown-unknown/wasm-size/ingest-engine.wasm | wc -c)
-          echo "ingest-engine.wasm gzip -9: $gz"
-          test "$gz" -le 8388608
+        run: yatr engine-size
 
   # The page's claim, that the cells stay in the tab, is tested only in a browser: every
   # demo/*.mjs against the built engine on a static server.
@@ -168,13 +209,24 @@ jobs:
         if: steps.bindgen.outputs.cache-hit != 'true'
         run: cargo install wasm-bindgen-cli --version "${{ steps.pin.outputs.version }}" --locked --root ~/wasm-bindgen
       - run: echo "$HOME/wasm-bindgen/bin" >> "$GITHUB_PATH"
+      - name: Cache yatr
+        id: cache-yatr
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/yatr
+          key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
+      - name: Install yatr
+        if: steps.cache-yatr.outputs.cache-hit != 'true'
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        env:
+          RUSTFLAGS: ""
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: demo/package-lock.json
       - name: build the engine
-        run: demo/build.sh
+        run: yatr demo-build
       - name: browser
         working-directory: demo
         run: |
