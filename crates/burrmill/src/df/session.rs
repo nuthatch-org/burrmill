@@ -25,7 +25,7 @@ use datafusion_execution::cache::default_cache::DefaultCache;
 use datafusion_execution::config::SessionConfig;
 use datafusion_execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
 use datafusion_execution::memory_pool::{
-    GreedyMemoryPool, MemoryPool, PeakRecordingPool, TrackConsumersPool,
+    FairSpillPool, GreedyMemoryPool, MemoryPool, PeakRecordingPool, TrackConsumersPool,
 };
 use datafusion_execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
 use datafusion_expr::execution_props::ExecutionProps;
@@ -139,11 +139,19 @@ impl std::fmt::Debug for MiniSession {
 }
 
 /// A budget's statement pool: the bound less the eighth the footer cache keeps outside it.
-pub(super) fn budget_pool(memory_bytes: usize) -> Arc<dyn MemoryPool> {
-    Arc::new(TrackConsumersPool::new(
-        GreedyMemoryPool::new(memory_bytes - memory_bytes / 8),
-        NonZeroUsize::new(5).expect("five"),
-    ))
+///
+/// With somewhere to spill, operators that can spill share what the others leave, so one that
+/// spills is never starved by another that could have; first come, first served, a partition's
+/// aggregate took 47 of 56 MB and its neighbour could not get 364 KB. Without, the first to ask
+/// may have the lot, since none of them can give it back.
+pub(super) fn budget_pool(memory_bytes: usize, spills: bool) -> Arc<dyn MemoryPool> {
+    let size = memory_bytes - memory_bytes / 8;
+    let five = NonZeroUsize::new(5).expect("five");
+    if spills {
+        Arc::new(TrackConsumersPool::new(FairSpillPool::new(size), five))
+    } else {
+        Arc::new(TrackConsumersPool::new(GreedyMemoryPool::new(size), five))
+    }
 }
 
 impl MiniSession {
@@ -178,6 +186,12 @@ impl MiniSession {
             let share = b.memory_bytes / (8 * threads.max(1));
             config.options_mut().execution.sort_spill_reservation_bytes =
                 share.clamp(256 << 10, 10 << 20);
+            // A repartition's shared spill pool reads its files in turn and waits on an unfinished one
+            // for a batch that went to another; with its writers held back by that same reader the
+            // statement never ends. A file a batch, finished as it is written, is never waited on.
+            // Set under every budget; only a repartition that spills reads it.
+            config.options_mut().execution.max_spill_file_size_bytes =
+                datafusion_common::config::ConfigNonZeroUsize::try_new(1).expect("one");
             // A projection is not a pool consumer, so a batch of wide cells exists whole before
             // the caller caps the answer (#1650). 2,048 is DuckDB's vector, which that issue
             // costs as fine; 128 was 1.7-2.1x on every heavy view (where-the-time-goes.md).
@@ -197,9 +211,10 @@ impl MiniSession {
             Some(b) => RuntimeEnvBuilder::new()
                 .with_cache_manager(cache)
                 // The peak is this engine's own; `reserved` is the shared pool's.
-                .with_memory_pool(Arc::new(PeakRecordingPool::new(
-                    shared.map_or_else(|| budget_pool(b.memory_bytes), |p| Arc::clone(&p.0)),
-                )))
+                .with_memory_pool(Arc::new(PeakRecordingPool::new(shared.map_or_else(
+                    || budget_pool(b.memory_bytes, b.spill.is_some()),
+                    |p| Arc::clone(&p.pool),
+                ))))
                 .with_disk_manager_builder(match &b.spill {
                     None => DiskManagerBuilder::default().with_mode(DiskManagerMode::Disabled),
                     Some((dir, cap)) => DiskManagerBuilder::default()
