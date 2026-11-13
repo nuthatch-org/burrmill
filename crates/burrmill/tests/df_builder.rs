@@ -135,3 +135,30 @@ fn a_table_is_named_by_the_text_before_the_last_hyphen() {
         1
     );
 }
+
+/// A first-come pool lets one operator that could spill starve another, so an engine that may spill
+/// does not share one: it takes the pool [`SharedPool::spilling`] makes.
+#[test]
+fn a_spilling_budget_refuses_a_first_come_shared_pool() {
+    let dir = tempfile::tempdir().unwrap();
+    let spilling = burrmill::Budget {
+        spill: Some((dir.path().to_path_buf(), 1 << 30)),
+        ..budget()
+    };
+    let r = Engine::builder()
+        .budget(spilling.clone())
+        .shared_pool(&SharedPool::new(64 << 20))
+        .open();
+    assert!(
+        matches!(&r, Err(BurrmillError::Config(m)) if m.contains("SharedPool::spilling")),
+        "{:?}",
+        r.err()
+    );
+    let pool = SharedPool::spilling(64 << 20);
+    let e = Engine::builder()
+        .budget(spilling)
+        .shared_pool(&pool)
+        .open()
+        .unwrap();
+    assert_eq!(e.sql("SELECT 1").unwrap().len(), 1);
+}

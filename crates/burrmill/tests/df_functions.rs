@@ -818,3 +818,59 @@ fn an_alias_spelled_glob_is_an_alias_and_the_operator_still_refuses() {
     let e = engine.sql("SELECT 'a' GLOB 'a*'").unwrap_err().to_string();
     assert!(e.contains("GLOB is not supported here"), "{e}");
 }
+
+#[test]
+fn asof_join_is_refused_by_name_and_the_word_stays_usable() {
+    let engine = Engine::open_empty().unwrap();
+    for sql in [
+        "SELECT * FROM (SELECT 1 AS k) a ASOF JOIN (SELECT 2 AS k) b ON a.k >= b.k",
+        "SELECT * FROM (SELECT 1 AS k) a ASOF JOIN (SELECT 2 AS k) b USING (k)",
+        "SELECT (SELECT count(*) FROM (SELECT 1 AS k) a ASOF JOIN (SELECT 2 AS k) b ON a.k >= b.k)",
+    ] {
+        let e = engine.sql(sql).expect_err(sql);
+        assert!(matches!(e, BurrmillError::Parse(_)), "{sql}: {e:?}");
+        let e = e.to_string();
+        assert!(
+            e.contains("ASOF JOIN is not supported here; join on the inequality"),
+            "{sql}: {e}"
+        );
+    }
+    for sql in [
+        "SELECT 1 AS asof",
+        r#"SELECT 'x' AS "asof", 'asof join' AS s"#,
+        "SELECT asof FROM (SELECT 1 AS asof) t",
+        "SELECT * FROM (SELECT 1 AS k) a JOIN (SELECT 1 AS k, 1 AS asof) b ON a.k = b.asof JOIN (SELECT 1 AS c) c ON true",
+        "SELECT * FROM (SELECT 1 AS k) a JOIN (SELECT 1 AS k, 1 AS asof) b ON a.k = b.asof LEFT JOIN (SELECT 1 AS c) c ON true",
+        "WITH asof AS (SELECT 1 AS k) SELECT * FROM asof JOIN (SELECT 1 AS k) b USING (k)",
+    ] {
+        assert_eq!(engine.sql(sql).expect(sql)[0].num_rows(), 1, "{sql}");
+    }
+}
+
+#[test]
+fn parsing_grows_linearly_with_the_statement() {
+    let statement = |kib: usize| {
+        let mut sql = String::from("SELECT 1 AS c0");
+        let mut i = 1;
+        while sql.len() < kib * 1024 {
+            sql.push_str(&format!(", {i} AS c{i}"));
+            i += 1;
+        }
+        sql
+    };
+    let best = |sql: &str| {
+        (0..7)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                burrmill::inspect::parse(sql).unwrap();
+                t.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let (small, large) = (best(&statement(8)), best(&statement(16)));
+    assert!(
+        large.as_secs_f64() < small.as_secs_f64() * 3.0,
+        "8 KiB took {small:?}, 16 KiB took {large:?}"
+    );
+}

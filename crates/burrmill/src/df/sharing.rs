@@ -1344,7 +1344,7 @@ async fn hold(plan: Arc<dyn ExecutionPlan>, ctx: Arc<TaskContext>) -> Result<Arc
     }))
 }
 
-/// The capacity of each buffer under `b` not already in `seen`. An aggregate hands its one output
+/// The capacity of each buffer under `b` not already in `seen` or charged by the values that built it. An aggregate hands its one output
 /// on in slices, and each slice reports the whole of the buffers it shares.
 fn unseen_bytes(b: &RecordBatch, seen: &mut HashSet<usize>) -> usize {
     fn walk(d: &arrow::array::ArrayData, seen: &mut HashSet<usize>) -> usize {
@@ -1354,6 +1354,7 @@ fn unseen_bytes(b: &RecordBatch, seen: &mut HashSet<usize>) -> usize {
             .iter()
             .chain(nulls)
             .filter(|buf| seen.insert(buf.data_ptr().as_ptr() as usize))
+            .filter(|buf| !super::bound::charged(buf))
             .map(|buf| buf.capacity())
             .sum();
         own + d.child_data().iter().map(|c| walk(c, seen)).sum::<usize>()

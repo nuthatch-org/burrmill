@@ -15,14 +15,21 @@ if [ "$have" != "$want" ]; then
     exit 1
 fi
 
-# Apple clang has no wasm32 target, and zstd-sys compiles C.
+# Apple clang has no wasm32 target, and zstd-sys compiles C. Its ar cannot archive the objects either.
 if ! printf 'int x;\n' | clang --target=wasm32-unknown-unknown -c -x c - -o /dev/null 2>/dev/null; then
-    llvm=/opt/homebrew/opt/llvm/bin/clang
-    if [ ! -x "$llvm" ]; then
-        printf 'no clang that accepts wasm32-unknown-unknown\n' >&2
+    llvm=
+    for prefix in "$(brew --prefix llvm 2>/dev/null || true)" /opt/homebrew/opt/llvm /usr/local/opt/llvm; do
+        if [ -n "$prefix" ] && [ -x "$prefix/bin/clang" ] && [ -x "$prefix/bin/llvm-ar" ]; then
+            llvm=$prefix
+            break
+        fi
+    done
+    if [ -z "$llvm" ]; then
+        printf 'no clang that accepts wasm32-unknown-unknown; on macOS, Apple clang does not:\n  brew install llvm\nor set CC_wasm32_unknown_unknown and AR_wasm32_unknown_unknown\n' >&2
         exit 1
     fi
-    export CC_wasm32_unknown_unknown="$llvm"
+    export CC_wasm32_unknown_unknown="$llvm/bin/clang"
+    export AR_wasm32_unknown_unknown="$llvm/bin/llvm-ar"
 fi
 
 cargo build --locked -p burrmill-wasm --target wasm32-unknown-unknown --profile "$profile"
