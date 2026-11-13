@@ -456,7 +456,7 @@ fn footer_schemas(files: &[(PathBuf, u64)]) -> Result<Vec<SchemaRef>> {
         if let Ok(loc) = super::catalog::local_location(path, &mut parents)
             && let Some(stamp) = super::catalog::stamp_of(path)
         {
-            super::catalog::note_sizes(loc.as_ref(), stamp, meta.metadata());
+            super::catalog::note_summary(loc.as_ref(), stamp, meta.metadata(), &[]);
         }
         let s = intern(view_schema(meta.schema()));
         read.push(((path.clone(), *len), Arc::clone(&s)));

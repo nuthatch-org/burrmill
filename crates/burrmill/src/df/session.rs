@@ -102,7 +102,7 @@ fn local_limit(live: &[usize]) -> usize {
 }
 
 /// The local footers take three quarters of that allowance; the column sizes a metered statement
-/// keeps for each segment (`catalog::Sizes`) take the rest.
+/// keeps for each segment (`catalog::Summary`) take the rest.
 fn footers_limit(live: &[usize]) -> usize {
     local_limit(live) - local_limit(live) / 4
 }
