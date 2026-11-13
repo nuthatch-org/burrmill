@@ -145,6 +145,17 @@ impl EngineBuilder {
                 "a shared pool needs a budget beside it".into(),
             ));
         }
+        // A first-come pool lets one operator that could spill take what another then cannot get.
+        if let (Some(b), Some(p)) = (&self.budget, &self.pool)
+            && b.spill.is_some()
+            && !p.spills
+        {
+            return Err(BurrmillError::Config(
+                "a budget with a spill directory shares a pool made by SharedPool::spilling, not \
+                 SharedPool::new"
+                    .into(),
+            ));
+        }
         Engine::from_tables(tables, self.threads, self.budget, self.pool.as_ref())
     }
 }
