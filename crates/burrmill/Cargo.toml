@@ -267,6 +267,26 @@ path = "tests/df_metrics.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_metersizes"
+path = "tests/df_metersizes.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_metersizes_cap"
+path = "tests/df_metersizes_cap.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_metersizes_bytes"
+path = "tests/df_metersizes_bytes.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_meterstamp"
+path = "tests/df_meterstamp.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_scancpu"
 path = "tests/df_scancpu.rs"
 required-features = ["datafusion"]

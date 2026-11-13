@@ -101,6 +101,14 @@ fn local_limit(live: &[usize]) -> usize {
     live.iter().copied().max().unwrap_or(0)
 }
 
+/// The bytes the column sizes a metered statement keeps for each segment (`catalog::Sizes`) may
+/// hold: a fifth more beside the local footers' allowance, which they leave whole, since a scan
+/// larger than that cache misses on every footer. A segment's sizes are a thirtieth to a fortieth
+/// of its footer, so a fifth keeps several times the segments the footers can.
+pub(super) fn local_sizes_limit() -> usize {
+    local_limit(&LOCAL_SHARES.lock().unwrap_or_else(|p| p.into_inner())) / 5
+}
+
 pub struct MiniSession {
     session_id: String,
     config: SessionConfig,

@@ -316,6 +316,128 @@ pub(super) struct Selection {
     store: Arc<dyn object_store::ObjectStore>,
     footers: Arc<FileMetadataCache>,
     files: Vec<object_store::ObjectMeta>,
+    /// Files on this machine, whose column sizes [`Sizes`] may already hold.
+    local: bool,
+}
+
+/// What a metered statement with no predicate needs of a local segment's footer: each leaf column's
+/// compressed bytes over every row group, beside the footer's schema. A few hundred bytes a segment
+/// where the footer is many kilobytes, so they stay when the footer cache cannot keep the footers.
+struct Sizes {
+    descr: Arc<parquet::schema::types::SchemaDescriptor>,
+    leaves: Box<[u64]>,
+}
+
+/// A file's length and modification time, which a file rewritten at the same path would not share.
+pub(super) type Stamp = (u64, chrono::DateTime<chrono::Utc>);
+
+#[derive(Default)]
+struct SizesCache {
+    /// With what each entry is counted, so a replaced one gives back what it took.
+    by_file: HashMap<String, (Stamp, Arc<Sizes>, usize)>,
+    /// One copy of each distinct footer schema.
+    descrs: Vec<Arc<parquet::schema::types::SchemaDescriptor>>,
+    /// About what the map holds: its keys, sizes and entries, and each distinct schema.
+    bytes: usize,
+}
+
+/// What one distinct footer schema costs the map, a column at a time.
+const DESCR_COLUMN_BYTES: usize = 256;
+
+/// What an entry holds beyond its key and its sizes.
+const ENTRY_BYTES: usize = 170;
+
+static SIZES: std::sync::LazyLock<Mutex<SizesCache>> = std::sync::LazyLock::new(Default::default);
+
+/// Footers the metered pass has read, for a test that a statement run again reads none.
+pub(super) static SELECTION_FOOTER_READS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The length and modification time of the local file at `path`.
+pub(super) fn stamp_of(path: &Path) -> Option<Stamp> {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.len(), m.modified().ok()?.into()))
+}
+
+/// Keeps the column sizes of the local segment at `location` from its footer.
+pub(super) fn note_sizes(
+    location: &str,
+    stamp: Stamp,
+    meta: &parquet::file::metadata::ParquetMetaData,
+) {
+    let descr = meta.file_metadata().schema_descr_ptr();
+    let mut leaves = vec![0u64; descr.num_columns()];
+    for g in meta.row_groups() {
+        for (i, c) in g.columns().iter().enumerate() {
+            leaves[i] += c.compressed_size().max(0) as u64;
+        }
+    }
+    let bytes = entry_bytes(location.len(), leaves.len());
+    let mut cache = SIZES.lock().unwrap_or_else(|p| p.into_inner());
+    // Full, it keeps what it has rather than starting again, and a segment it cannot keep is costed
+    // from its footer as before. Emptied only when the limit has fallen below what it holds.
+    let limit = super::session::local_sizes_limit();
+    if cache.bytes > limit {
+        *cache = SizesCache::default();
+    }
+    let known = cache.descrs.iter().find(|d| ***d == *descr).cloned();
+    let schema = if known.is_none() {
+        DESCR_COLUMN_BYTES * descr.num_columns()
+    } else {
+        0
+    };
+    let replaced = cache.by_file.get(location).map_or(0, |(_, _, b)| *b);
+    if cache.bytes - replaced + bytes + schema > limit {
+        return;
+    }
+    let descr = match known {
+        Some(d) => d,
+        None => {
+            cache.descrs.push(Arc::clone(&descr));
+            descr
+        }
+    };
+    let sizes = Arc::new(Sizes {
+        descr,
+        leaves: leaves.into_boxed_slice(),
+    });
+    // A schema is counted once, when it is first kept, and stays counted while it is.
+    cache.bytes = cache.bytes - replaced + bytes + schema;
+    cache
+        .by_file
+        .insert(location.to_string(), (stamp, sizes, bytes));
+}
+
+/// What an entry of `leaves` sizes under a location of `path` bytes holds on the heap: the key, the
+/// map's slot, the shared summary and its sizes. Measured by `tests/df_metersizes_bytes.rs`.
+fn entry_bytes(path: usize, leaves: usize) -> usize {
+    path + 8 * leaves + ENTRY_BYTES
+}
+
+/// Keeps the column sizes of the local segments at `paths` as a host's bind does, and returns what
+/// the map then counts.
+pub(super) fn keep_sizes(paths: &[PathBuf]) -> usize {
+    let mut parents = HashMap::new();
+    for p in paths {
+        let meta = std::fs::File::open(p)
+            .ok()
+            .and_then(|f| ArrowReaderMetadata::load(&f, ArrowReaderOptions::new()).ok());
+        if let (Some(meta), Ok(loc), Some(stamp)) =
+            (meta, local_location(p, &mut parents), stamp_of(p))
+        {
+            note_sizes(loc.as_ref(), stamp, meta.metadata());
+        }
+    }
+    SIZES.lock().unwrap_or_else(|p| p.into_inner()).bytes
+}
+
+fn sizes(location: &str, stamp: Stamp) -> Option<Arc<Sizes>> {
+    let cache = SIZES.lock().unwrap_or_else(|p| p.into_inner());
+    cache
+        .by_file
+        .get(location)
+        .filter(|(s, ..)| *s == stamp)
+        .map(|(_, s, _)| Arc::clone(s))
 }
 
 /// The footer cache a scan of `url` reads: the process's for files on this machine, the engine's
@@ -379,6 +501,7 @@ pub(super) fn selections(
             columns,
             store: env.object_store(&c.object_store_url)?,
             footers: footers_for(&c.object_store_url, env),
+            local: c.object_store_url == ObjectStoreUrl::local_filesystem(),
             files: c
                 .file_groups
                 .iter()
@@ -415,11 +538,35 @@ pub(super) async fn selected_bytes(scans: Vec<Selection>) -> DFResult<u64> {
         .map(|(s, f)| {
             let unread = Arc::clone(&unread);
             async move {
+                // A listing stamps each local file; one without a stamp is not kept.
+                let stamp = (s.local && f.last_modified.timestamp_nanos_opt() != Some(0))
+                    .then_some((f.size, f.last_modified));
+                let cached = stamp
+                    .filter(|_| s.pruning.is_none())
+                    .and_then(|st| sizes(f.location.as_ref(), st));
+                if let Some(sizes) = cached {
+                    let mask = s.columns.as_ref().map(|n| {
+                        ProjectionMask::columns(&sizes.descr, n.iter().map(String::as_str))
+                    });
+                    return DFResult::Ok(
+                        sizes
+                            .leaves
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| mask.as_ref().is_none_or(|m| m.leaf_included(*i)))
+                            .map(|(_, b)| *b)
+                            .sum::<u64>(),
+                    );
+                }
+                SELECTION_FOOTER_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let meta = DFParquetMetadata::new(s.store.as_ref(), &f)
                     .with_file_metadata_cache(Some(Arc::clone(&s.footers)))
                     .with_page_index_policy(Some(parquet::file::metadata::PageIndexPolicy::Skip))
                     .fetch_metadata()
                     .await?;
+                if let Some(st) = stamp {
+                    note_sizes(f.location.as_ref(), st, &meta);
+                }
                 let groups = meta.row_groups();
                 let descr = meta.file_metadata().schema_descr();
                 let mut keep =
@@ -511,7 +658,14 @@ impl Listed {
                 } else {
                     local_location(p, &mut parents)?
                 };
-                Ok(PartitionedFile::new(loc.to_string(), *size))
+                let mut file = PartitionedFile::new(loc.to_string(), *size);
+                // With its modification time, a file rewritten at the same path and length is not
+                // taken for the one whose footer or sizes were kept. A list reused for the same files
+                // (#153) keeps its stamps; sealed segments are not rewritten in place.
+                if let Some((_, modified)) = (!keyed).then(|| stamp_of(p)).flatten() {
+                    file.object_meta.last_modified = modified;
+                }
+                Ok(file)
             })
             .collect::<crate::Result<Vec<_>>>()?;
         Ok(Self {
@@ -714,7 +868,7 @@ pub async fn footer_schema(
 
 /// What `store_location` gives a local file, canonicalising its directory once per `parents`.
 #[cfg(not(target_arch = "wasm32"))]
-fn local_location(
+pub(super) fn local_location(
     p: &Path,
     parents: &mut HashMap<PathBuf, PathBuf>,
 ) -> crate::Result<object_store::path::Path> {
@@ -740,7 +894,7 @@ fn local_location(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn local_location(
+pub(super) fn local_location(
     p: &Path,
     _: &mut HashMap<PathBuf, PathBuf>,
 ) -> crate::Result<object_store::path::Path> {
