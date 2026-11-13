@@ -86,14 +86,22 @@ fn a_rewrite_after_its_footer_left_the_cache_is_costed_afresh() {
     std::fs::create_dir_all(&segs).unwrap();
     let p = segs.join(format!("ev-{:064x}.parquet", 1));
     write(&p, 10, 50);
-    for s in 0..400u64 {
-        write(&segs.join(format!("fill-{s:064x}.parquet")), 3, 3);
+    // Eight tables, so no one statement holds more segments' file lists than the budget allows.
+    const FILLS: [&str; 8] = [
+        "filla", "fillb", "fillc", "filld", "fille", "fillf", "fillg", "fillh",
+    ];
+    for t in FILLS {
+        for s in 0..75u64 {
+            write(&segs.join(format!("{t}-{s:064x}.parquet")), 3, 3);
+        }
     }
     let len1 = std::fs::metadata(&p).unwrap().len();
     let e1 = Engine::open_nest_budgeted(tmp.path(), budget()).unwrap();
     let first = metered(&e1, "SELECT a FROM ev");
     // Push ev's footer out of the process's footer cache.
-    metered(&e1, "SELECT a, b FROM fill");
+    for t in FILLS {
+        metered(&e1, &format!("SELECT a, b FROM {t}"));
+    }
     drop(e1);
     std::thread::sleep(std::time::Duration::from_millis(1100));
     write(&p, 50, 10);
