@@ -119,7 +119,7 @@ fn a_sort_beside_another_engines_scan_on_the_same_pool() {
     let spill = tempfile::tempdir().unwrap();
     let want = rows(&engine(256 << 20, spill.path(), None).sql(SORT).unwrap());
     for (budget, fits) in [(48 << 20, true), (3 << 20, false)] {
-        let pool = SharedPool::new(budget);
+        let pool = SharedPool::spilling(budget);
         let other = engine(budget, spill.path(), Some(&pool));
         let ours = engine(budget, spill.path(), Some(&pool));
         let (paused, wait) = std::sync::mpsc::channel();
