@@ -660,7 +660,7 @@ impl Engine {
                 }
                 Ok(())
             });
-            let run = run.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
+            let run = run.join().unwrap_or_else(|p| Err(panicked(p)));
             taken.and(run)
         });
         if let Some(m) = metrics {
@@ -940,7 +940,7 @@ impl Engine {
             })
         };
         let physical = if tokio::runtime::Handle::try_current().is_err() {
-            plan()
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(plan)).map_err(panicked)?
         } else {
             std::thread::scope(|s| {
                 let handle = std::thread::Builder::new()
@@ -948,11 +948,7 @@ impl Engine {
                     .stack_size(PLAN_STACK_BYTES)
                     .spawn_scoped(s, plan)
                     .map_err(|e| BurrmillError::Substrate(format!("planner thread: {e}")))?;
-                Ok::<_, BurrmillError>(
-                    handle
-                        .join()
-                        .unwrap_or_else(|p| std::panic::resume_unwind(p)),
-                )
+                handle.join().map_err(panicked)
             })?
         }
         .map_err(|e| planning_err(&self.cancel, e))?;
@@ -1067,10 +1063,19 @@ fn plan_query(
             .stack_size(PLAN_STACK_BYTES)
             .spawn_scoped(scope, || plan_query_on_stack(session, &owned, cancel))
             .map_err(|e| BurrmillError::Substrate(format!("planner thread: {e}")))?;
-        handle
-            .join()
-            .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+        handle.join().unwrap_or_else(|p| Err(panicked(p)))
     })
+}
+
+/// A panic on a statement's thread, as the error the caller gets instead of unwinding.
+#[cfg(not(target_arch = "wasm32"))]
+fn panicked(payload: Box<dyn std::any::Any + Send>) -> BurrmillError {
+    let m = payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "no message".into());
+    BurrmillError::Internal(format!("the engine panicked: {}", clipped(m)))
 }
 
 fn plan_query_on_stack(
