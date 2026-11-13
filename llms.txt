@@ -4,7 +4,7 @@
 
 Write DuckDB SQL, but not all of it: some forms are refused by name and some fail as syntax errors. Read the refused table before generating a statement.
 
-- [The SQL surface](docs/sql.md): what `Engine::sql` admits, and the table of what it refuses (`PIVOT`, `UNPIVOT`, `GLOB`, `strptime`, `median` over DECIMAL, `COLUMNS` and others) with what to write instead, and `ASOF JOIN`, which has no equivalent
+- [The SQL surface](docs/sql.md): what `Engine::sql` admits, and the table of what it refuses (`PIVOT`, `UNPIVOT`, `ASOF JOIN`, `GLOB`, `strptime`, `median` over DECIMAL, `COLUMNS` and others) with what to write instead
 - [The browser tab](docs/browser.md): the engine in a page, and what goes to a model
 - [README](README.md): what the engine is, what it does not do, and where it loses to DuckDB
 
