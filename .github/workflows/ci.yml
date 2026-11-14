@@ -15,7 +15,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # The commands the jobs run live in yatr.toml. Bump deliberately.
-  YATR_VERSION: "1.3.0"
+  YATR_VERSION: "1.4.0"
 
 jobs:
   fmt:
@@ -42,6 +42,9 @@ jobs:
       # lock there does not follow would otherwise first fail at night.
       - name: fuzz lock resolves
         run: yatr fuzz-lock
+      # The table is generated from yatr.toml; `yatr agents --write` refreshes it.
+      - name: AGENTS.md task table is current
+        run: yatr agents-check
 
   # The library both ways: the default graph is pure Rust and must build on its own, and
   # `datafusion` is what nuthatch embeds.
