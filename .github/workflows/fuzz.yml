@@ -47,7 +47,7 @@ jobs:
           key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
       - name: Install yatr
         if: steps.cache-yatr.outputs.cache-hit != 'true'
-        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked --force
         env:
           RUSTFLAGS: ""
       - name: install cargo-fuzz
@@ -85,7 +85,7 @@ jobs:
           key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
       - name: Install yatr
         if: steps.cache-yatr.outputs.cache-hit != 'true'
-        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked --force
         env:
           RUSTFLAGS: ""
       - name: 3,000 cases

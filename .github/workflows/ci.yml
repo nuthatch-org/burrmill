@@ -34,7 +34,7 @@ jobs:
           key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
       - name: Install yatr
         if: steps.cache-yatr.outputs.cache-hit != 'true'
-        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked --force
         env:
           RUSTFLAGS: ""
       - run: yatr fmt-check
@@ -69,7 +69,7 @@ jobs:
           key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
       - name: Install yatr
         if: steps.cache-yatr.outputs.cache-hit != 'true'
-        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked --force
         env:
           RUSTFLAGS: ""
       - name: clippy (default and datafusion)
@@ -101,7 +101,7 @@ jobs:
           key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
       - name: Install yatr
         if: steps.cache-yatr.outputs.cache-hit != 'true'
-        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked --force
         env:
           RUSTFLAGS: ""
       - name: clippy
@@ -141,7 +141,7 @@ jobs:
           key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
       - name: Install yatr
         if: steps.cache-yatr.outputs.cache-hit != 'true'
-        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked --force
         env:
           RUSTFLAGS: ""
       - name: test and clippy
@@ -172,7 +172,7 @@ jobs:
           key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
       - name: Install yatr
         if: steps.cache-yatr.outputs.cache-hit != 'true'
-        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked --force
         env:
           RUSTFLAGS: ""
       - name: test and clippy
@@ -220,7 +220,7 @@ jobs:
           key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
       - name: Install yatr
         if: steps.cache-yatr.outputs.cache-hit != 'true'
-        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked --force
         env:
           RUSTFLAGS: ""
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
