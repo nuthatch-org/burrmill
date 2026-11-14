@@ -17,7 +17,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   # Keep in step with ci.yml.
-  YATR_VERSION: "1.4.0"
+  YATR_VERSION: "1.5.0"
 
 jobs:
   fuzz:
