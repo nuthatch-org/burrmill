@@ -147,7 +147,14 @@ cargo +nightly fuzz run "$target" "fuzz/corpus/$target" $seeds -- \
 """]
 no_cache = true
 
+[tasks.agents-check]
+desc = "Fail if the task table in AGENTS.md has drifted from this file"
+run = ["yatr agents --check"]
+sources = ["yatr.toml", "AGENTS.md"]
+# The section's wording belongs to the yatr that wrote it.
+tool_inputs = ["yatr --version"]
+
 [tasks.ci]
 desc = "Every CI job but demo"
-depends = ["fmt-check", "fuzz-lock", "lint", "test", "bench-lint", "deny", "ingest", "ingest-size", "tab", "tab-build", "engine-size"]
+depends = ["fmt-check", "fuzz-lock", "agents-check", "lint", "test", "bench-lint", "deny", "ingest", "ingest-size", "tab", "tab-build", "engine-size"]
 run = []
