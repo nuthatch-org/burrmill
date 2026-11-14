@@ -109,8 +109,41 @@ python3 -m http.server 18747 --bind 127.0.0.1 >/dev/null 2>&1 & server=$!
 trap 'kill $server' EXIT
 until curl -sf http://127.0.0.1:18747/ >/dev/null; do sleep 1; done
 failed=0
-for t in *.mjs; do node "$t" 18747 || { failed=1; echo "$t failed"; }; done
+for t in *.mjs; do
+  echo "::group::$t"
+  node "$t" 18747 || { failed=1; echo "::error::$t failed"; }
+  echo "::endgroup::"
+done
 exit $failed
+"""]
+no_cache = true
+
+[tasks.generated-folds]
+desc = "The generated-fold oracle at BURRMILL_CASES cases, 3,000 unless set"
+run = ["cargo test --locked --release -p burrmill --test generated_folds"]
+env = { BURRMILL_CASES = "${BURRMILL_CASES:-3000}" }
+sources = ["crates/burrmill/**", "vendor/**", "corpus/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+
+# Nightly moves under a cached result, so neither fuzz task caches. From no input, mutation rarely
+# reaches a statement the dialect rewrites; the seeds do.
+[tasks.fuzz-build]
+desc = "Build every fuzz target (needs nightly and cargo-fuzz)"
+run = ["cargo +nightly fuzz build"]
+no_cache = true
+
+[tasks.fuzz]
+desc = "Fuzz FUZZ_TARGET (csv or sql) from its seeds for SECONDS_PER_TARGET, 600 unless set"
+shell = true
+run = ["""
+target=${FUZZ_TARGET:-csv}
+case $target in
+  csv) seeds=corpus/ingest; args= ;;
+  sql) seeds=fuzz/seeds/sql; args=-dict=fuzz/sql.dict ;;
+  *) echo "no fuzz target $target"; exit 2 ;;
+esac
+mkdir -p "fuzz/corpus/$target"
+cargo +nightly fuzz run "$target" "fuzz/corpus/$target" $seeds -- \
+  -max_total_time="${SECONDS_PER_TARGET:-600}" -timeout=30 -rss_limit_mb=4096 $args
 """]
 no_cache = true
 

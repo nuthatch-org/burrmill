@@ -16,6 +16,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Keep in step with ci.yml.
+  YATR_VERSION: "1.3.0"
 
 jobs:
   fuzz:
@@ -26,10 +28,7 @@ jobs:
       matrix:
         include:
           - target: csv
-            seeds: corpus/ingest
           - target: sql
-            seeds: fuzz/seeds/sql
-            args: -dict=fuzz/sql.dict
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -40,19 +39,27 @@ jobs:
           workspaces: fuzz
           key: fuzz-${{ matrix.target }}
           cache-on-failure: true
+      - name: Cache yatr
+        id: cache-yatr
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/yatr
+          key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
+      - name: Install yatr
+        if: steps.cache-yatr.outputs.cache-hit != 'true'
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
+        env:
+          RUSTFLAGS: ""
       - name: install cargo-fuzz
         run: cargo +nightly install cargo-fuzz --locked --version 0.13.2
       # Every target builds in each job, so one that stops compiling fails all of them.
       - name: build
-        run: cargo +nightly fuzz build
+        run: yatr fuzz-build
       - name: run
         env:
+          FUZZ_TARGET: ${{ matrix.target }}
           SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
-        # From no input, mutation rarely reaches a statement the dialect rewrites; the seeds do.
-        run: |
-          mkdir -p fuzz/corpus/${{ matrix.target }}
-          cargo +nightly fuzz run ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} ${{ matrix.seeds }} -- \
-            -max_total_time="$SECONDS_PER_TARGET" -timeout=30 -rss_limit_mb=4096 ${{ matrix.args }}
+        run: yatr fuzz
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
@@ -70,7 +77,16 @@ jobs:
         with:
           key: generated-folds
           cache-on-failure: true
-      - name: 3,000 cases
+      - name: Cache yatr
+        id: cache-yatr
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/yatr
+          key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
+      - name: Install yatr
+        if: steps.cache-yatr.outputs.cache-hit != 'true'
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked
         env:
-          BURRMILL_CASES: "3000"
-        run: cargo test --locked --release -p burrmill --test generated_folds
+          RUSTFLAGS: ""
+      - name: 3,000 cases
+        run: yatr generated-folds
