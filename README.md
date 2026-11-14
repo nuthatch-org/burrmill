@@ -26,6 +26,18 @@ values (#122), the engine in a browser tab (#106), untrusted CSV ingest and the 
 CI with a supply-chain check (#35, #206). RFC-0046, partial state over sealed history, is a design
 with nothing built. The progress log has each with its figures.
 
+## Try it
+
+**In a browser tab, with nothing to install:** [burrmill-demo.vercel.app](https://burrmill-demo.vercel.app).
+Drop a CSV, JSON or Parquet file and query it as table `t`. The file is read and queried inside the tab:
+typing a statement and pressing **Run here** sends nothing anywhere. Asking a model to write the SQL is
+optional, needs your own key or a local model, and sends only what [docs/browser.md](docs/browser.md)
+lists. The page is `demo/` in this repo.
+
+**Over chain data:** Burrmill is what answers `nuthatch sql`, so the
+[nuthatch quickstart](https://github.com/nuthatch-org/nuthatch#readme) is the way to run it over sealed
+segments. There is no standalone command-line tool; as a library it is `burrmill::Engine`.
+
 ## What it is
 
 Five crates. `burrmill` is the engine and is what nuthatch embeds; `burrmill-ingest` turns an

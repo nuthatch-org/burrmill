@@ -1,0 +1,15 @@
+{
+  "cleanUrls": false,
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://api.anthropic.com http://127.0.0.1:*; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types default; frame-ancestors 'none'" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "no-referrer" }
+      ]
+    },
+    { "source": "/pkg/(.*)", "headers": [{ "key": "Cache-Control", "value": "public, no-cache" }] },
+    { "source": "/(sw|worker|app)\\.js", "headers": [{ "key": "Cache-Control", "value": "public, no-cache" }] }
+  ]
+}

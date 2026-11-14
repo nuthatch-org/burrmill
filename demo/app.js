@@ -609,11 +609,20 @@ function exportCsv() {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+// A statement can be typed and run here with no key and no model at all.
+function offerSql() {
+  document.getElementById('answer').hidden = false;
+  const editor = document.getElementById('sql');
+  if (!editor.value) editor.value = 'SELECT * FROM t LIMIT 20';
+}
+
 // The edited statement runs in the tab only. Its narration was written for the model's
 // statement, so it is not carried over.
 async function runHere() {
   const sql = document.getElementById('sql').value.trim();
-  if (!sql || !shownChart) return;
+  if (!sql) return;
+  // Before any model has answered there is no chart to keep, so the rows are shown as a table.
+  const chart = shownChart || { kind: 'table', x: null, y: [] };
   const button = document.getElementById('run-here');
   button.disabled = true;
   try {
@@ -625,7 +634,7 @@ async function runHere() {
     const locale = separators();
     const shown = await call('present', {
       answer: queried.answer,
-      chart: shownChart,
+      chart,
       narration: '',
       group: locale.group,
       decimal: locale.decimal,
@@ -813,6 +822,7 @@ async function openFile(file, persist) {
   }
   fileOpen = true;
   document.getElementById('setup').hidden = false;
+  offerSql();
   document.getElementById('ask').disabled = false;
   showColumns(info.columns, info.proposals);
   renderTable(document.getElementById('preview'), info.columns, info.preview);
