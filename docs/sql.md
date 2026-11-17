@@ -99,3 +99,21 @@ the corpus and answer as DuckDB does.
 Expression depth (64) and terms (1,024) and query or set-operation nesting (64) are bounded
 before planning (`df/depth.rs`), the memory a statement holds by the engine's budget, and `range`
 at ten million rows. Past a bound the statement is refused, never truncated.
+
+## Strict decimals
+
+Off by default, where DECIMAL follows DuckDB. `Engine::set_strict_decimals(true)` holds every
+DECIMAL answer exact at its declared scale or refuses the statement (`tests/df_strict.rs`, which
+checks a generated corpus against an exact oracle):
+
+| Written | Under strict decimals |
+|---|---|
+| `a / b` over integers or DECIMALs | refused; `div(a, b, scale, 'half_even')`, or `//` for integers |
+| `AVG(x)` over a DECIMAL | refused; `div(SUM(x), COUNT(x), scale, 'half_even')` |
+| a function or aggregate turning a DECIMAL into DOUBLE | refused, unless the statement writes `CAST(x AS DOUBLE)` |
+| a cast dropping nonzero digits (`1.005` to `DECIMAL(10,2)`, `2.5` to `INTEGER`) | refused; `round(x, 2)` first. `TRY_CAST` gives NULL |
+| `DECIMAL * DECIMAL` past scale 38 | refused, as without the mode |
+
+`div(a, b, scale, mode)` is admitted in either mode: `a / b` exactly, rounded once to `scale`
+digits by `half_even`, `half_up`, `down`, `up`, `floor` or `ceiling`, as `DECIMAL(38, scale)`, and
+refused for a zero divisor or past 38 digits.

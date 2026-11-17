@@ -74,6 +74,9 @@ const SAFE_SCALARS: &[&str] = &[
     "burrmill_round_int",
     "burrmill_text_to_int",
     "burrmill_text_to_decimal",
+    // `strict::Div` and `strict::Rescale`: past 38 digits or a dropped digit, refused.
+    "div",
+    "strict_cast",
     // Closed on the integer width: no carry, so nothing to refuse.
     "xor",
     "checked_add",
