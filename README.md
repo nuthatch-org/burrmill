@@ -82,7 +82,9 @@ reachability rules on sqlparser's AST, failing closed.
 refuses by name, with what to write instead; [docs/browser.md](docs/browser.md) describes the tab.
 [llms.txt](llms.txt) points a coding agent at both. `Engine::open_segments` and `open_nest` read
 `<table>-<hash>.parquet`: the text before the last hyphen is the table, and a `.parquet` file with no
-hyphen is skipped.
+hyphen is skipped. Any other Parquet is opened by name with `Engine::builder().parquet(path, table)`,
+or `parquet_store(store, prefix, table)` for a bucket: every `.parquet` file beneath, `key=value`
+directories as columns, pruned by statistics and partition values as segments are.
 
 ## The three claims
 

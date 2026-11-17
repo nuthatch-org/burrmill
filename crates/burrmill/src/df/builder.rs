@@ -10,6 +10,11 @@ use super::{Budget, Engine, SharedPool};
 use crate::error::{BurrmillError, Result};
 use crate::limits::Limits;
 
+enum Parquet {
+    Local(PathBuf, String),
+    Store(Arc<dyn object_store::ObjectStore>, String, String),
+}
+
 enum Source {
     Empty,
     Segments(PathBuf),
@@ -21,6 +26,7 @@ enum Source {
 /// register its own; with no budget it is unbounded, at [`Limits`]'s threads unless set.
 pub struct EngineBuilder {
     source: Source,
+    parquet: Vec<Parquet>,
     threads: usize,
     budget: Option<Budget>,
     pool: Option<SharedPool>,
@@ -31,6 +37,7 @@ impl Engine {
     pub fn builder() -> EngineBuilder {
         EngineBuilder {
             source: Source::Empty,
+            parquet: Vec::new(),
             threads: Limits::default().max_threads,
             budget: None,
             pool: None,
@@ -90,6 +97,29 @@ impl EngineBuilder {
         self
     }
 
+    /// The table `table` over a Parquet file, or every `.parquet` file beneath a directory, whatever
+    /// their names. `key=value` directories become columns after the files' own, typed BIGINT, DATE
+    /// or VARCHAR from the values they take; the files' columns are the first file's in path order.
+    /// Beside any other source, and once per table.
+    pub fn parquet(mut self, path: &Path, table: &str) -> Self {
+        self.parquet
+            .push(Parquet::Local(path.to_path_buf(), table.to_string()));
+        self
+    }
+
+    /// As [`EngineBuilder::parquet`], over every `.parquet` key under `prefix` in `store`: a bucket
+    /// on S3 or R2, or any other `object_store`. Opens with [`EngineBuilder::open_async`] only.
+    pub fn parquet_store(
+        mut self,
+        store: Arc<dyn object_store::ObjectStore>,
+        prefix: &str,
+        table: &str,
+    ) -> Self {
+        self.parquet
+            .push(Parquet::Store(store, prefix.to_string(), table.to_string()));
+        self
+    }
+
     /// Planning partitions, fold workers and runtime threads, without a budget. A budget's own
     /// `threads` takes precedence.
     pub fn threads(mut self, threads: usize) -> Self {
@@ -114,7 +144,12 @@ impl EngineBuilder {
     /// Open a local or empty source. A store source refuses: it opens with
     /// [`EngineBuilder::open_async`].
     pub fn open(self) -> Result<Engine> {
-        let tables = match &self.source {
+        if self.parquet.iter().any(|p| matches!(p, Parquet::Store(..))) {
+            return Err(BurrmillError::Config(
+                "an engine over a store opens with open_async".into(),
+            ));
+        }
+        let mut tables = match &self.source {
             Source::Empty => Vec::new(),
             Source::Segments(dir) => segment_tables(dir)?,
             Source::Nest(root) => nest_tables(root)?,
@@ -124,21 +159,68 @@ impl EngineBuilder {
                 ));
             }
         };
-        self.open_over(tables)
+        for p in &self.parquet {
+            if let Parquet::Local(path, name) = p {
+                tables.push(super::files::local_table(path, name)?);
+            }
+        }
+        self.open_over(tables, Vec::new())
     }
 
     /// Open any source, listing a store's segments and reading its `schema.json` first.
     pub async fn open_async(mut self) -> Result<Engine> {
-        let Source::Store(store, root) = std::mem::replace(&mut self.source, Source::Empty) else {
-            return self.open();
+        let nest = match std::mem::replace(&mut self.source, Source::Empty) {
+            Source::Store(store, root) => Some((store_tables(&store, &root).await?, store)),
+            other => {
+                self.source = other;
+                None
+            }
         };
-        let tables = store_tables(&store, &root).await?;
-        let engine = self.open_over(tables)?;
-        engine.attach_store(store)?;
+        let mut stores = Vec::new();
+        let mut tables = Vec::new();
+        for p in std::mem::take(&mut self.parquet) {
+            match p {
+                Parquet::Local(path, name) => tables.push(super::files::local_table(&path, &name)?),
+                Parquet::Store(store, prefix, name) => {
+                    // A store of its own for each, so two buckets' keys cannot meet.
+                    let url = format!("parquet{}://store", stores.len());
+                    tables.push(super::files::store_table(&store, &prefix, &name, &url).await?);
+                    stores.push((url, store));
+                }
+            }
+        }
+        let (mut all, nest_store) = match nest {
+            Some((t, store)) => (t, Some(store)),
+            None => (
+                match &self.source {
+                    Source::Empty => Vec::new(),
+                    Source::Segments(dir) => segment_tables(dir)?,
+                    Source::Nest(root) => nest_tables(root)?,
+                    Source::Store(..) => unreachable!("taken above"),
+                },
+                None,
+            ),
+        };
+        all.extend(tables);
+        let engine = self.open_over(all, stores)?;
+        if let Some(store) = nest_store {
+            engine.attach_store(store)?;
+        }
         Ok(engine)
     }
 
-    fn open_over(self, tables: Vec<NestTable>) -> Result<Engine> {
+    fn open_over(
+        self,
+        tables: Vec<NestTable>,
+        stores: Vec<(String, Arc<dyn object_store::ObjectStore>)>,
+    ) -> Result<Engine> {
+        let mut names = std::collections::HashSet::new();
+        if let Some(t) = tables.iter().find(|t| !names.insert(t.name.to_lowercase())) {
+            return Err(BurrmillError::Config(format!(
+                "two tables are named {}",
+                t.name
+            )));
+        }
         // Silently unbounded is worse than refused: the host asked for its statements to be held.
         if self.pool.is_some() && self.budget.is_none() {
             return Err(BurrmillError::Config(
@@ -156,7 +238,13 @@ impl EngineBuilder {
                     .into(),
             ));
         }
-        Engine::from_tables(tables, self.threads, self.budget, self.pool.as_ref())
+        Engine::from_tables(
+            tables,
+            self.threads,
+            self.budget,
+            self.pool.as_ref(),
+            stores,
+        )
     }
 }
 
