@@ -379,3 +379,8 @@ required-features = ["datafusion"]
 name = "df_fairshare"
 path = "tests/df_fairshare.rs"
 required-features = ["datafusion"]
+
+[[test]]
+name = "df_parquet"
+path = "tests/df_parquet.rs"
+required-features = ["datafusion"]

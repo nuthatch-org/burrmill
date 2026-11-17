@@ -4,11 +4,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion_catalog::{Session, TableProvider};
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_common::{DFSchema, Result as DFResult};
+use datafusion_common::{DFSchema, Result as DFResult, ScalarValue};
 use datafusion_datasource::PartitionedFile;
 use datafusion_datasource::file::FileSource;
 use datafusion_datasource::file_groups::FileGroup;
@@ -57,6 +57,24 @@ pub struct NestTable {
     pub keyed: bool,
     /// Columns the host writes lower-case: nuthatch renders every `address` as `0x` and lower hex.
     pub lowercase: Vec<String>,
+    /// Hive partition columns, after the files' own, and each file's values for them in `files`
+    /// order. Both empty for an unpartitioned table.
+    pub partitions: Vec<FieldRef>,
+    pub partition_values: Vec<Vec<ScalarValue>>,
+    /// The store a keyed table's files are in, where it is not [`NEST_STORE`].
+    pub store_url: Option<String>,
+}
+
+impl NestTable {
+    /// The files' columns and then the partition columns, as SQL sees the table.
+    pub fn table_schema(&self) -> SchemaRef {
+        if self.partitions.is_empty() {
+            return self.schema.clone();
+        }
+        let mut fields: Vec<FieldRef> = self.schema.fields().iter().cloned().collect();
+        fields.extend(self.partitions.iter().cloned());
+        Arc::new(Schema::new(fields))
+    }
 }
 
 /// Where an engine opened from an object store finds it.
@@ -106,6 +124,9 @@ pub fn discover_tables(segments: &Path) -> crate::Result<Vec<NestTable>> {
             wide: Vec::new(),
             keyed: false,
             lowercase: Vec::new(),
+            partitions: Vec::new(),
+            partition_values: Vec::new(),
+            store_url: None,
         });
     }
     tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -173,6 +194,9 @@ pub fn apply_schema_text(tables: &mut Vec<NestTable>, raw: &str) -> crate::Resul
             wide,
             keyed: false,
             lowercase,
+            partitions: Vec::new(),
+            partition_values: Vec::new(),
+            store_url: None,
         });
     }
     tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -299,10 +323,14 @@ pub(super) fn sealed_counters(plan: &Arc<dyn ExecutionPlan>, out: &mut Vec<(Coun
 pub(super) struct Selection {
     schema: SchemaRef,
     pruning: Option<Arc<datafusion_physical_optimizer::pruning::PruningPredicate>>,
+    /// Hive partition columns, and the static predicate each file's values are put into before
+    /// its own pruning predicate is built, as the scan's opener does.
+    partitions: Vec<String>,
+    predicate: Option<Arc<dyn datafusion_physical_expr::PhysicalExpr>>,
     columns: Option<HashSet<String>>,
     store: Arc<dyn object_store::ObjectStore>,
     footers: Arc<FileMetadataCache>,
-    files: Vec<object_store::ObjectMeta>,
+    files: Vec<(object_store::ObjectMeta, Vec<ScalarValue>)>,
     /// Files on this machine, whose [`Summary`] may already be kept.
     local: bool,
     /// The columns the pruning predicate reads, whose statistics a kept summary must hold.
@@ -563,7 +591,6 @@ pub(super) fn selections(
     env: &datafusion_execution::runtime_env::RuntimeEnv,
 ) -> DFResult<Vec<Selection>> {
     use datafusion_physical_expr::utils::collect_columns;
-    use datafusion_physical_optimizer::pruning::PruningPredicateBuilder;
 
     SELECTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut out = Vec::new();
@@ -580,17 +607,19 @@ pub(super) fn selections(
             continue;
         };
         let schema = Arc::clone(c.file_schema());
+        let partitions: Vec<String> = c
+            .table_partition_cols()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
         let predicate = source.filter();
-        let pruning = predicate.clone().and_then(|e| {
-            PruningPredicateBuilder::new()
-                .with_file_schema(Arc::clone(&schema))
-                .build(e)
-        });
+        let pruning = predicate.clone().and_then(|e| prune_with(&schema, e));
+        let table = Arc::clone(c.file_source().table_schema().table_schema());
         let columns = source.projection().map(|proj| {
             let mut names: HashSet<String> = proj
                 .column_indices()
                 .into_iter()
-                .filter_map(|i| schema.fields().get(i).map(|f| f.name().clone()))
+                .filter_map(|i| table.fields().get(i).map(|f| f.name().clone()))
                 .collect();
             if let Some(e) = &predicate {
                 names.extend(collect_columns(e).into_iter().map(|c| c.name().to_string()));
@@ -601,11 +630,14 @@ pub(super) fn selections(
             collect_columns(e)
                 .into_iter()
                 .map(|c| c.name().to_string())
+                .filter(|n| !partitions.contains(n))
                 .collect()
         });
         out.push(Selection {
             schema,
             pruning,
+            predicate: (!partitions.is_empty()).then_some(predicate).flatten(),
+            partitions,
             pruned_by,
             columns,
             store: env.object_store(&c.object_store_url)?,
@@ -614,17 +646,82 @@ pub(super) fn selections(
             files: c
                 .file_groups
                 .iter()
-                .flat_map(|g| g.iter().map(|f| f.object_meta.clone()))
+                .flat_map(|g| {
+                    g.iter()
+                        .map(|f| (f.object_meta.clone(), f.partition_values.clone()))
+                })
                 .collect(),
         });
     }
     Ok(out)
 }
 
+fn prune_with(
+    schema: &SchemaRef,
+    e: Arc<dyn datafusion_physical_expr::PhysicalExpr>,
+) -> Option<Arc<datafusion_physical_optimizer::pruning::PruningPredicate>> {
+    datafusion_physical_optimizer::pruning::PruningPredicateBuilder::new()
+        .with_file_schema(Arc::clone(schema))
+        .build(e)
+}
+
+/// `s`'s pruning predicate for one file: the shared one, or with a partitioned table, the static
+/// predicate with that file's partition values in place of their columns. `Err` when those values
+/// alone exclude the file, which a pruning predicate cannot say: it keeps what has no column.
+#[allow(clippy::type_complexity)]
+fn pruning_for(
+    s: &Selection,
+    values: &[ScalarValue],
+) -> Result<Option<Arc<datafusion_physical_optimizer::pruning::PruningPredicate>>, ()> {
+    use datafusion_physical_expr::expressions::{Column, lit};
+    use datafusion_physical_expr::split_conjunction;
+    use datafusion_physical_expr::utils::collect_columns;
+    let Some(e) = &s.predicate else {
+        return Ok(s.pruning.clone());
+    };
+    let Ok(e) = Arc::clone(e).transform_down(|e| {
+        if let Some(c) = e.downcast_ref::<Column>()
+            && let Some(i) = s.partitions.iter().position(|p| p == c.name())
+            && let Some(v) = values.get(i)
+        {
+            return Ok(Transformed::yes(lit(v.clone())));
+        }
+        Ok(Transformed::no(e))
+    }) else {
+        return Ok(None);
+    };
+    let e = e.data;
+    let one_row = arrow::record_batch::RecordBatch::try_new_with_options(
+        Arc::new(Schema::empty()),
+        vec![],
+        &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(1)),
+    )
+    .map_err(|_| ())?;
+    for c in split_conjunction(&e) {
+        if !collect_columns(c).is_empty() {
+            continue;
+        }
+        let kept = c
+            .evaluate(&one_row)
+            .ok()
+            .and_then(|v| v.into_array(1).ok())
+            .and_then(|a| {
+                a.as_any()
+                    .downcast_ref::<arrow::array::BooleanArray>()
+                    .map(|b| arrow::array::Array::is_valid(b, 0) && b.value(0))
+            });
+        if kept == Some(false) {
+            return Err(());
+        }
+    }
+    Ok(prune_with(&s.schema, e))
+}
+
 /// The bytes one segment's row groups select for `s`: what its static predicate keeps by their
 /// statistics, of the leaves it projects. The footer and a kept summary are read the same way.
 fn selected_in(
     s: &Selection,
+    pruning: Option<&datafusion_physical_optimizer::pruning::PruningPredicate>,
     descr: &parquet::schema::types::SchemaDescriptor,
     groups: &[parquet::file::metadata::RowGroupMetaData],
     unread: &datafusion_datasource_parquet::ParquetFileMetrics,
@@ -633,7 +730,7 @@ fn selected_in(
     use parquet::arrow::ProjectionMask;
 
     let mut keep = RowGroupAccessPlanFilter::new(ParquetAccessPlan::new_all(groups.len()));
-    if let Some(p) = &s.pruning {
+    if let Some(p) = pruning {
         keep.prune_by_statistics(&s.schema, descr, groups, p, unread);
     }
     let mask = s
@@ -669,13 +766,16 @@ pub(super) async fn selected_bytes(scans: Vec<Selection>) -> DFResult<u64> {
     ));
     let files = scans.into_iter().map(Arc::new).flat_map(|s| {
         let files = s.files.clone();
-        files.into_iter().map(move |f| (Arc::clone(&s), f))
+        files.into_iter().map(move |(f, v)| (Arc::clone(&s), f, v))
     });
     // Several footers in flight: a statement that stops after one segment waits on this pass.
     futures::stream::iter(files)
-        .map(|(s, f)| {
+        .map(|(s, f, values)| {
             let unread = Arc::clone(&unread);
             async move {
+                let Ok(pruning) = pruning_for(&s, &values) else {
+                    return DFResult::Ok(0);
+                };
                 // A listing stamps each local file; one without a stamp is not kept.
                 let stamp = (s.local && f.last_modified.timestamp_nanos_opt() != Some(0))
                     .then_some((f.size, f.last_modified));
@@ -683,7 +783,13 @@ pub(super) async fn selected_bytes(scans: Vec<Selection>) -> DFResult<u64> {
                     stamp.and_then(|st| summary(f.location.as_ref(), st, s.pruned_by.as_ref()));
                 if let Some(sum) = cached {
                     let groups = sum.groups()?;
-                    return DFResult::Ok(selected_in(&s, &sum.descr, &groups, &unread));
+                    return DFResult::Ok(selected_in(
+                        &s,
+                        pruning.as_deref(),
+                        &sum.descr,
+                        &groups,
+                        &unread,
+                    ));
                 }
                 SELECTION_FOOTER_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let meta = DFParquetMetadata::new(s.store.as_ref(), &f)
@@ -699,7 +805,7 @@ pub(super) async fn selected_bytes(scans: Vec<Selection>) -> DFResult<u64> {
                         .map_or_else(Vec::new, |n| leaves_of(descr, n));
                     note_summary(f.location.as_ref(), st, &meta, &leaves);
                 }
-                let bytes = selected_in(&s, descr, meta.row_groups(), &unread);
+                let bytes = selected_in(&s, pruning.as_deref(), descr, meta.row_groups(), &unread);
                 DFResult::Ok(bytes)
             }
         })
@@ -791,6 +897,8 @@ impl Listed {
 #[derive(Debug)]
 pub struct SegmentTable {
     schema: SchemaRef,
+    file_schema: SchemaRef,
+    partitions: Vec<FieldRef>,
     listed: Arc<Listed>,
     groups: usize,
     url: ObjectStoreUrl,
@@ -799,7 +907,12 @@ pub struct SegmentTable {
 
 impl SegmentTable {
     pub fn new(table: &NestTable, groups: usize) -> crate::Result<Self> {
-        let listed = Listed::new(table.files.clone(), Vec::new(), table.keyed)?;
+        let mut listed = Listed::new(table.files.clone(), Vec::new(), table.keyed)?;
+        if !table.partitions.is_empty() {
+            for (file, values) in listed.located.iter_mut().zip(&table.partition_values) {
+                file.partition_values = values.clone();
+            }
+        }
         Self::over(table, Arc::new(listed), groups)
     }
 
@@ -810,11 +923,13 @@ impl SegmentTable {
         groups: usize,
     ) -> crate::Result<Self> {
         Ok(Self {
-            schema: table.schema.clone(),
+            schema: table.table_schema(),
+            file_schema: table.schema.clone(),
+            partitions: table.partitions.clone(),
             listed,
             groups: groups.max(1),
             url: if table.keyed {
-                ObjectStoreUrl::parse(NEST_STORE)
+                ObjectStoreUrl::parse(table.store_url.as_deref().unwrap_or(NEST_STORE))
                     .map_err(|e| crate::BurrmillError::Substrate(e.to_string()))?
             } else {
                 ObjectStoreUrl::local_filesystem()
@@ -871,7 +986,10 @@ impl TableProvider for SegmentTable {
         // A footer cache is read only through this factory; a limit on the cache manager alone
         // leaves every statement reading every footer again (burrmill#98).
         let footers = footers_for(&url, state.runtime_env());
-        let source = ParquetSource::new(self.schema.clone()).with_table_parquet_options(opts);
+        let table_schema = datafusion_datasource::TableSchema::builder(self.file_schema.clone())
+            .with_table_partition_cols(self.partitions.clone())
+            .build();
+        let source = ParquetSource::new(table_schema).with_table_parquet_options(opts);
         let bytes = MetricBuilder::new(source.metrics()).global_counter(SEALED_BYTES);
         let opened = Arc::new(Opened::default());
         let mut source = source.with_parquet_file_reader_factory(Arc::new(Unmetered {
@@ -953,6 +1071,9 @@ pub async fn discover_store_tables(
             wide: Vec::new(),
             keyed: true,
             lowercase: Vec::new(),
+            partitions: Vec::new(),
+            partition_values: Vec::new(),
+            store_url: None,
         });
     }
     tables.sort_by(|a, b| a.name.cmp(&b.name));

@@ -57,6 +57,7 @@ pub mod encode;
 mod errors;
 mod extreme;
 mod fastcast;
+mod files;
 mod floatsum;
 mod fold;
 mod host;
@@ -268,6 +269,7 @@ impl Engine {
         threads: usize,
         budget: Option<Budget>,
         shared: Option<&SharedPool>,
+        stores: Vec<(String, Arc<dyn object_store::ObjectStore>)>,
     ) -> Result<Self> {
         let threads = budget.as_ref().map_or(threads, |b| b.threads.max(1));
         // One partition, so no operator repartitions and nothing spawns a task.
@@ -295,7 +297,7 @@ impl Engine {
         let spills = budget.as_ref().is_some_and(|b| b.spill.is_some());
         for t in tables
             .iter()
-            .filter(|t| !spills && !t.files.is_empty() && !t.keyed)
+            .filter(|t| !spills && !t.files.is_empty() && !t.keyed && t.partitions.is_empty())
         {
             let name = if t.wide.is_empty() {
                 t.name.clone()
@@ -325,6 +327,14 @@ impl Engine {
         let cancel = crate::CancelToken::new();
         let mut session = MiniSession::new(threads, fold, budget.as_ref(), shared, cancel.clone())
             .map_err(df_err)?;
+        for (url, store) in stores {
+            session.runtime_env().register_object_store(
+                datafusion_execution::object_store::ObjectStoreUrl::parse(&url)
+                    .map_err(df_err)?
+                    .as_ref(),
+                store,
+            );
+        }
         let groups = threads.max(1);
         for t in &tables {
             let provider: Arc<dyn TableProvider> = if t.files.is_empty() {
