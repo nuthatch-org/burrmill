@@ -50,6 +50,8 @@ pub(crate) fn duck_dialect() -> dialect::Duck {
 }
 mod buildside;
 mod deterministic;
+mod receipt;
+pub use receipt::Receipt;
 mod distinct;
 mod distinctrows;
 mod doubles;
@@ -476,6 +478,111 @@ impl Engine {
         self.session
             .deterministic()
             .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// `sql`'s answer and its receipt: the statement normalised, the engine and its settings, the
+    /// content of every input it reads and the answer's hash, for anyone holding the same inputs
+    /// to re-check with [`Engine::verify_receipt`]. Needs deterministic mode. Every input file is
+    /// read whole to hash it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn sql_receipt(&self, sql: &str) -> Result<(Vec<RecordBatch>, Receipt)> {
+        self.refuse_without_determinism()?;
+        let statement = receipt::normalised(sql);
+        let logical = plan_query(&self.session, &statement, &self.cancel)?;
+        let env = self.session.runtime_env();
+        let inputs = self.block_on(async {
+            let inputs = receipt::inputs_of(&logical).await?;
+            receipt::hash_inputs(inputs, env).await
+        })?;
+        let batches = self.sql(&statement)?;
+        let answer = receipt::answer_hash(&batches[0].schema(), &batches)?;
+        Ok((batches, self.receipt_of(statement, inputs, answer)))
+    }
+
+    /// Whether this engine and the inputs it holds reproduce `receipt`: the same engine and
+    /// settings, inputs of the same content, and the same answer. `Unverified` names the first
+    /// field that differs.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn verify_receipt(&self, receipt: &Receipt) -> Result<()> {
+        self.refuse_unmatched_settings(receipt)?;
+        let (_, got) = self.sql_receipt(&receipt.statement)?;
+        match receipt::mismatch(receipt, &got) {
+            Some(why) => Err(BurrmillError::Unverified(why)),
+            None => Ok(()),
+        }
+    }
+
+    /// [`Engine::sql_receipt`] on the caller's event loop, in a tab.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn sql_receipt_async(&self, sql: &str) -> Result<(Vec<RecordBatch>, Receipt)> {
+        self.refuse_without_determinism()?;
+        let statement = receipt::normalised(sql);
+        let logical = plan_query(&self.session, &statement, &self.cancel)?;
+        let inputs = receipt::inputs_of(&logical).await?;
+        let inputs = receipt::hash_inputs(inputs, self.session.runtime_env()).await?;
+        let batches = self.sql_async(&statement).await?;
+        let schema = match batches.first() {
+            Some(b) => b.schema(),
+            None => self.result_schema(&statement)?,
+        };
+        let answer = receipt::answer_hash(&schema, &batches)?;
+        Ok((batches, self.receipt_of(statement, inputs, answer)))
+    }
+
+    /// [`Engine::verify_receipt`] on the caller's event loop, in a tab.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn verify_receipt_async(&self, receipt: &Receipt) -> Result<()> {
+        self.refuse_unmatched_settings(receipt)?;
+        let (_, got) = self.sql_receipt_async(&receipt.statement).await?;
+        match receipt::mismatch(receipt, &got) {
+            Some(why) => Err(BurrmillError::Unverified(why)),
+            None => Ok(()),
+        }
+    }
+
+    fn receipt_of(&self, statement: String, inputs: Vec<String>, answer: String) -> Receipt {
+        Receipt {
+            engine: receipt::engine_version(),
+            strict_decimals: self
+                .session
+                .strict()
+                .load(std::sync::atomic::Ordering::Relaxed),
+            statement,
+            inputs,
+            answer,
+        }
+    }
+
+    fn refuse_without_determinism(&self) -> Result<()> {
+        if self.is_deterministic() {
+            return Ok(());
+        }
+        Err(BurrmillError::Config(
+            "a receipt needs deterministic mode: set_deterministic(true)".into(),
+        ))
+    }
+
+    fn refuse_unmatched_settings(&self, receipt: &Receipt) -> Result<()> {
+        let here = self.receipt_of(String::new(), Vec::new(), String::new());
+        if here.engine != receipt.engine || here.strict_decimals != receipt.strict_decimals {
+            let why = receipt::mismatch(receipt, &here).unwrap_or_default();
+            return Err(BurrmillError::Unverified(why));
+        }
+        Ok(())
+    }
+
+    /// `f` to completion on the engine's runtime, from a thread of its own when the caller is
+    /// already inside one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn block_on<T: Send>(&self, f: impl std::future::Future<Output = T> + Send) -> T {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return self.runtime().block_on(f);
+        }
+        std::thread::scope(|s| {
+            s.spawn(|| self.runtime().block_on(f))
+                .join()
+                .expect("a receipt's hashing thread")
+        })
     }
 
     fn is_deterministic(&self) -> bool {

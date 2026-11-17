@@ -289,6 +289,47 @@ impl Session {
         self.packed(out, r)
     }
 
+    /// `sql`'s receipt as JSON, which anyone holding the same rows can verify with
+    /// `verify_receipt`, here or in a native engine. The statement runs in deterministic mode.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn receipt(&self, sql: &str) -> Result<String, String> {
+        self.guard(sql).map_err(|f| f.local)?;
+        self.engine.set_deterministic(true);
+        let r = self.engine.sql_receipt(sql);
+        self.engine.set_deterministic(false);
+        r.map(|(_, r)| r.to_json()).map_err(|e| e.to_string())
+    }
+
+    /// Whether these rows reproduce the receipt `text`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn verify_receipt(&self, text: &str) -> Result<(), String> {
+        let r = burrmill::Receipt::parse(text).map_err(|e| e.to_string())?;
+        self.guard(&r.statement).map_err(|f| f.local)?;
+        self.engine.set_deterministic(true);
+        let v = self.engine.verify_receipt(&r);
+        self.engine.set_deterministic(false);
+        v.map_err(|e| e.to_string())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn receipt(&self, sql: &str) -> Result<String, String> {
+        self.guard(sql).map_err(|f| f.local)?;
+        self.engine.set_deterministic(true);
+        let r = self.engine.sql_receipt_async(sql).await;
+        self.engine.set_deterministic(false);
+        r.map(|(_, r)| r.to_json()).map_err(|e| e.to_string())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn verify_receipt(&self, text: &str) -> Result<(), String> {
+        let r = burrmill::Receipt::parse(text).map_err(|e| e.to_string())?;
+        self.guard(&r.statement).map_err(|f| f.local)?;
+        self.engine.set_deterministic(true);
+        let v = self.engine.verify_receipt_async(&r).await;
+        self.engine.set_deterministic(false);
+        v.map_err(|e| e.to_string())
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub fn aggregate_feedback(&self, sql: &str) -> Result<String, String> {
         let measured = match measure_sql(sql) {
@@ -872,6 +913,64 @@ posted,merchant,amount
             burrmill_ingest::ingest_bytes(CSV.as_bytes(), FormatHint::Sniff, &Budget::untrusted())
                 .unwrap();
         Session::open(table).unwrap()
+    }
+
+    #[test]
+    fn a_receipt_from_the_tab_verifies_natively_and_back() {
+        let table =
+            burrmill_ingest::ingest_bytes(CSV.as_bytes(), FormatHint::Sniff, &Budget::untrusted())
+                .unwrap();
+        let mut native = Engine::builder().open().unwrap();
+        native
+            .register_batch(TABLE, table.batches().to_vec())
+            .unwrap();
+        native.set_deterministic(true);
+        let tab = Session::open(table).unwrap();
+        let sql = "SELECT COUNT(*) AS n FROM t";
+        let from_tab = tab.receipt(sql).unwrap();
+        native
+            .verify_receipt(&burrmill::Receipt::parse(&from_tab).unwrap())
+            .unwrap();
+        let (_, from_native) = native.sql_receipt(sql).unwrap();
+        tab.verify_receipt(&from_native.to_json()).unwrap();
+        assert_eq!(from_native.to_json(), from_tab);
+        // The tab's own engine is back as it was.
+        assert!(tab.query("SELECT now()").is_ok());
+        assert!(
+            tab.verify_receipt(&from_tab.replace("COUNT", "count"))
+                .is_err()
+        );
+    }
+
+    /// `demo/receipt.json`: a CSV, a statement and the receipt a native engine gives them, which
+    /// `demo/receipt.mjs` requires the tab, built for wasm32, to make byte for byte and to verify.
+    /// `BURRMILL_REGENERATE=1` rewrites it.
+    #[test]
+    fn the_demo_receipt_is_what_a_native_engine_makes() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../demo/receipt.json");
+        let csv = "posted,merchant,amount\n2024-01-02,SHOP1,-1.50\n2024-01-03,SHOP2,12.25\n\
+                   2024-01-03,SHOP1,-3.00\n2024-02-01,,7\n";
+        let sql = "SELECT merchant, SUM(amount) AS total, COUNT(*) AS n FROM t GROUP BY merchant";
+        let table =
+            burrmill_ingest::ingest_bytes(csv.as_bytes(), FormatHint::Sniff, &Budget::untrusted())
+                .unwrap();
+        let mut native = Engine::builder().open().unwrap();
+        native
+            .register_batch(TABLE, table.batches().to_vec())
+            .unwrap();
+        native.set_deterministic(true);
+        let (_, r) = native.sql_receipt(sql).unwrap();
+        let doc = serde_json::json!({ "csv": csv, "sql": sql, "receipt": r.to_json() });
+        if std::env::var("BURRMILL_REGENERATE").is_ok() {
+            std::fs::write(path, serde_json::to_string_pretty(&doc).unwrap() + "\n").unwrap();
+            return;
+        }
+        let committed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            committed, doc,
+            "regenerate demo/receipt.json with BURRMILL_REGENERATE=1"
+        );
     }
 
     fn assert_clean(label: &str, text: &str) {

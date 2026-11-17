@@ -916,6 +916,11 @@ impl SegmentTable {
         Self::over(table, Arc::new(listed), groups)
     }
 
+    /// The store the table reads and each file's place in it, as its scans list them.
+    pub(super) fn located(&self) -> (&ObjectStoreUrl, impl Iterator<Item = &PartitionedFile>) {
+        (&self.url, self.listed.located.iter())
+    }
+
     /// `table` over `listed`, which was built from its files.
     pub(super) fn over(
         table: &NestTable,

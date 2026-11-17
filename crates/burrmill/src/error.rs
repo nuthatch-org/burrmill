@@ -54,6 +54,8 @@ pub enum BurrmillError {
     /// The engine panicked planning or running the statement: a fault in Burrmill or below it, not
     /// in the statement. Caught where the statement leaves the engine, so the caller does not unwind.
     Internal(String),
+    /// A receipt that is not one, or that this engine and these inputs do not reproduce.
+    Unverified(String),
 }
 
 impl fmt::Display for BurrmillError {
@@ -71,6 +73,7 @@ impl fmt::Display for BurrmillError {
             Self::NoSegments(m) => write!(f, "no segments: {m}"),
             Self::Config(m) => write!(f, "invalid engine configuration: {m}"),
             Self::Internal(m) => write!(f, "internal error: {m}"),
+            Self::Unverified(m) => write!(f, "receipt does not verify: {m}"),
         }
     }
 }
