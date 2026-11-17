@@ -49,6 +49,7 @@ pub(crate) fn duck_dialect() -> dialect::Duck {
     dialect::Duck
 }
 mod buildside;
+mod deterministic;
 mod distinct;
 mod distinctrows;
 mod doubles;
@@ -455,7 +456,32 @@ impl Engine {
             out.push(b);
             Ok(())
         })?;
+        if self.is_deterministic() {
+            let schema = match out.first() {
+                Some(b) => b.schema(),
+                None => self.result_schema(sql)?,
+            };
+            return deterministic::canonical(&schema, &out).map_err(df_err);
+        }
         Ok(out)
+    }
+
+    /// Deterministic mode, off by default: the same statement over the same rows answers the same
+    /// bytes from [`Engine::sql`], [`Engine::sql_async`] and [`Engine::sql_ipc`] at any thread count and over any split of
+    /// the rows into segments. Rows the statement leaves unordered come in a canonical order, ties
+    /// in every ORDER BY a LIMIT or a window reads are broken by every column, and float variance,
+    /// correlation and regression, approximate percentiles, and volatile and clock functions are
+    /// refused. A batch streamed by `sql_for_each` is not cut canonically.
+    pub fn set_deterministic(&self, on: bool) {
+        self.session
+            .deterministic()
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn is_deterministic(&self) -> bool {
+        self.session
+            .deterministic()
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// A handle that stops every statement on the engine, from any thread, at its next batch
@@ -714,7 +740,14 @@ impl Engine {
             Ok(())
         })
         .await?;
-        Ok(out)
+        match out.first() {
+            Some(b) if self.is_deterministic() => {
+                deterministic::canonical(&b.schema(), &out).map_err(df_err)
+            }
+            // However many empty batches the plan made, none.
+            None if self.is_deterministic() => Ok(Vec::new()),
+            _ => Ok(out),
+        }
     }
 
     /// As [`Engine::sql_for_each`], on the caller's event loop: each batch to `f` as it is made, so

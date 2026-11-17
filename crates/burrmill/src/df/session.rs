@@ -142,6 +142,7 @@ pub struct MiniSession {
     query_planner: Arc<dyn QueryPlanner + Send + Sync>,
     limits: Arc<super::bound::Limits>,
     strict: super::strict::Flag,
+    deterministic: super::deterministic::Flag,
 }
 
 impl std::fmt::Debug for MiniSession {
@@ -395,6 +396,7 @@ impl MiniSession {
         .build_arc()?;
         let limits = super::bound::Limits::new(budget.map(|_| &runtime.memory_pool));
         let strict = super::strict::Flag::default();
+        let deterministic = super::deterministic::Flag::default();
         // Under every name DataFusion gives a function: `length` is `character_length`'s, and
         // registering primary names alone refused it.
         let mut scalar = HashMap::new();
@@ -609,6 +611,10 @@ impl MiniSession {
                         flag: Arc::clone(&strict),
                         refuse_only: true,
                     }) as Arc<dyn AnalyzerRule + Send + Sync>,
+                    // Last of the rewrites, so the orders it completes are the plan's own.
+                    Arc::new(super::deterministic::Deterministic(Arc::clone(
+                        &deterministic,
+                    ))) as Arc<dyn AnalyzerRule + Send + Sync>,
                     Arc::new(super::bound::BoundValues(Arc::clone(&limits))),
                 ])
                 .map(|r| {
@@ -697,6 +703,7 @@ impl MiniSession {
             query_planner: Arc::new(MiniQueryPlanner),
             limits,
             strict,
+            deterministic,
         })
     }
 
@@ -706,6 +713,10 @@ impl MiniSession {
 
     pub fn strict(&self) -> &super::strict::Flag {
         &self.strict
+    }
+
+    pub fn deterministic(&self) -> &super::deterministic::Flag {
+        &self.deterministic
     }
 
     /// `information_schema.tables` and `.columns` as DuckDB shows them to nuthatch's `.tables` and

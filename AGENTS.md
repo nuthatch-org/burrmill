@@ -19,6 +19,7 @@ This project's build, test and lint commands are [yatr](https://github.com/cargo
 | `demo-build` | demo/pkg: burrmill-wasm and its JS glue (needs the pinned wasm-bindgen) |  | cached on its inputs |
 | `demo-test` | Every demo/*.mjs against the built engine on a static server | `demo-build` | always runs |
 | `deny` | Advisories, licences, duplicates and sources, from deny.toml |  | always runs |
+| `determinism` | Generated SQL in deterministic mode at 1-32 threads over three layouts, CASES cases, 10,000 unless set |  | cached on its inputs |
 | `engine-size` | The demo's ingest-engine.wasm under 8 MiB gzipped |  | cached on its inputs |
 | `fmt` | Format the tree |  | always runs |
 | `fmt-check` | Fail if the tree is unformatted |  | cached on its inputs |
