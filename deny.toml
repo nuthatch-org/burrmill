@@ -11,7 +11,15 @@ ignore = [
     { id = "RUSTSEC-2026-0368", reason = "bench-only, libduckdb-sys build script" },
     { id = "RUSTSEC-2026-0369", reason = "bench-only, libduckdb-sys build script" },
     { id = "RUSTSEC-2026-0429", reason = "bench-only, libduckdb-sys build script" },
+    { id = "RUSTSEC-2026-0545", reason = "bench-only, libduckdb-sys build script" },
+    { id = "RUSTSEC-2026-0547", reason = "bench-only, libduckdb-sys build script" },
+    { id = "RUSTSEC-2026-0548", reason = "bench-only, libduckdb-sys build script" },
     { id = "RUSTSEC-2026-0235", reason = "rkyv 0.7 is in no build graph" },
+    # Unmaintained, not vulnerable, and each reached only through Arrow or object_store, which
+    # name no successor yet. Drop these when they move.
+    { id = "RUSTSEC-2026-0543", reason = "chrono, via arrow and datafusion" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz, via arrow-array" },
+    { id = "RUSTSEC-2026-0542", reason = "humantime, via object_store" },
 ]
 
 [licenses]
