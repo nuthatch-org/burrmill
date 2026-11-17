@@ -21,21 +21,41 @@ use serde_json::Value;
 
 use crate::generate::Rng;
 
+/// How a table's rows are cut into segments, and each segment into row groups.
+#[derive(Clone, Copy)]
+struct Layout {
+    segments: usize,
+    group: usize,
+}
+
+const ONE_FILE: Layout = Layout {
+    segments: 1,
+    group: 1 << 20,
+};
+
 fn write(
     dir: &std::path::Path,
     name: &str,
     schema: Arc<Schema>,
     cols: Vec<ArrayRef>,
+    layout: Layout,
 ) -> anyhow::Result<()> {
     let batch = RecordBatch::try_new(schema.clone(), cols)?;
-    let f = std::fs::File::create(dir.join(format!("{name}-{:064x}.parquet", 1)))?;
-    let mut w = parquet::arrow::ArrowWriter::try_new(f, schema, None)?;
-    w.write(&batch)?;
-    w.close()?;
+    let per = batch.num_rows().div_ceil(layout.segments).max(1);
+    let props = parquet::file::properties::WriterProperties::builder()
+        .set_max_row_group_row_count(Some(layout.group))
+        .build();
+    for (i, at) in (0..batch.num_rows()).step_by(per).enumerate() {
+        let part = batch.slice(at, per.min(batch.num_rows() - at));
+        let f = std::fs::File::create(dir.join(format!("{name}-{:064x}.parquet", i + 1)))?;
+        let mut w = parquet::arrow::ArrowWriter::try_new(f, schema.clone(), Some(props.clone()))?;
+        w.write(&part)?;
+        w.close()?;
+    }
     Ok(())
 }
 
-fn fixture(dir: &std::path::Path) -> anyhow::Result<()> {
+fn fixture(dir: &std::path::Path, layout: Layout) -> anyhow::Result<()> {
     let mut r = Rng(7);
     let addrs = [
         Some("0xa"),
@@ -144,6 +164,7 @@ fn fixture(dir: &std::path::Path) -> anyhow::Result<()> {
             s(memo),
             s(doc),
         ],
+        layout,
     )?;
     let schema = Arc::new(Schema::new(vec![
         Field::new("addr", DataType::Utf8, true),
@@ -180,6 +201,7 @@ fn fixture(dir: &std::path::Path) -> anyhow::Result<()> {
                 Some(7),
             ])),
         ],
+        layout,
     )?;
     Ok(())
 }
@@ -1010,7 +1032,7 @@ pub fn run() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;
     let segs = tmp.path().join("segments");
     std::fs::create_dir_all(&segs)?;
-    fixture(&segs)?;
+    fixture(&segs, ONE_FILE)?;
     let duck = duckdb::Connection::open_in_memory()?;
     duck.execute_batch(&format!(
         "CREATE VIEW ev AS SELECT * FROM read_parquet('{0}/ev-*.parquet');
@@ -1190,4 +1212,132 @@ pub fn run() -> anyhow::Result<()> {
         .join()
         .expect("drop engine");
     Ok(())
+}
+
+/// `determinism`: generated SQL in deterministic mode at 1, 2, 8 and 32 threads over three
+/// layouts of the same rows, each answer's Arrow IPC compared byte for byte (#340). A statement
+/// refused anywhere must be refused everywhere. `SEED`, `CASES` (10,000) and `PRINT` as `fuzz`.
+pub fn determinism() -> anyhow::Result<()> {
+    let seed = crate::env_usize("SEED", 1) as u64;
+    let cases = crate::env_usize("CASES", 10_000);
+    let print = crate::env_flag("PRINT");
+    // `DIR=<path>` keeps the fixture there, to rerun one statement by hand.
+    let tmp = tempfile::tempdir()?;
+    let root = std::env::var("DIR").map_or_else(|_| tmp.path().to_path_buf(), Into::into);
+    let layouts = [
+        ONE_FILE,
+        Layout {
+            segments: 3,
+            group: 50,
+        },
+        Layout {
+            segments: 11,
+            group: 7,
+        },
+    ];
+    let mut engines = Vec::new();
+    for (i, layout) in layouts.iter().enumerate() {
+        let dir = root.join(format!("layout{i}"));
+        std::fs::create_dir_all(&dir)?;
+        fixture(&dir, *layout)?;
+        for threads in [1, 2, 8, 32] {
+            let e = burrmill::Engine::builder()
+                .segments(&dir)
+                .budget(burrmill::Budget {
+                    memory_bytes: 1 << 30,
+                    threads,
+                    spill: None,
+                })
+                .open()?;
+            e.set_deterministic(true);
+            engines.push((
+                format!("{} segments, {threads} threads", layout.segments),
+                e,
+            ));
+        }
+    }
+    let (mut same, mut refused, mut differ) = (0usize, 0usize, 0usize);
+    let mut why: std::collections::BTreeMap<String, usize> = Default::default();
+    for i in 0..cases {
+        let case_seed = seed + i as u64;
+        let mut r = Rng(case_seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let sql = determinism_query(&mut r);
+        let answers: Vec<Result<Vec<u8>, String>> = engines
+            .iter()
+            .map(|(_, e)| e.sql_ipc(&sql).map_err(|e| e.to_string()))
+            .collect();
+        let tag = match &answers[0] {
+            Ok(want) if answers.iter().all(|a| a.as_ref().is_ok_and(|g| g == want)) => {
+                same += 1;
+                "SAME"
+            }
+            Err(e) if answers.iter().all(|a| a.is_err()) => {
+                refused += 1;
+                *why.entry(
+                    e.rsplit("planning: ")
+                        .next()
+                        .unwrap_or(e)
+                        .chars()
+                        .take(110)
+                        .collect(),
+                )
+                .or_default() += 1;
+                "REFUSED"
+            }
+            _ => {
+                differ += 1;
+                let first = answers.iter().position(|a| a != &answers[0]).unwrap_or(0);
+                println!(
+                    "DIFF seed={case_seed}: {} and {} disagree: {sql}",
+                    engines[0].0, engines[first].0
+                );
+                "DIFF"
+            }
+        };
+        if print {
+            println!("{tag} {sql}");
+        }
+    }
+    println!(
+        "{cases} cases over {} engines: {same} byte-identical, {refused} refused everywhere, \
+         {differ} differ",
+        engines.len()
+    );
+    for (e, n) in why.iter().rev().take(12) {
+        println!("  refused {n:>5}  {e}");
+    }
+    std::thread::spawn(move || drop(engines))
+        .join()
+        .expect("drop engines");
+    anyhow::ensure!(differ == 0, "{differ} statements answered differently");
+    Ok(())
+}
+
+/// The fuzz grammar's statements with their ORDER BY left as written, and some wrapped in a LIMIT
+/// with none, or over float aggregates, which is where the order of rows would show.
+fn determinism_query(r: &mut Rng) -> String {
+    let (sql, _) = Gen { r }.query();
+    match r.below(6) {
+        0 => format!("SELECT * FROM ({sql}) d LIMIT {}", 1 + r.below(20)),
+        1 => {
+            let f = [
+                "sum",
+                "avg",
+                "min",
+                "max",
+                "stddev",
+                "var_pop",
+                "array_agg",
+                "first_value",
+            ][r.below(8)];
+            let x = ["CAST(e.amount AS DOUBLE) / 7", "e.amount * 0.1", "e.amount"][r.below(3)];
+            format!("SELECT e.kind, {f}({x}) AS a, count(*) AS n FROM ev e GROUP BY e.kind")
+        }
+        2 => format!(
+            "SELECT e.\"from\", e.amount, row_number() OVER (PARTITION BY e.kind ORDER BY \
+             e.amount) AS n FROM ev e LIMIT {}",
+            5 + r.below(40)
+        ),
+        _ => sql,
+    }
 }

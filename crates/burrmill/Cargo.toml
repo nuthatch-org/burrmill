@@ -389,3 +389,8 @@ required-features = ["datafusion"]
 name = "df_strict"
 path = "tests/df_strict.rs"
 required-features = ["datafusion"]
+
+[[test]]
+name = "df_deterministic"
+path = "tests/df_deterministic.rs"
+required-features = ["datafusion"]

@@ -117,3 +117,24 @@ checks a generated corpus against an exact oracle):
 `div(a, b, scale, mode)` is admitted in either mode: `a / b` exactly, rounded once to `scale`
 digits by `half_even`, `half_up`, `down`, `up`, `floor` or `ceiling`, as `DECIMAL(38, scale)`, and
 refused for a zero divisor or past 38 digits.
+
+## Deterministic mode
+
+Off by default. With `Engine::set_deterministic(true)`, a statement over the same rows answers
+the same Arrow IPC bytes from `sql` and `sql_ipc` at any thread count and over any split of the
+rows into segments (`tests/df_deterministic.rs`; `yatr run determinism` runs 10,000 generated
+statements at 1, 2, 8 and 32 threads over three layouts):
+
+| Where order could show | In deterministic mode |
+|---|---|
+| rows the statement leaves unordered | sorted by every column |
+| ties in the ORDER BY under a LIMIT, or of the answer | broken by every column, after the written keys |
+| `row_number`, `lag`, `lead`, `ntile`, and any window over a ROWS frame | the window's ORDER BY ties broken by every column |
+| `array_agg`, `string_agg`, `first_value`, `last_value` | ordered by their arguments after any written ORDER BY |
+| `first_value`, `last_value`, `nth_value` over a RANGE or GROUPS frame | refused; write a ROWS frame |
+| `stddev`, `var*`, `corr`, `covar*`, `regr_*` over floats, integers included | refused: computed in floats, merged in arrival order |
+| `approx_percentile_cont`, `approx_median` | refused; `quantile_cont` and `median` are exact |
+| `random`, `uuid`, `now`, `current_date` and the other clocks | refused |
+
+SUM and AVG over DOUBLE are exact whatever the partitioning in either mode. The answer is cut into
+batches of 8,192 rows, with nothing left under a NULL; a batch streamed by `sql_for_each` is not.
