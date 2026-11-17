@@ -195,7 +195,9 @@ Said plainly, because a README that implies otherwise is the thing this project 
   of a value between refuses (#42), and so does a `TRY_CAST` whose value is read, from text (#44) or
   from a DOUBLE or FLOAT (#63), rather than answer a NULL DuckDB would not give. Its `IS [NOT] NULL`
   and its `SUM` answer as DuckDB does, the sum exactly while the total fits 38 digits.
-  No real nest has produced one.
+  No real nest has produced one. A value wider than that is written `DECIMAL(p, s)` up to
+  `p = 76`, which DuckDB does not have: it round-trips, adds and multiplies exactly or refuses
+  (`tests/df_decimal76.rs`).
 - **What DuckDB computes and Burrmill refuses, by design**: a `SUM` over a `TRY_CAST` that DuckDB
   answers by dropping what did not fit. The fuzzer counts these separately and they are allowed.
 - **What Burrmill computes and DuckDB refuses**: `TIMESTAMPTZ + INTERVAL` and a `TIMESTAMPTZ` to
