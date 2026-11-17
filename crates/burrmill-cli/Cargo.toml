@@ -1,0 +1,22 @@
+[package]
+name = "burrmill-cli"
+version = "0.0.1"
+description = "burrmill q: strict, deterministic and receipted SQL over Parquet files."
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "burrmill"
+path = "src/main.rs"
+
+[dependencies]
+burrmill = { path = "../burrmill", features = ["datafusion"] }
+arrow = { workspace = true, features = ["csv", "json", "ipc"] }
+parquet.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
