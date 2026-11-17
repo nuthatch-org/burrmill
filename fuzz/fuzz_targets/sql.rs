@@ -6,6 +6,11 @@ use burrmill::{Budget, Engine};
 
 thread_local! {
     static ENGINE: Engine = engine();
+    static STRICT: Engine = {
+        let e = engine();
+        e.set_strict_decimals(true);
+        e
+    };
 }
 
 // A view to name, with the columns the dialect rewrites have types to work on.
@@ -33,6 +38,9 @@ fuzz_target!(|data: &[u8]| {
     };
     let _ = burrmill::inspect::reach(sql);
     ENGINE.with(|e| {
+        let _ = e.parquet_scans(sql);
+    });
+    STRICT.with(|e| {
         let _ = e.parquet_scans(sql);
     });
 });

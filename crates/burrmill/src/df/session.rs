@@ -141,6 +141,7 @@ pub struct MiniSession {
     query_start: DateTime<Utc>,
     query_planner: Arc<dyn QueryPlanner + Send + Sync>,
     limits: Arc<super::bound::Limits>,
+    strict: super::strict::Flag,
 }
 
 impl std::fmt::Debug for MiniSession {
@@ -393,6 +394,7 @@ impl MiniSession {
         }
         .build_arc()?;
         let limits = super::bound::Limits::new(budget.map(|_| &runtime.memory_pool));
+        let strict = super::strict::Flag::default();
         // Under every name DataFusion gives a function: `length` is `character_length`'s, and
         // registering primary names alone refused it.
         let mut scalar = HashMap::new();
@@ -419,6 +421,7 @@ impl MiniSession {
             }
             scalar.insert("to_timestamp".into(), t);
         }
+        scalar.insert("div".into(), super::strict::Div::udf());
         for f in super::duckfns::all() {
             for a in f.aliases() {
                 scalar.insert(a.clone(), Arc::clone(&f));
@@ -557,10 +560,17 @@ impl MiniSession {
                     // Before every rule that compares text, an address is fixed binary or text.
                     Arc::new(super::addresses::Addresses(addresses.clone())),
                     Arc::new(super::nullsub::NullableSubqueries::default()),
+                    // Before DuckDB's `/`, which casts to DOUBLE what strict decimals refuses.
+                    Arc::new(super::strict::Written(Arc::clone(&strict))),
                     // Before coercion: DuckDB's text comparisons depend on what was written.
                     Arc::new(super::dialect::DuckComparisons),
                     Arc::new(super::rule::CheckedShifts::default()),
                     Arc::new(TypeCoercion::new()),
+                    // Before DuckDB's `/` and rounding casts, which it refuses or replaces.
+                    Arc::new(super::strict::StrictDecimals {
+                        flag: Arc::clone(&strict),
+                        refuse_only: false,
+                    }),
                     Arc::new(super::dialect::DuckSemantics::default()),
                     // Before the checked rewrite, which would hide the shape it matches.
                     Arc::new(FoldSubstitution(fold)),
@@ -594,8 +604,13 @@ impl MiniSession {
                             as Arc<dyn AnalyzerRule + Send + Sync>
                     }),
                 )
-                .chain([Arc::new(super::bound::BoundValues(Arc::clone(&limits)))
-                    as Arc<dyn AnalyzerRule + Send + Sync>])
+                .chain([
+                    Arc::new(super::strict::StrictDecimals {
+                        flag: Arc::clone(&strict),
+                        refuse_only: true,
+                    }) as Arc<dyn AnalyzerRule + Send + Sync>,
+                    Arc::new(super::bound::BoundValues(Arc::clone(&limits))),
+                ])
                 .map(|r| {
                     Arc::new(super::cancel::Stoppable(r)) as Arc<dyn AnalyzerRule + Send + Sync>
                 })
@@ -681,11 +696,16 @@ impl MiniSession {
             query_start: Utc::now(),
             query_planner: Arc::new(MiniQueryPlanner),
             limits,
+            strict,
         })
     }
 
     pub fn limits(&self) -> &super::bound::Limits {
         &self.limits
+    }
+
+    pub fn strict(&self) -> &super::strict::Flag {
+        &self.strict
     }
 
     /// `information_schema.tables` and `.columns` as DuckDB shows them to nuthatch's `.tables` and

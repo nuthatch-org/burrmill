@@ -384,3 +384,8 @@ required-features = ["datafusion"]
 name = "df_parquet"
 path = "tests/df_parquet.rs"
 required-features = ["datafusion"]
+
+[[test]]
+name = "df_strict"
+path = "tests/df_strict.rs"
+required-features = ["datafusion"]

@@ -74,6 +74,7 @@ mod sequential;
 mod session;
 mod sharing;
 mod smallinputs;
+mod strict;
 mod tables;
 pub use tables::duckdb_type;
 mod subqueries;
@@ -493,6 +494,16 @@ impl Engine {
     /// `string_agg`, a literal repeated per row. Past it the statement is refused. 16 MiB unless set.
     pub fn set_value_limit(&self, bytes: usize) {
         self.session.limits().set_value_limit(bytes);
+    }
+
+    /// Strict decimals, off by default: a DECIMAL answer is exact at its declared scale or refused.
+    /// `/` over integers and DECIMALs, AVG over a DECIMAL and every implicit DECIMAL to DOUBLE are
+    /// refused, `div(a, b, scale, mode)` divides at a named scale and rounding, and a cast that would
+    /// drop nonzero digits fails where DuckDB rounds. A written cast to DOUBLE stands.
+    pub fn set_strict_decimals(&self, on: bool) {
+        self.session
+            .strict()
+            .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Whether `EXPLAIN` and `EXPLAIN ANALYZE` answer or are refused. A host serving untrusted SQL
