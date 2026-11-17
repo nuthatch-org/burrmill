@@ -52,7 +52,6 @@ const REFUSED_BY_NAME: &[&str] = &[
     "PIVOT",
     "UNPIVOT",
     "GLOB",
-    "ASOF JOIN",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1113,7 +1112,6 @@ posted,merchant,amount
                 "PIVOT" => "PIVOT t ON merchant USING sum(amount)",
                 "UNPIVOT" => "UNPIVOT t ON amount",
                 "GLOB" => "SELECT merchant FROM t WHERE merchant GLOB 'S*'",
-                "ASOF JOIN" => "SELECT * FROM t ASOF JOIN t AS u ON t.posted >= u.posted",
                 other => panic!("no probe for {other}"),
             };
             let e = s.query(sql).unwrap_err();

@@ -20,6 +20,7 @@ use std::ops::ControlFlow;
 use sqlparser::ast::{
     Expr, Ident, ObjectName, ObjectNamePart, Query, Statement, TableFactor, Visitor, VisitorMut,
 };
+#[cfg(not(feature = "datafusion"))]
 use sqlparser::parser::Parser;
 
 use crate::error::{BurrmillError, Result};
@@ -52,7 +53,7 @@ fn unreachable(why: String, serves: &str) -> BurrmillError {
 #[doc(hidden)]
 pub fn parse(sql: &str) -> std::result::Result<Vec<Statement>, sqlparser::parser::ParserError> {
     #[cfg(feature = "datafusion")]
-    return crate::df::refuse_asof(Parser::parse_sql(&crate::df::duck_dialect(), sql));
+    return crate::df::parse_asof(sql);
     #[cfg(not(feature = "datafusion"))]
     Parser::parse_sql(&sqlparser::dialect::DuckDbDialect {}, sql)
 }
@@ -657,7 +658,7 @@ mod tests {
         "SELECT {'a': 1, 'b': (SELECT max(a) FROM e__raw)}",
         "SELECT MAP {'a': 1}, a FROM e__raw",
         "SELECT * FROM e__raw POSITIONAL JOIN t",
-        "SELECT * FROM e__raw ASOF JOIN t USING (k)",
+        "SELECT e__raw.a FROM e__raw ASOF JOIN t USING (k)",
         "SELECT * FROM e__raw ASOF JOIN t ON e__raw.k >= t.k",
         "SELECT * FROM e__raw PIVOT (sum(a) FOR k IN ('x'))",
         "SELECT * FROM e__raw UNPIVOT (v FOR k IN (a))",

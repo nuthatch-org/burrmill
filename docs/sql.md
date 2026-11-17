@@ -30,6 +30,7 @@ wherever the statement names them.
 | `UBIGINT`, `UINTEGER`, `USMALLINT`, `UTINYINT` | the unsigned types | corpus |
 | `a // b` | exact truncating division; DOUBLE beside a DuckDB DECIMAL | corpus |
 | `a / b` | DOUBLE, as DuckDB divides | corpus |
+| `ASOF [LEFT] JOIN ... ON` equalities and one inequality, or `USING (k.., t)` | each left row with the one right row nearest by the inequality (the latest for `>=`, `>`; the earliest for `<=`, `<`), NULLs under `LEFT` where none matches; between tied right rows any one | `burrmill-bench asof` |
 | `a % 0` | NULL | corpus |
 | `(a, b) > (c, d)` | the lexicographic comparison | corpus |
 | `a IS [NOT] DISTINCT FROM b` | bound as DuckDB binds it | corpus |
@@ -82,7 +83,8 @@ the corpus and answer as DuckDB does.
 | `a GLOB p` | `a LIKE p`, with `%` for `*` and `_` for `?` |
 | `PIVOT`, also after `FROM` | one aggregate per value, `sum(a) FILTER (WHERE k = 'x')` or `CASE`, under `GROUP BY` |
 | `UNPIVOT`, also after `FROM` | one `SELECT` per column, joined by `UNION ALL` |
-| `ASOF JOIN ... ON` or `USING` (`ASOF LEFT JOIN` stays a syntax error) | join on the inequality and keep the nearest row with `row_number() OVER (PARTITION BY ... ORDER BY ... DESC) = 1` |
+| `ASOF JOIN ... MATCH_CONDITION`, Snowflake's form | `ASOF JOIN ... ON` |
+| `SELECT *` over `ASOF JOIN ... USING` | the columns by name, or `ON` |
 | `median(x)` over a `DECIMAL` | `median(CAST(x AS DOUBLE))`, `quantile_cont(x, 0.5)` or `approx_median(x)` |
 | `LIKE ... ESCAPE 'c'` over a pattern that is not a literal | a literal pattern, or `ESCAPE '\'` |
 | `UHUGEINT` | none: `DECIMAL(38,0)` stops short of 2^128 |

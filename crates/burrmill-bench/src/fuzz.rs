@@ -1341,3 +1341,150 @@ fn determinism_query(r: &mut Rng) -> String {
         _ => sql,
     }
 }
+
+/// `asof`: generated `ASOF [LEFT] JOIN` statements over random trades and prices, on DuckDB and on
+/// `Engine`, rows compared as multisets (#345). A price's `ts` is unique, so which right row is
+/// nearest never rests on a tie neither engine defines. `SEED`, `CASES` (2,000) and `PRINT`.
+pub fn asof() -> anyhow::Result<()> {
+    let seed = crate::env_usize("SEED", 1) as u64;
+    let cases = crate::env_usize("CASES", 2000);
+    let print = crate::env_flag("PRINT");
+    let duck = duckdb::Connection::open_in_memory()?;
+    let engine = std::thread::spawn(|| burrmill::Engine::builder().open())
+        .join()
+        .expect("open")?;
+    let engine = Arc::new(engine);
+    let (mut same, mut both, mut differ, mut one) = (0, 0, 0, 0);
+    for i in 0..cases {
+        let case_seed = seed + i as u64;
+        let mut r = Rng(case_seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let sql = asof_case(&mut r);
+        let want = duck_rows(&duck, &sql);
+        let e2 = Arc::clone(&engine);
+        let q = sql.clone();
+        let got = std::thread::spawn(move || burrmill_rows(&e2, &q))
+            .join()
+            .expect("engine thread");
+        let tag = match (want, got) {
+            (Ok(mut w), Ok(mut g)) => {
+                w.sort();
+                g.sort();
+                if w == g {
+                    same += 1;
+                    "SAME"
+                } else {
+                    differ += 1;
+                    println!("DIFF seed={case_seed}: {sql}\n  duckdb   {w:?}\n  burrmill {g:?}");
+                    "DIFF"
+                }
+            }
+            (Err(_), Err(_)) => {
+                both += 1;
+                "BOTH-REFUSE"
+            }
+            (w, g) => {
+                one += 1;
+                println!("ONE-REFUSES seed={case_seed}: {sql}\n  duckdb   {w:?}\n  burrmill {g:?}");
+                "ONE-REFUSES"
+            }
+        };
+        if print {
+            println!("{tag} {sql}");
+        }
+    }
+    println!("{cases} cases: {same} same, {both} both refuse, {one} one refuses, {differ} differ");
+    std::thread::spawn(move || drop(engine))
+        .join()
+        .expect("drop engine");
+    anyhow::ensure!(
+        differ == 0 && one == 0,
+        "{differ} differ, {one} refused by one engine"
+    );
+    Ok(())
+}
+
+fn asof_case(r: &mut Rng) -> String {
+    let syms = ["'a'", "'b'", "'c'", "CAST(NULL AS VARCHAR)"];
+    let int = |r: &mut Rng, n: usize| {
+        if r.below(9) == 0 {
+            "CAST(NULL AS INTEGER)".to_string()
+        } else {
+            r.below(n).to_string()
+        }
+    };
+    let trades: Vec<String> = (0..1 + r.below(25))
+        .map(|i| format!("({}, {}, {i})", syms[r.below(4)], int(r, 40)))
+        .collect();
+    let mut stamps: Vec<usize> = (0..40).collect();
+    for i in (1..stamps.len()).rev() {
+        stamps.swap(i, r.below(i + 1));
+    }
+    let prices: Vec<String> = stamps[..1 + r.below(25)]
+        .iter()
+        .enumerate()
+        .map(|(i, ts)| {
+            let ts = if r.below(12) == 0 {
+                "CAST(NULL AS INTEGER)".to_string()
+            } else {
+                ts.to_string()
+            };
+            format!("({}, {ts}, {})", syms[r.below(4)], 100 + i)
+        })
+        .collect();
+    let with = format!(
+        "WITH t(sym, ts, q) AS (VALUES {}), p(sym, ts, px) AS (VALUES {}) ",
+        trades.join(", "),
+        prices.join(", ")
+    );
+    let kind = ["ASOF JOIN", "ASOF LEFT JOIN"][r.below(2)];
+    // Each side as a name, an alias or a derived table, whose spans the parser starts differently.
+    let side = |r: &mut Rng, table: &str, alias: &str| match r.below(3) {
+        0 => (table.to_string(), table.to_string()),
+        1 => (format!("{table} AS {alias}"), alias.to_string()),
+        _ => (
+            format!("(SELECT * FROM {table}) {alias}"),
+            alias.to_string(),
+        ),
+    };
+    let (lrel, l) = side(r, "t", "tt");
+    let (rrel, rr) = side(r, "p", "pp");
+    let cond = match r.below(5) {
+        0 => ["USING (sym, ts)", "USING (ts)"][r.below(2)].to_string(),
+        _ => {
+            let op = [">=", ">", "<=", "<"][r.below(4)];
+            let flip = |op: &str| {
+                match op {
+                    ">=" => "<=",
+                    ">" => "<",
+                    "<=" => ">=",
+                    _ => ">",
+                }
+                .to_string()
+            };
+            let ineq = if r.below(2) == 0 {
+                format!("{l}.ts {op} {rr}.ts")
+            } else {
+                format!("{rr}.ts {} {l}.ts", flip(op))
+            };
+            match r.below(3) {
+                0 => format!("ON {ineq}"),
+                1 => format!("ON {l}.sym = {rr}.sym AND {ineq}"),
+                _ => format!("ON {ineq} AND {rr}.sym = {l}.sym"),
+            }
+        }
+    };
+    let filter = if r.below(3) == 0 {
+        format!(" WHERE {l}.q > {}", r.below(10))
+    } else {
+        String::new()
+    };
+    let body = format!(
+        "{l}.sym, {l}.ts, {l}.q, {rr}.ts AS pts, {rr}.px FROM {lrel} {kind} {rrel} {cond}{filter}"
+    );
+    match r.below(4) {
+        0 => format!(
+            "{with}SELECT count(*) AS n, sum(px) AS s, count(pts) AS m FROM (SELECT {body}) x"
+        ),
+        _ => format!("{with}SELECT {body}"),
+    }
+}

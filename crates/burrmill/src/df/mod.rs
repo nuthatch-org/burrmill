@@ -15,6 +15,7 @@ use sqlparser::ast::Statement as SqlStatement;
 use crate::error::{BurrmillError, Result};
 
 mod addresses;
+mod asof;
 mod bound;
 mod cancel;
 mod catalog;
@@ -43,7 +44,7 @@ pub(crate) fn engine_parses(sql: &str) -> bool {
     dialect::parse_statements(sql).is_ok()
 }
 
-pub(crate) use dialect::refuse_asof;
+pub(crate) use dialect::parse_asof;
 
 pub(crate) fn duck_dialect() -> dialect::Duck {
     dialect::Duck
