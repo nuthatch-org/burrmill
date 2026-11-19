@@ -145,6 +145,7 @@ async fn run() -> anyhow::Result<()> {
         Some("encode-parity") => encode_parity::run(),
         Some("error-parity") => error_parity::run(),
         Some("dialect-parity") => dialect_parity::run(),
+        Some("dialect-latency") => dialect_parity::latency(),
         Some("reach-parity") => reach_parity::run(),
         Some("scan-parity") => scan_parity::run(
             &std::env::args()

@@ -1142,6 +1142,23 @@ fn passes_rows(p: &Arc<dyn ExecutionPlan>) -> bool {
         )
 }
 
+/// Whether `plan` shares a subquery: its nodes hold what one run computed, so it runs once.
+pub(super) fn shares(plan: &LogicalPlan) -> bool {
+    let mut found = false;
+    let _ = plan.apply_with_subqueries(|p| {
+        found = matches!(p, LogicalPlan::Extension(e)
+            if e.node.as_any().is::<SharedDefs>()
+                || e.node.as_any().is::<SharedRef>()
+                || e.node.as_any().is::<SharedNode>());
+        Ok(if found {
+            TreeNodeRecursion::Stop
+        } else {
+            TreeNodeRecursion::Continue
+        })
+    });
+    found
+}
+
 /// The plan a shared reference reads, as planned so far.
 pub(super) fn definition(p: &Arc<dyn ExecutionPlan>) -> Option<Arc<dyn ExecutionPlan>> {
     p.downcast_ref::<SharedExec>()?

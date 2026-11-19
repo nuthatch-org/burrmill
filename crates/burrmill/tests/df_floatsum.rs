@@ -126,6 +126,8 @@ fn engine(threads: Option<usize>, files: Vec<(PathBuf, u64)>) -> Engine {
         None => Engine::open_empty(),
     }
     .unwrap();
+    // Every partition count is the point; small, each would be one.
+    e.set_small_statement_bytes(0);
     e.register_facts("t", &[], files, &[], (None, None))
         .unwrap();
     e

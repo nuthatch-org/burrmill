@@ -199,6 +199,8 @@ fn a_topk_reads_by_the_race_and_selects_the_same() {
     let tmp = tempfile::tempdir().unwrap();
     nest(tmp.path());
     let e = engine(tmp.path());
+    // The race is between partitions; small, the statement would have one.
+    e.set_small_statement_bytes(0);
     let runs: Vec<QueryMetrics> = (0..30).map(|_| metered(&e, TOPK)).collect();
     let read: std::collections::BTreeSet<u64> = runs.iter().map(|m| m.sealed_bytes_read).collect();
     let selected: std::collections::BTreeSet<u64> =

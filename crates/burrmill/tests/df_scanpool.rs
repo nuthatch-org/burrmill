@@ -192,6 +192,7 @@ fn a_scan_holds_its_segments_bookkeeping_inside_the_pool() {
             spill: None,
         })
         .unwrap();
+        e.set_small_statement_bytes(0);
         e.register_facts("t", &declared, segments(), &[], (None, None))
             .unwrap();
         e

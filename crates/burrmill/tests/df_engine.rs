@@ -484,9 +484,7 @@ fn in_list(n: usize) -> String {
 }
 
 fn value(sql: &str) -> String {
-    let engine = Engine::open_empty().unwrap();
-    let batches = engine.sql(sql).unwrap();
-    serde_json::to_string(&burrmill::df::encode::rows(&batches[0]).unwrap()).unwrap()
+    value_of(Engine::open_empty().unwrap(), sql)
 }
 
 fn refusal(sql: &str) -> String {
@@ -612,8 +610,14 @@ fn planning_does_not_use_the_caller_stack() {
 }
 
 fn value_of(engine: Engine, sql: &str) -> String {
-    let batches = engine.sql(sql).unwrap();
-    serde_json::to_string(&burrmill::df::encode::rows(&batches[0]).unwrap()).unwrap()
+    // A streaming aggregate over sorted input answers a batch a group.
+    let rows: Vec<_> = engine
+        .sql(sql)
+        .unwrap()
+        .iter()
+        .flat_map(|b| burrmill::df::encode::rows(b).unwrap())
+        .collect();
+    serde_json::to_string(&rows).unwrap()
 }
 
 fn nest_with_dec(values: &[&str]) -> (tempfile::TempDir, Engine) {

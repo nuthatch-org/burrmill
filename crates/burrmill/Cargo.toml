@@ -426,6 +426,11 @@ path = "tests/receipt_corpus.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_small"
+path = "tests/df_small.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "sandbox_corpus"
 path = "tests/sandbox_corpus.rs"
 required-features = ["datafusion"]

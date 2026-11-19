@@ -49,6 +49,8 @@ fn engine(dir: &std::path::Path, budget: bool) -> Engine {
         false => Engine::open_empty(),
     }
     .unwrap();
+    // Unbudgeted, the partitions racing the filter are the point; small, it would be one.
+    e.set_small_statement_bytes(0);
     let declared = vec![
         ("block_number".into(), "u64".into()),
         ("who".into(), "address".into()),

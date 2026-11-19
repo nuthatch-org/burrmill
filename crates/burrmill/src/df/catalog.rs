@@ -1016,7 +1016,10 @@ impl TableProvider for SegmentTable {
         }
 
         let files = &self.listed.located;
-        let n = self.groups.min(files.len().max(1));
+        let n = self
+            .groups
+            .min(state.config().target_partitions().max(1))
+            .min(files.len().max(1));
         let mut groups: Vec<Vec<PartitionedFile>> = vec![Vec::new(); n];
         for (i, f) in files.iter().enumerate() {
             groups[i % n].push(f.clone());

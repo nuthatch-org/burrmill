@@ -49,6 +49,8 @@ fn engine(dir: &std::path::Path, budget: bool) -> Engine {
         false => Engine::open_empty(),
     }
     .unwrap();
+    // The partitioned join is the point; small, it would be planned in one partition.
+    e.set_small_statement_bytes(0);
     // An unsealed row as nuthatch holds one, so the scan is one arm of a union with the tip.
     let tip = serde_json::json!({ "start_epoch": ((FIRST + 40) * 86400).to_string(), "v": 7 });
     e.register_facts("rows", &[], files, &[tip], (None, None))

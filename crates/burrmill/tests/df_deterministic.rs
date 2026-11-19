@@ -61,7 +61,8 @@ fn engines(root: &Path, deterministic: bool) -> Vec<(String, Engine)> {
         if !dir.exists() {
             layout(&dir, *segments, *group);
         }
-        for threads in [1, 2, 8, 32] {
+        // Every partition count, and once more as a small statement is planned, in one.
+        for (threads, small) in [(1, 0), (2, 0), (8, 0), (32, 0), (8, 4 << 20)] {
             let e = Engine::builder()
                 .segments(&dir)
                 .budget(Budget {
@@ -69,10 +70,14 @@ fn engines(root: &Path, deterministic: bool) -> Vec<(String, Engine)> {
                     threads,
                     spill: None,
                 })
+                .small_statement_bytes(small)
                 .open()
                 .unwrap();
             e.set_deterministic(deterministic);
-            out.push((format!("{segments} segments at {threads} threads"), e));
+            out.push((
+                format!("{segments} segments at {threads} threads, small below {small}"),
+                e,
+            ));
         }
     }
     out
