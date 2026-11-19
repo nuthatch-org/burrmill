@@ -827,6 +827,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrmill-cli"
+version = "0.0.1"
+dependencies = [
+ "arrow 59.3.2",
+ "burrmill",
+ "parquet",
+ "tempfile",
+]
+
+[[package]]
 name = "burrmill-ingest"
 version = "0.0.1"
 dependencies = [
