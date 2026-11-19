@@ -1,8 +1,9 @@
 # Changelog
 
 Nuthatch pins a git revision of burrmill. Each revision it adopts is tagged `vX.Y.Z` and gets an
-entry here, newest first, naming what changed since the last tag. Nothing is published to
-crates.io.
+entry here, newest first, naming what changed since the last tag. A tag is also what goes to
+crates.io, with `burrmill-parquet-source` first when it has changed. The README says what a
+version number promises.
 
 A release that changes any receipt in `corpus/receipts/receipts.jsonl` says which, and why, in its
 entry: a receipt someone kept stops verifying on that release (`tests/receipt_corpus.rs`).

@@ -388,12 +388,12 @@ dependencies = [
  "arrow",
  "arrow-schema",
  "async-trait",
+ "burrmill-parquet-source",
  "bytes",
  "chrono",
  "datafusion-catalog",
  "datafusion-common",
  "datafusion-datasource",
- "datafusion-datasource-parquet",
  "datafusion-execution",
  "datafusion-expr",
  "datafusion-functions",
@@ -447,6 +447,36 @@ dependencies = [
  "burrmill",
  "burrmill-ingest",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "burrmill-parquet-source"
+version = "55.2.0"
+dependencies = [
+ "arrow",
+ "arrow-schema",
+ "async-trait",
+ "bytes",
+ "datafusion-common",
+ "datafusion-common-runtime",
+ "datafusion-datasource",
+ "datafusion-execution",
+ "datafusion-expr",
+ "datafusion-functions",
+ "datafusion-functions-aggregate-common",
+ "datafusion-physical-expr",
+ "datafusion-physical-expr-adapter",
+ "datafusion-physical-expr-common",
+ "datafusion-physical-plan",
+ "datafusion-pruning",
+ "datafusion-session",
+ "futures",
+ "itertools 0.15.0",
+ "log",
+ "object_store",
+ "parking_lot",
+ "parquet",
+ "tokio",
 ]
 
 [[package]]
@@ -713,38 +743,6 @@ dependencies = [
  "rand",
  "tokio",
  "url",
-]
-
-[[package]]
-name = "datafusion-datasource-parquet"
-version = "55.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c521ae91b6d899d7190812881f45fe9463c222c11d90149f5332a2e56555904"
-dependencies = [
- "arrow",
- "arrow-schema",
- "async-trait",
- "bytes",
- "datafusion-common",
- "datafusion-common-runtime",
- "datafusion-datasource",
- "datafusion-execution",
- "datafusion-expr",
- "datafusion-functions",
- "datafusion-functions-aggregate-common",
- "datafusion-physical-expr",
- "datafusion-physical-expr-adapter",
- "datafusion-physical-expr-common",
- "datafusion-physical-plan",
- "datafusion-pruning",
- "datafusion-session",
- "futures",
- "itertools 0.15.0",
- "log",
- "object_store",
- "parking_lot",
- "parquet",
- "tokio",
 ]
 
 [[package]]

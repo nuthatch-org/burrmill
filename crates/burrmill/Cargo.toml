@@ -10,8 +10,6 @@ edition = "2024"
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-# Nuthatch pins a git revision; crates.io is off by decision (#169).
-publish = false
 
 # **The default graph stays short.** Arrow and Parquet are rented permanently (RFC-0044 §4.2).
 # DataFusion is the optional host planner (roadmap 6.0, route C): component crates plus an owned
@@ -19,6 +17,9 @@ publish = false
 # Features are named here, not left to unification: the bench's stock arm pulls the umbrella crate,
 # which had been lending this one `unicode_expressions` (SUBSTRING) that a consumer would not get.
 # `recursive_protection` grows the stack for deep expressions rather than aborting the process.
+[package.metadata.docs.rs]
+features = ["datafusion"]
+
 [features]
 default = []
 datafusion = [
@@ -85,7 +86,9 @@ arrow-schema = { version = "59", default-features = false, optional = true }
 datafusion-catalog = { version = "=55.2.0", default-features = false, optional = true }
 datafusion-common = { version = "=55.2.0", default-features = false, features = ["recursive_protection"], optional = true }
 datafusion-datasource = { version = "=55.2.0", default-features = false, optional = true }
-datafusion-datasource-parquet = { version = "=55.2.0", default-features = false, optional = true }
+# DataFusion's, with one change (vendor/README.md). A dependency rather than a [patch], so that
+# nuthatch and crates.io consumers get the change too.
+datafusion-datasource-parquet = { package = "burrmill-parquet-source", path = "../../vendor/burrmill-parquet-source", version = "=55.2.0", default-features = false, optional = true }
 datafusion-execution = { version = "=55.2.0", default-features = false, optional = true }
 datafusion-expr = { version = "=55.2.0", default-features = false, features = ["recursive_protection"], optional = true }
 datafusion-functions = { version = "=55.2.0", default-features = false, features = ["datetime_expressions", "encoding_expressions", "math_expressions", "regex_expressions", "string_expressions", "unicode_expressions"], optional = true }
@@ -341,6 +344,10 @@ required-features = ["datafusion"]
 
 [[example]]
 name = "hosted_fold"
+required-features = ["datafusion"]
+
+[[example]]
+name = "parquet_dir"
 required-features = ["datafusion"]
 
 [[test]]

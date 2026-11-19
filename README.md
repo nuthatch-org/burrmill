@@ -49,6 +49,24 @@ answers, and `--receipt` for an answer anyone holding the same files can re-chec
 Each `.parquet` file in a directory is a table named after it, each subdirectory one table of
 everything beneath, `NAME=PATH` names one outright; `--format csv|json|parquet|arrow`.
 
+**As a library:** `cargo add burrmill --features datafusion`, then
+
+```rust
+let engine = burrmill::Engine::builder().parquet(Path::new("data/"), "t").open()?;
+engine.set_strict_decimals(true);
+let batches = engine.sql("SELECT sum(amount) FROM t")?;
+```
+
+`crates/burrmill/examples/parquet_dir.rs` is that as a program. Without `datafusion` the crate is the
+owned fold path alone, which is not a SQL engine on its own.
+
+Versions are 0.x, so a minor bump (0.1 to 0.2) may break the API and a patch bump does not. DataFusion
+is pinned exactly and its types are in the API (`register_scalar_udf`), so moving the pin is a minor
+bump. So is any change that makes a kept receipt stop verifying, and CHANGELOG names it. The minimum
+Rust is `rust-version` in `Cargo.toml`, 1.95 today; raising it is a minor bump too. The Parquet source
+is DataFusion's with one change, published as `burrmill-parquet-source` (`vendor/README.md`); nothing
+needs a `[patch]` to get it.
+
 ## What it is
 
 Five crates. `burrmill` is the engine and is what nuthatch embeds; `burrmill-ingest` turns an
