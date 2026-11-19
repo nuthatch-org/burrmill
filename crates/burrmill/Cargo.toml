@@ -1,6 +1,6 @@
 [package]
 name = "burrmill"
-version = "0.0.1"
+version = "0.1.0"
 description = "SQL over sealed Parquet segments with exact integer arithmetic and refuse-on-overflow."
 keywords = ["sql", "parquet", "arrow", "query-engine", "blockchain"]
 categories = ["database"]

@@ -62,7 +62,8 @@ owned fold path alone, which is not a SQL engine on its own.
 
 Versions are 0.x, so a minor bump (0.1 to 0.2) may break the API and a patch bump does not. DataFusion
 is pinned exactly and its types are in the API (`register_scalar_udf`), so moving the pin is a minor
-bump. So is any change that makes a kept receipt stop verifying, and CHANGELOG names it. The minimum
+bump. A receipt names the version that made it, so it verifies on that release only; CHANGELOG
+says when a release also moves an answer in `corpus/receipts`. The minimum
 Rust is `rust-version` in `Cargo.toml`, 1.95 today; raising it is a minor bump too. The Parquet source
 is DataFusion's with one change, published as `burrmill-parquet-source` (`vendor/README.md`); nothing
 needs a `[patch]` to get it.
