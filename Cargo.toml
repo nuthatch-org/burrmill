@@ -16,6 +16,7 @@ resolver = "2"
 members = [
     "crates/burrmill",
     "crates/burrmill-bench",
+    "crates/burrmill-cli",
     "crates/burrmill-ingest",
     "crates/burrmill-size",
     "crates/burrmill-wasm",
@@ -52,6 +53,13 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
+strip = "symbols"
+
+# The CLI binary whose size docs/bench/cli-size.md publishes.
+[profile.cli]
+inherits = "release"
+lto = true
+codegen-units = 1
 strip = "symbols"
 
 [patch.crates-io]

@@ -77,6 +77,8 @@ jobs:
       # Includes generated_planner, which rustfmts its output to compare it with the committed file.
       - name: test (default and datafusion)
         run: yatr test
+      - name: the burrmill binary
+        run: yatr cli
 
   # Lint only: the bench has no tests, and its own job keeps the bundled DuckDB build off the
   # library's critical path.

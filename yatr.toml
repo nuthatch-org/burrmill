@@ -33,6 +33,14 @@ run = [
 ]
 sources = ["crates/burrmill/**", "vendor/**", "corpus/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 
+[tasks.cli]
+desc = "Clippy and tests on burrmill-cli, the burrmill binary"
+run = [
+    "cargo clippy --locked -p burrmill-cli --all-targets -- -D warnings",
+    "cargo test --locked -p burrmill-cli",
+]
+sources = ["crates/burrmill/**", "crates/burrmill-cli/**", "vendor/**", "corpus/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+
 # The datafusion run includes generated_planner, which rustfmts its output to compare it.
 [tasks.test]
 desc = "burrmill's tests, default graph and with datafusion"
@@ -168,5 +176,5 @@ tool_inputs = ["yatr --version"]
 
 [tasks.ci]
 desc = "Every CI job but demo"
-depends = ["fmt-check", "fuzz-lock", "agents-check", "lint", "test", "bench-lint", "deny", "ingest", "ingest-size", "tab", "tab-build", "engine-size"]
+depends = ["fmt-check", "fuzz-lock", "agents-check", "lint", "test", "cli", "bench-lint", "deny", "ingest", "ingest-size", "tab", "tab-build", "engine-size"]
 run = []

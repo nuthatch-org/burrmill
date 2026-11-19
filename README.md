@@ -36,7 +36,18 @@ lists. The page is `demo/` in this repo.
 
 **Over chain data:** Burrmill is what answers `nuthatch sql`, so the
 [nuthatch quickstart](https://github.com/nuthatch-org/nuthatch#readme) is the way to run it over sealed
-segments. There is no standalone command-line tool; as a library it is `burrmill::Engine`.
+segments. As a library it is `burrmill::Engine`.
+
+**Over Parquet files:** `cargo install --path crates/burrmill-cli` gives `burrmill`, which is worth
+having for three things datafusion-cli and DuckDB do not do: `--strict` decimals, `--deterministic`
+answers, and `--receipt` for an answer anyone holding the same files can re-check with
+`burrmill verify`. For anything else either of them is the better tool.
+
+    burrmill q "SELECT who, SUM(amount) FROM trades GROUP BY who" data/ --receipt r.json
+    burrmill verify r.json data/
+
+Each `.parquet` file in a directory is a table named after it, each subdirectory one table of
+everything beneath, `NAME=PATH` names one outright; `--format csv|json|parquet|arrow`.
 
 ## What it is
 
@@ -253,6 +264,8 @@ Said plainly, because a README that implies otherwise is the thing this project 
                              a model is sent and answers, in schema, aggregates and pseudonymised
                              modes. The page does the HTTP.
     crates/burrmill-size     the wasm size probes' binaries (docs/bench/*-wasm.txt).
+    crates/burrmill-cli      the burrmill binary: strict, deterministic, receipted queries over
+                             Parquet files (docs/bench/cli-size.md).
     crates/burrmill-bench    publish = false. Both oracles (DuckDB, the umbrella DataFusion) live
                              here, so neither can reach the shipped graph. Note it lends the crate
                              DataFusion features by unification; test a consumer on burrmill alone.
@@ -263,7 +276,7 @@ Said plainly, because a README that implies otherwise is the thing this project 
     docs/rfc                 RFC-0044 to RFC-0047
     demo/                    the browser page over burrmill-wasm, offline once loaded
     fuzz/                    cargo-fuzz targets for burrmill-ingest, in their own workspace
-    corpus/                  ingest's CSV corpus
+    corpus/                  ingest's CSV corpus, and the receipts a release must not move
 
 ## Running Gate 1
 
