@@ -35,6 +35,7 @@ mod nullsub;
 mod onerow;
 mod params;
 pub use params::Param;
+mod ordering;
 mod outerorder;
 pub use depth::check_expr_bounds;
 mod builder;

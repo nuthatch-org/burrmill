@@ -400,6 +400,7 @@ impl MiniSession {
         // registering primary names alone refused it.
         let mut scalar = HashMap::new();
         for f in datafusion_functions::all_default_functions() {
+            let f = super::ordering::ordering_safe(f);
             for a in f.aliases() {
                 scalar.insert(a.clone(), Arc::clone(&f));
             }

@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, Int64Array, StringArray};
+use arrow::array::{Float64Array, Int64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use burrmill::{Budget, Engine};
@@ -181,4 +181,72 @@ fn an_answer_is_cut_into_batches_of_a_fixed_size() {
     let empty = e.sql("SELECT * FROM t WHERE id < 0").unwrap();
     assert_eq!(empty.len(), 1);
     assert_eq!(empty[0].num_rows(), 0);
+}
+
+/// The determinism oracle's seed 6120: the top rows of the left join's preserved side, which
+/// `NarrowJoins` computes once, are sorted per partition by `abs(abs(..))` and merged, and the
+/// sanity check found the merge's order unmet and refused the statement at two threads and up.
+#[test]
+fn a_page_ordered_by_a_nested_abs_answers_the_same_at_every_thread_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("ev");
+    std::fs::create_dir_all(&dir).unwrap();
+    let docs = [
+        Some(r#"{"a": 1}"#),
+        Some(r#"{"a": "7"}"#),
+        Some("not json"),
+        None,
+    ];
+    let addrs = [Some("0xa"), Some("0xb"), Some("0xc"), None];
+    let n = 120u64;
+    let ev = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("block_number", DataType::UInt64, false),
+            Field::new("from", DataType::Utf8, true),
+            Field::new("doc", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(UInt64Array::from_iter_values((0..n).map(|i| 1 + i / 3))),
+            Arc::new(StringArray::from_iter(
+                (0..n).map(|i| addrs[(i * 7 % 4) as usize]),
+            )),
+            Arc::new(StringArray::from_iter(
+                (0..n).map(|i| docs[(i * 5 % 4) as usize]),
+            )),
+        ],
+    )
+    .unwrap();
+    let lbl = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("addr", DataType::Utf8, true)])),
+        vec![Arc::new(StringArray::from(vec!["0xa", "0xa", "0xb"]))],
+    )
+    .unwrap();
+    for (name, b) in [("ev", ev), ("lbl", lbl)] {
+        let f = std::fs::File::create(dir.join(format!("{name}-{:064x}.parquet", 1))).unwrap();
+        let mut w = parquet::arrow::ArrowWriter::try_new(f, b.schema(), None).unwrap();
+        w.write(&b).unwrap();
+        w.close().unwrap();
+    }
+    let sql = "SELECT abs(abs(e.block_number)) * -0.5 AS c0, \
+               upper(rpad(TRY(e.doc ->> 'a'), 1, '*')) AS c1 \
+               FROM ev e LEFT JOIN lbl l ON l.addr = e.\"from\" \
+               ORDER BY 1 DESC NULLS FIRST, 2 DESC NULLS LAST LIMIT 20 OFFSET 1";
+    let answers: Vec<Vec<u8>> = [1, 2, 8]
+        .into_iter()
+        .map(|threads| {
+            let e = Engine::builder()
+                .segments(&dir)
+                .budget(Budget {
+                    memory_bytes: 512 << 20,
+                    threads,
+                    spill: None,
+                })
+                .open()
+                .unwrap();
+            e.set_deterministic(true);
+            e.sql_ipc(sql)
+                .unwrap_or_else(|err| panic!("{threads} threads: {err}"))
+        })
+        .collect();
+    assert!(answers.iter().all(|a| *a == answers[0]));
 }
