@@ -1,11 +1,16 @@
 # Vendored crates
 
-## datafusion-datasource-parquet 55.2.0
+## burrmill-parquet-source 55.2.0
 
-The crates.io release, unchanged except for the per-file metrics in `src/opener/mod.rs` and one
-field in `src/source.rs`. Carried under `[patch.crates-io]` in the workspace `Cargo.toml`; a
-DataFusion bump must re-apply the change to the new release, or drop this copy if upstream has
-an equivalent.
+DataFusion's `datafusion-datasource-parquet` 55.2.0 from crates.io, unchanged except for the
+per-file metrics in `src/opener/mod.rs` and one field in `src/source.rs`. Published under its own
+name, and `burrmill` takes it as `datafusion-datasource-parquet` by renaming the dependency, so
+nuthatch and crates.io consumers get the change without a `[patch]` of their own. Nothing else in
+DataFusion depends on the crate, so no second copy of its types enters burrmill's graph; the bench's
+stock arm, which pulls the umbrella `datafusion`, gets the upstream crate, as a control should.
+Package name, description, repository and lib name changed, upstream's benches dropped. A
+DataFusion bump must re-apply the change to the new release and publish it before `burrmill`, or
+drop this copy if upstream has an equivalent.
 
 Upstream, `ParquetMorselizer::prepare_open_file` registers a fresh `ParquetFileMetrics`, a
 `BaselineMetrics` and a `num_predicate_creation_errors` counter into the scan's one

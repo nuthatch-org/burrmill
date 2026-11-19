@@ -205,5 +205,3 @@ What the browser crates and the page do today is in `docs/browser.md`.
 - **DataFusion as a cold-path fallback.** §7 puts it at slice 3. Deliberately deferred: building the
   fallback before the fast path is finished is how the fast path stops being finished.
 - **JIT, on-disk format changes, a custom Parquet decoder.** Non-goals in §9 and they stay non-goals.
-- **crates.io.** The name is reserved by being unclaimed. Publishing a query engine that owns one
-  plan shape and overruns its memory budget would be a promise we cannot keep.

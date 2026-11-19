@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 rust-version = "1.94.0"
-name = "datafusion-datasource-parquet"
+name = "burrmill-parquet-source"
 version = "55.2.0"
 authors = ["Apache DataFusion <dev@datafusion.apache.org>"]
 build = false
@@ -21,11 +21,11 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "datafusion-datasource-parquet"
-homepage = "https://datafusion.apache.org"
+description = "DataFusion 55.2.0's Parquet data source with per-partition scan metrics, for burrmill. Not an Apache DataFusion release."
 readme = "README.md"
+exclude = ["Cargo.toml.orig", "benches"]
 license = "Apache-2.0"
-repository = "https://github.com/apache/datafusion"
+repository = "https://github.com/nuthatch-org/burrmill"
 resolver = "2"
 
 [package.metadata.docs.rs]
@@ -44,23 +44,8 @@ proto = [
 ]
 
 [lib]
-name = "datafusion_datasource_parquet"
+name = "burrmill_parquet_source"
 path = "src/mod.rs"
-
-[[bench]]
-name = "parquet_metadata_statistics"
-path = "benches/parquet_metadata_statistics.rs"
-harness = false
-
-[[bench]]
-name = "parquet_nested_filter_pushdown"
-path = "benches/parquet_nested_filter_pushdown.rs"
-harness = false
-
-[[bench]]
-name = "parquet_struct_filter_pushdown"
-path = "benches/parquet_struct_filter_pushdown.rs"
-harness = false
 
 [dependencies.arrow]
 version = "59.2.0"
@@ -169,9 +154,6 @@ features = [
 [dev-dependencies.chrono]
 version = "0.4.45"
 default-features = false
-
-[dev-dependencies.criterion]
-version = "0.8"
 
 [dev-dependencies.datafusion-functions]
 version = "55.2.0"
