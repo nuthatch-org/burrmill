@@ -69,6 +69,19 @@ impl WasmSession {
         }
     }
 
+    /// `sql`'s receipt as JSON: the statement, the engine, the rows' hash and the answer's.
+    pub async fn receipt(&self, sql: &str) -> Result<String, JsError> {
+        self.inner.receipt(sql).await.map_err(|e| JsError::new(&e))
+    }
+
+    /// Whether the rows this tab holds reproduce `receipt`, made here or by a native engine.
+    pub async fn verify_receipt(&self, receipt: &str) -> Result<(), JsError> {
+        self.inner
+            .verify_receipt(receipt)
+            .await
+            .map_err(|e| JsError::new(&e))
+    }
+
     pub async fn aggregate_feedback(&self, sql: &str) -> Result<String, JsError> {
         self.inner
             .aggregate_feedback(sql)

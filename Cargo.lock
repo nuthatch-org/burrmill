@@ -792,6 +792,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "serde_json",
+ "sha2",
  "sqllogictest",
  "sqlparser",
  "tempfile",

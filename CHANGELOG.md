@@ -4,6 +4,9 @@ Nuthatch pins a git revision of burrmill. Each revision it adopts is tagged `vX.
 entry here, newest first, naming what changed since the last tag. Nothing is published to
 crates.io.
 
+A release that changes any receipt in `corpus/receipts/receipts.jsonl` says which, and why, in its
+entry: a receipt someone kept stops verifying on that release (`tests/receipt_corpus.rs`).
+
 ## 0.0.1 - 2026-11-11
 
 The first tag, on main as it stands. What the pull requests since #95 changed, #277 the last:
