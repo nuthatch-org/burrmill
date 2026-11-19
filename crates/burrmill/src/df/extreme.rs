@@ -30,7 +30,7 @@ impl AnalyzerRule for PartitionExtreme {
     }
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
-        plan.transform_up_with_subqueries(|p| match &p {
+        super::dag::transform_up(plan, |p, _| match &p {
             LogicalPlan::Filter(f) => Ok(match rewrite(f)? {
                 Some(n) => Transformed::yes(n),
                 None => Transformed::no(p),

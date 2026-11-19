@@ -77,7 +77,7 @@ impl AnalyzerRule for FoldSubstitution {
     }
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
-        plan.transform_down_with_subqueries(|p| {
+        super::dag::transform_down(plan, |p| {
             let replaced = match &p {
                 LogicalPlan::Filter(f) => match f.input.as_ref() {
                     LogicalPlan::Aggregate(a) if null_rejecting(&f.predicate, a) => {

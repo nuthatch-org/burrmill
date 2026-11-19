@@ -42,7 +42,6 @@ use datafusion_expr::{
 };
 use datafusion_functions::core::planner::CoreFunctionPlanner;
 use datafusion_optimizer::analyzer::resolve_grouping_function::ResolveGroupingFunction;
-use datafusion_optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion_optimizer::analyzer::{Analyzer, AnalyzerRule};
 use datafusion_optimizer::optimizer::{Optimizer, OptimizerConfig};
 use datafusion_physical_expr::create_physical_expr;
@@ -559,7 +558,7 @@ impl MiniSession {
                     // First, so no later rule meets a sort that cannot order the answer.
                     Arc::new(super::outerorder::OutermostOrder)
                         as Arc<dyn AnalyzerRule + Send + Sync>,
-                    Arc::new(ResolveGroupingFunction::new()),
+                    Arc::new(super::coercion::Grouping(ResolveGroupingFunction::new())),
                     // Before every rule that reads a join: a marked one is not one yet.
                     Arc::new(super::asof::AsofJoins),
                     // Before every rule that compares text, an address is fixed binary or text.
@@ -570,7 +569,7 @@ impl MiniSession {
                     // Before coercion: DuckDB's text comparisons depend on what was written.
                     Arc::new(super::dialect::DuckComparisons),
                     Arc::new(super::rule::CheckedShifts::default()),
-                    Arc::new(TypeCoercion::new()),
+                    Arc::new(super::coercion::Coercion),
                     // Before DuckDB's `/` and rounding casts, which it refuses or replaces.
                     Arc::new(super::strict::StrictDecimals {
                         flag: Arc::clone(&strict),
@@ -595,7 +594,7 @@ impl MiniSession {
                 .chain(
                     [
                         // Checked sums change their output type, so coercion runs again.
-                        Arc::new(TypeCoercion::new()) as Arc<dyn AnalyzerRule + Send + Sync>,
+                        Arc::new(super::coercion::Coercion) as Arc<dyn AnalyzerRule + Send + Sync>,
                         Arc::new(super::doubles::DuckDoubles::default()),
                         Arc::new(super::onerow::SingleRowSubqueries::default()),
                         Arc::new(super::correlate::KeyedCorrelation),

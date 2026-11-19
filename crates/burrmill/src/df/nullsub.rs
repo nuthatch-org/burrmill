@@ -36,7 +36,7 @@ impl AnalyzerRule for NullableSubqueries {
     }
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
-        plan.transform_up_with_subqueries(|p| {
+        super::dag::transform_up(plan, |p, _| {
             let before = Arc::clone(p.schema());
             let projection = matches!(p, LogicalPlan::Projection(_));
             let t = p.map_expressions(|e| {

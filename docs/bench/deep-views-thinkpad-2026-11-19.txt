@@ -1,0 +1,39 @@
+#347, planning over the network nest's views. ThinkPad, 32 cores, 2026-11-19. "before" is
+burrmill 515d79a, "after" the shared walks (dag.rs) on top of it. Other jobs shared the box;
+1-minute load is given where it was read.
+
+== crates/burrmill/tests/df_deepviews.rs, the dearest contract statement replayed
+   (SELECT "delegatedCapacity", "tokenCapacity", "availableStake" FROM indexer, block 12)
+   least of 7 answers in one process, four rounds alternating before/after, load 8 to 12
+release   before  596  599  596  595 ms
+release   after   408  415  417  409 ms
+   least of 3, two rounds alternating, load 3 to 4
+debug     before 3122 3101 ms
+debug     after  2241 2211 ms
+
+== nodes in that statement (as parsed, then through the rules before share_repeats)
+tree as parsed                 6458
+distinct as parsed             1080
+distinct after addresses       6440 before, 1532 after
+distinct after fast_text_casts 6440 before, 1555 after
+after share_repeats            2523 before, 2552 after
+largest plan in the contract   4768 logical, 3709 physical, before and after
+
+== nuthatch tests/network_contract.rs (--features graph, release, one thread, 240 statements),
+   with the plan-times probe (docs/research/replacing-duckdb/probes/plan-times); not back to back,
+   load about 30 before and lower after, so read the analyzer line, which is the change
+               before        after
+total       159818.9 ms   92843.1 ms
+parse        12679.5      15467.5
+analyzer     66460.2      19052.5
+optimizer    59526.6      43075.5
+physical     21152.6      15247.6
+dearest      2587.0 ms (indexer)   1060.4 ms (graph_network)
+top rules after: EnsureRequirements 6420, optimize_projections 5740, type_coercion 5103,
+  simplify_expressions 4039, common_sub_expression_eliminate 4000, share_repeats 3518,
+  prune_shared 3176, addresses 2544 (before: type_coercion 16504, addresses 12966)
+
+== the same contract, no probe, back to back, "finished in" of the test harness
+   (planning, execution and the nests' setup together), load 2 to 3, all 21 tests passing each run
+round 1   before 127.63 s   after  95.94 s
+round 2   before 125.32 s   after 101.96 s

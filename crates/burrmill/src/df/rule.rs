@@ -178,7 +178,7 @@ impl AnalyzerRule for CheckedShifts {
     }
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
-        plan.transform_up_with_subqueries(|p| {
+        super::dag::transform_up(plan, |p, _| {
             let before = Arc::clone(p.schema());
             let projection = matches!(p, LogicalPlan::Projection(_));
             let shift = |x: &Expr| {
@@ -269,7 +269,7 @@ impl AnalyzerRule for CheckedArithmetic {
     }
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
-        plan.transform_up_with_subqueries(|p| {
+        super::dag::transform_up(plan, |p, _| {
             let t = self.rewrite_expressions(p)?;
             if let LogicalPlan::Aggregate(a) = &t.data {
                 let a = self.aggregate(a)?;

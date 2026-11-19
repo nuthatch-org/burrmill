@@ -73,7 +73,7 @@ impl AnalyzerRule for DistinctRows {
     }
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
-        plan.transform_up_with_subqueries(|p| {
+        super::dag::transform_up(plan, |p, _| {
             let LogicalPlan::Aggregate(a) = &p else {
                 return Ok(Transformed::no(p));
             };

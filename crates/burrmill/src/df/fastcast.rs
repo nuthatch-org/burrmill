@@ -30,7 +30,7 @@ impl AnalyzerRule for FastTextCasts {
     }
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
-        plan.transform_up_with_subqueries(|p| {
+        super::dag::transform_up(plan, |p, _| {
             let mut schema = DFSchema::empty();
             for i in p.inputs() {
                 schema.merge(i.schema());
