@@ -6,10 +6,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use arrow::array::{Array, ArrayRef, AsArray, Decimal128Builder, PrimitiveBuilder};
+use arrow::array::{
+    Array, ArrayRef, AsArray, Decimal128Builder, Decimal256Builder, PrimitiveBuilder,
+};
 use arrow::datatypes::{
-    ArrowPrimitiveType, DataType, Decimal128Type, Field, FieldRef, Int8Type, Int16Type, Int32Type,
-    Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type, i256,
+    ArrowPrimitiveType, DataType, Decimal128Type, Decimal256Type, Field, FieldRef, Int8Type,
+    Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type, i256,
 };
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode};
@@ -25,6 +27,7 @@ use datafusion_optimizer::AnalyzerRule;
 pub type Flag = Arc<AtomicBool>;
 
 const MAX_DIGITS: u32 = 38;
+const MAX_WIDE_DIGITS: u32 = 76;
 
 fn is_decimal(t: &DataType) -> bool {
     matches!(t, DataType::Decimal128(..) | DataType::Decimal256(..))
@@ -173,12 +176,16 @@ impl StrictDecimals {
                     from,
                     DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8
                 );
-                let narrows = match (&from, to) {
-                    (DataType::Decimal128(_, s), DataType::Decimal128(_, s2)) => s2 < s,
-                    (DataType::Decimal128(_, s), t) => *s > 0 && t.is_integer(),
+                let scale = |t: &DataType| match t {
+                    DataType::Decimal128(_, s) | DataType::Decimal256(_, s) => Some(*s),
+                    _ => None,
+                };
+                let narrows = match (scale(&from), scale(to)) {
+                    (Some(s), Some(s2)) => s2 < s,
+                    (Some(s), None) => s > 0 && to.is_integer(),
                     _ => false,
                 };
-                let to_exact = matches!(to, DataType::Decimal128(..)) || to.is_integer();
+                let to_exact = is_decimal(to) || to.is_integer();
                 if self.refuse_only || !(narrows || (text && to_exact && !to.is_integer())) {
                     return Ok(Transformed::no(e));
                 }
@@ -253,7 +260,7 @@ impl ScalarUDFImpl for StrictDouble {
 }
 
 /// The value at a row as an integer at its scale, `None` for NULL.
-type Reader = dyn Fn(usize) -> Result<Option<(i128, u32)>>;
+type Reader = dyn Fn(usize) -> Result<Option<(i256, u32)>>;
 
 /// A cast to `to` that refuses a value it cannot hold exactly, or under `TRY_CAST` answers NULL.
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -292,6 +299,11 @@ impl ScalarUDFImpl for Rescale {
             DataType::Decimal128(_, s) => {
                 let s = (*s).max(0) as u32;
                 let d = a.as_primitive::<Decimal128Type>().clone();
+                Box::new(move |i| Ok((!d.is_null(i)).then(|| (i256::from_i128(d.value(i)), s))))
+            }
+            DataType::Decimal256(_, s) => {
+                let s = (*s).max(0) as u32;
+                let d = a.as_primitive::<Decimal256Type>().clone();
                 Box::new(move |i| Ok((!d.is_null(i)).then(|| (d.value(i), s))))
             }
             DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8 => {
@@ -311,10 +323,29 @@ impl ScalarUDFImpl for Rescale {
             }
             other => return exec_err!("strict_cast does not read {other}"),
         };
-        let shown = |v: i128, s: u32| show(v, s);
+        let shown = |v: i256, s: u32| show(v, s);
         let out: ArrayRef = match &self.to {
             DataType::Decimal128(p, s2) => {
                 let mut b = Decimal128Builder::with_capacity(n);
+                for i in 0..n {
+                    match read(i)? {
+                        None => b.append_null(),
+                        Some((v, s)) => match rescale(v, s, (*s2).max(0) as u32, *p as u32) {
+                            Ok(v) => b.append_value(v.as_i128()),
+                            Err(_) if self.try_ => b.append_null(),
+                            Err(why) => {
+                                return exec_err!(
+                                    "strict decimals: {} {why} DECIMAL({p},{s2}); round it first",
+                                    shown(v, s)
+                                );
+                            }
+                        },
+                    }
+                }
+                Arc::new(b.finish().with_precision_and_scale(*p, *s2)?)
+            }
+            DataType::Decimal256(p, s2) => {
+                let mut b = Decimal256Builder::with_capacity(n);
                 for i in 0..n {
                     match read(i)? {
                         None => b.append_null(),
@@ -340,9 +371,13 @@ impl ScalarUDFImpl for Rescale {
                             match read(i)? {
                                 None => b.append_null(),
                                 Some((v, s)) => {
-                                    let r = rescale(v, s, 0, MAX_DIGITS).and_then(|v| {
-                                        <<$ty as ArrowPrimitiveType>::Native>::try_from(v)
-                                            .map_err(|_| "does not fit")
+                                    let r = rescale(v, s, 0, MAX_WIDE_DIGITS).and_then(|v| {
+                                        v.to_i128()
+                                            .and_then(|v| {
+                                                <<$ty as ArrowPrimitiveType>::Native>::try_from(v)
+                                                    .ok()
+                                            })
+                                            .ok_or("does not fit")
                                     });
                                     match r {
                                         Ok(v) => b.append_value(v),
@@ -381,25 +416,30 @@ impl ScalarUDFImpl for Rescale {
     }
 }
 
+fn pow10(n: u32) -> i256 {
+    let ten = i256::from_i128(10);
+    (0..n).fold(i256::ONE, |x, _| x.wrapping_mul(ten))
+}
+
 /// `v` at scale `s` as an integer at scale `s2` under `p` digits, or why it cannot be one.
-fn rescale(v: i128, s: u32, s2: u32, p: u32) -> std::result::Result<i128, &'static str> {
+fn rescale(v: i256, s: u32, s2: u32, p: u32) -> std::result::Result<i256, &'static str> {
     let v = if s2 < s {
-        let d = 10i128.pow(s - s2);
-        if v % d != 0 {
+        let d = pow10(s - s2);
+        if v.wrapping_rem(d) != i256::ZERO {
             return Err("has digits past");
         }
-        v / d
+        v.wrapping_div(d)
     } else {
-        v.checked_mul(10i128.pow(s2 - s)).ok_or("does not fit")?
+        v.checked_mul(pow10(s2 - s)).ok_or("does not fit")?
     };
-    if v.unsigned_abs() >= 10u128.pow(p) {
+    if v.wrapping_abs() >= pow10(p) {
         return Err("does not fit");
     }
     Ok(v)
 }
 
-/// `[+-]digits[.digits]`, spaces around it allowed, as an integer and its scale.
-fn parse_exact(t: &str) -> Option<(i128, u32)> {
+/// `[+-]digits[.digits]`, spaces around it allowed, as an integer and its scale, to 76 digits.
+fn parse_exact(t: &str) -> Option<(i256, u32)> {
     let t = t.trim();
     let (neg, t) = match t.as_bytes().first()? {
         b'-' => (true, &t[1..]),
@@ -414,25 +454,32 @@ fn parse_exact(t: &str) -> Option<(i128, u32)> {
     if !digits().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let mut v: i128 = 0;
+    let significant = digits().skip_while(|b| *b == b'0').count();
+    if significant > MAX_WIDE_DIGITS as usize {
+        return None;
+    }
+    let ten = i256::from_i128(10);
+    let mut v = i256::ZERO;
     for b in digits() {
-        v = v.checked_mul(10)?.checked_add((b - b'0') as i128)?;
+        v = v
+            .checked_mul(ten)?
+            .checked_add(i256::from_i128((b - b'0') as i128))?;
     }
     let scale = u32::try_from(frac.len())
         .ok()
-        .filter(|s| *s <= MAX_DIGITS)?;
-    Some((if neg { -v } else { v }, scale))
+        .filter(|s| *s <= MAX_WIDE_DIGITS)?;
+    Some((if neg { v.wrapping_neg() } else { v }, scale))
 }
 
-fn show(v: i128, s: u32) -> String {
+fn show(v: i256, s: u32) -> String {
+    let digits = v.wrapping_abs().to_string();
     if s == 0 {
         return v.to_string();
     }
-    let digits = v.unsigned_abs().to_string();
     let s = s as usize;
     let padded = format!("{digits:0>width$}", width = s + 1);
     let (w, f) = padded.split_at(padded.len() - s);
-    format!("{}{w}.{f}", if v < 0 { "-" } else { "" })
+    format!("{}{w}.{f}", if v < i256::ZERO { "-" } else { "" })
 }
 
 /// How [`Div`] rounds the last digit it keeps.
@@ -492,6 +539,9 @@ impl ScalarUDFImpl for Div {
         let num = |t: &DataType| match t {
             DataType::Decimal128(..) => Ok(t.clone()),
             t if t.is_integer() || t.is_null() => Ok(DataType::Decimal128(38, 0)),
+            DataType::Decimal256(..) => plan_err!(
+                "div takes DECIMALs of up to 38 digits; cast a wider one to DECIMAL(38, s) first"
+            ),
             other => plan_err!("div divides integers and DECIMALs, not {other}"),
         };
         if !(s.is_integer()
@@ -652,12 +702,20 @@ mod tests {
 
     #[test]
     fn a_rescale_keeps_every_digit_or_says_why() {
-        assert_eq!(rescale(1000, 3, 2, 10), Ok(100));
-        assert_eq!(rescale(1005, 3, 2, 10), Err("has digits past"));
-        assert_eq!(rescale(15, 1, 3, 3), Err("does not fit"));
-        assert_eq!(parse_exact(" -1.50 "), Some((-150, 2)));
+        let w = i256::from_i128;
+        assert_eq!(rescale(w(1000), 3, 2, 10), Ok(w(100)));
+        assert_eq!(rescale(w(1005), 3, 2, 10), Err("has digits past"));
+        assert_eq!(rescale(w(15), 1, 3, 3), Err("does not fit"));
+        assert_eq!(parse_exact(" -1.50 "), Some((w(-150), 2)));
         assert_eq!(parse_exact("1e3"), None);
         assert_eq!(parse_exact("."), None);
-        assert_eq!(show(-5, 3), "-0.005");
+        assert_eq!(show(w(-5), 3), "-0.005");
+        let wide = "9".repeat(76);
+        assert_eq!(
+            parse_exact(&wide).map(|(v, _)| show(v, 0)),
+            Some(wide.clone())
+        );
+        assert_eq!(parse_exact(&format!("{wide}9")), None);
+        assert_eq!(rescale(pow10(75), 0, 1, 76), Err("does not fit"));
     }
 }
