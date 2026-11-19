@@ -57,7 +57,7 @@ impl Engine {
         let rows = batches.iter().map(|b| b.num_rows() as u64).sum();
         self.bind(
             name,
-            Some(self.session.memory_table(schema, batches).map_err(df_err)?),
+            Some(MemTable::try_new(schema, vec![batches]).map_err(df_err)?),
         );
         Ok(rows)
     }
@@ -129,7 +129,7 @@ impl Engine {
         let rows = batches.iter().map(|b| b.num_rows() as u64).sum();
         self.bind(
             name,
-            Some(self.session.memory_table(schema, batches).map_err(df_err)?),
+            Some(MemTable::try_new(schema, vec![batches]).map_err(df_err)?),
         );
         Ok(rows)
     }

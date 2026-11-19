@@ -1,6 +1,6 @@
--- expect: Timeout
--- tries: #252: a chain of 128 joins, the most admitted, which one optimizer rule holds for seconds
--- gap: #252: DataFusion's eliminate_cross_join is one call no token reaches, about 1.3 s of this chain in release
+-- expect: NotAllowed
+-- says: more than 96
+-- tries: #252: a chain of 97 joins, the first past the bound, which one optimizer rule would hold for most of a second
 SELECT count(*) AS n FROM range(1) t0
   JOIN range(1) t1 ON t0.range = t1.range
   JOIN range(1) t2 ON t0.range = t2.range
@@ -98,34 +98,3 @@ SELECT count(*) AS n FROM range(1) t0
   JOIN range(1) t94 ON t0.range = t94.range
   JOIN range(1) t95 ON t0.range = t95.range
   JOIN range(1) t96 ON t0.range = t96.range
-  JOIN range(1) t97 ON t0.range = t97.range
-  JOIN range(1) t98 ON t0.range = t98.range
-  JOIN range(1) t99 ON t0.range = t99.range
-  JOIN range(1) t100 ON t0.range = t100.range
-  JOIN range(1) t101 ON t0.range = t101.range
-  JOIN range(1) t102 ON t0.range = t102.range
-  JOIN range(1) t103 ON t0.range = t103.range
-  JOIN range(1) t104 ON t0.range = t104.range
-  JOIN range(1) t105 ON t0.range = t105.range
-  JOIN range(1) t106 ON t0.range = t106.range
-  JOIN range(1) t107 ON t0.range = t107.range
-  JOIN range(1) t108 ON t0.range = t108.range
-  JOIN range(1) t109 ON t0.range = t109.range
-  JOIN range(1) t110 ON t0.range = t110.range
-  JOIN range(1) t111 ON t0.range = t111.range
-  JOIN range(1) t112 ON t0.range = t112.range
-  JOIN range(1) t113 ON t0.range = t113.range
-  JOIN range(1) t114 ON t0.range = t114.range
-  JOIN range(1) t115 ON t0.range = t115.range
-  JOIN range(1) t116 ON t0.range = t116.range
-  JOIN range(1) t117 ON t0.range = t117.range
-  JOIN range(1) t118 ON t0.range = t118.range
-  JOIN range(1) t119 ON t0.range = t119.range
-  JOIN range(1) t120 ON t0.range = t120.range
-  JOIN range(1) t121 ON t0.range = t121.range
-  JOIN range(1) t122 ON t0.range = t122.range
-  JOIN range(1) t123 ON t0.range = t123.range
-  JOIN range(1) t124 ON t0.range = t124.range
-  JOIN range(1) t125 ON t0.range = t125.range
-  JOIN range(1) t126 ON t0.range = t126.range
-  JOIN range(1) t127 ON t0.range = t127.range

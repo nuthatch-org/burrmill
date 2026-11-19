@@ -1,5 +1,5 @@
 -- expect: NotAllowed
--- says: more than 128
+-- says: more than 96
 -- tries: #271: a chain of 129 joins, seconds inside one optimizer rule
 SELECT count(*) AS n FROM range(1) t0
   JOIN range(1) t1 ON t0.range = t1.range

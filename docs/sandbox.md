@@ -70,10 +70,10 @@ named prefix.
 | Error text is bounded and asks nothing of the caller | Cut at 4 KiB (`clipped` in `df/mod.rs`), so an error cannot quote a 16 MiB input back (#190). DataFusion's request to file a bug is taken off its internal errors, and a call matching no signature reads as the plan error it is (`without_bug_report` in `df/errors.rs`). | `leak-error-echo-*`, `leak-internal-error-advice`; `df_engine::long_statements_and_long_error_text_are_cut`, `a_call_matching_no_signature_is_a_plan_error_and_asks_for_no_bug_report` |
 | A statement cannot change what another sees | No setting is reachable; `address_bytes`, whose refusal once turned binary addresses off for every caller, is not callable (#188); `$1` parameters are values, bound after every refusal | `hidden-address-bytes`, `config-set-*`; `df_params::a_parameter_is_a_value_and_never_sql`, `a_parameterised_statement_meets_every_refusal` |
 | Text is bounded before it is parsed | A statement over 1 MiB is refused before any rewrite runs; the list-comprehension pre-parse is one linear pass (#185) | `exhaust-giant-sql`, `exhaust-unmatched-brackets`; `df_functions::parsing_grows_linearly_with_the_statement` |
-| Shape is bounded before it plans | Expressions deeper than 64, `IN` lists over 1,024 terms, more than 64 set operations, more than 128 relations (`df/depth.rs`, #25, #186, #271); sqlparser's own recursion limit | `exhaust-deep-*`, `exhaust-in-list`, `exhaust-many-relations`, `exhaust-join-chain`; `df_engine::a_statement_over_too_many_relations_is_refused_before_planning`, `a_thousand_term_chain_is_refused_and_the_process_lives` |
+| Shape is bounded before it plans | Expressions deeper than 64, `IN` lists over 1,024 terms, more than 64 set operations, more than 96 relations (`df/depth.rs`, #25, #186, #271, #344); sqlparser's own recursion limit | `exhaust-deep-*`, `exhaust-in-list`, `exhaust-many-relations`, `exhaust-join-chain`, `exhaust-join-chain-past-the-bound`; `df_engine::a_statement_over_too_many_relations_is_refused_before_planning`, `a_thousand_term_chain_is_refused_and_the_process_lives` |
 | Memory is bounded | Every holding operator charges the pool; a value past the value limit is refused and large ones are charged (`df/bound.rs`, #122); `range` and `generate_series` past ten million rows are refused while planning, and charged below it; a batch over 4 MiB is handed over alone (#273) | `exhaust-repeat*`, `exhaust-string-agg`, `exhaust-array-agg`, `exhaust-list-*`, `exhaust-group-by`, `exhaust-sort`, `exhaust-window`, `exhaust-range-table`; `df_valuebound::no_statement_builds_values_past_its_pool`, `df_host::nothing_is_built_behind_a_wide_batch_the_caller_holds` |
 | Quadratic work inside one poll is bounded | `levenshtein` refuses past 10^8 steps a pair and 10^9 a batch (#184), as `LimitExceeded` | `exhaust-levenshtein*`; `df_engine::levenshtein_answers_short_strings_and_refuses_a_long_pair_at_once` |
-| A statement stops at its deadline | The statement's token carries the deadline. Nest scans, scans of rows in memory (`range`, `generate_series`, `VALUES`, a host's tables), and every join's output and filter check it (`df/cancel.rs`); `range` and a host's tables are held in batches no longer than a statement's, so a filter over them is not one poll (`memory_table`, `series` in `df/session.rs`). The batch loop races it, and every planning rule checks it (#252). A cancel also frees a statement queued at the gate (`enter_cancellable`). | `exhaust-cross-join-chain`, `exhaust-recursive-*`, `exhaust-*-over-range`, `join-*`; `df_host::a_statement_stops_at_its_own_token_and_deadline`, `a_statement_over_rows_in_memory_stops_at_its_deadline`, `a_join_under_an_aggregate_stops_at_its_deadline`, `a_cancel_stops_a_statement_still_planning`; `sandbox_corpus::a_join_stops_within_100ms_of_its_deadline` |
+| A statement stops at its deadline | The statement's token carries the deadline. Nest scans, scans of rows in memory (`range`, `generate_series`, `VALUES`, a host's tables), and every join's output and filter check it (`df/cancel.rs`); a scan of rows in memory hands its batches on cut to the statement's size, copied as they are read, so a filter over them is not one poll (`cut` in `df/cancel.rs`). The batch loop races it, and every planning rule checks it (#252). A cancel also frees a statement queued at the gate (`enter_cancellable`). | `exhaust-cross-join-chain`, `exhaust-recursive-*`, `exhaust-*-over-range`, `join-*`; `df_host::a_statement_stops_at_its_own_token_and_deadline`, `a_statement_over_rows_in_memory_stops_at_its_deadline`, `a_join_under_an_aggregate_stops_at_its_deadline`, `a_cancel_stops_a_statement_still_planning`; `sandbox_corpus::a_join_stops_within_100ms_of_its_deadline` |
 | Exact arithmetic is not wrapped | Overflow is refused, never answered (`Overflow`) | `exhaust-overflow`; `tests/df_checked.rs` |
 | A fault in the engine does not unwind into the host | Planning and running are on threads of their own with 8 MiB stacks; a panic there is `Internal` | `df_engine::planning_does_not_use_the_caller_stack` |
 
@@ -86,18 +86,14 @@ allocator keeps between them.
 ## What it does not defend
 
 - **One batch is one poll.** The token is seen between batches, so the delay past a deadline is
-  what one batch costs. `range` comes in batches of 32,768 rows, the smallest the pool charges
-  separately, and a host's tables in batches of the statement's size; a `VALUES` list is one batch,
-  bounded by the statement's 1 MiB. Building one hash table and one call of a function over a batch
-  are not checked inside.
-- **One optimizer rule at the relation bound.** A chain of 128 joins is admitted, and DataFusion's
-  `eliminate_cross_join` holds it for about 1.3 s in release in one call no token reaches (#252,
-  #271); in debug it returned 1.15 s past a one-second deadline. `gap-join-chain-at-the-bound`.
-  Neither cheap bound is clearly right. The rule is not ours to check the token inside, and running
-  it where the statement can abandon it would return on time while the CPU went on being spent.
-  Skipping it when there is nothing to flatten would change plans it does rewrite, since it also
-  rebuilds `ON` chains and lifts their non-equal conditions. A lower relation bound would hold it:
-  96 relations plan in 0.67 s, against 65 in the largest production statement (#271).
+  what one batch costs: one of the statement's size (2,048 rows under a budget) for a scan of rows
+  in memory, one row group for a segment. Building one hash table and one call of a function over
+  a batch are not checked inside.
+- **One optimizer rule inside the relation bound.** DataFusion's `eliminate_cross_join` is one call
+  no token reaches, and it is about cubic in the relations. The bound is 96 so that it stays under
+  a second: 96 relations plan in 0.67 s in release, where 128 held it for 1.3 s past any deadline
+  (#252, #271). The largest production statement reads 65. A deadline shorter than that planning
+  time is still overrun by it.
 - **An engine opened without a `Budget`, or a statement run without a deadline.** Nothing above
   about memory or time holds for them.
 - **Memory outside the pool.** Batches in flight, values under the value limit, plans, and the

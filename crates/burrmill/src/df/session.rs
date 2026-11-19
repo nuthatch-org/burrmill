@@ -710,19 +710,6 @@ impl MiniSession {
         })
     }
 
-    /// A host's in-memory table, in batches no longer than a statement's, so a statement reading
-    /// it sees its token between them.
-    pub fn memory_table(
-        &self,
-        schema: arrow::datatypes::SchemaRef,
-        batches: Vec<arrow::record_batch::RecordBatch>,
-    ) -> DFResult<datafusion_catalog::MemTable> {
-        datafusion_catalog::MemTable::try_new(
-            schema,
-            vec![in_batches(batches, self.config.batch_size())?],
-        )
-    }
-
     pub fn limits(&self) -> &super::bound::Limits {
         &self.limits
     }
@@ -1032,7 +1019,6 @@ fn series(
     name: &str,
     args: &[Expr],
     limits: &super::bound::Limits,
-    batch_size: usize,
 ) -> DFResult<Arc<dyn TableSource>> {
     use arrow::array::Int64Array;
     use arrow::datatypes::{DataType, Field, Schema};
@@ -1065,59 +1051,25 @@ fn series(
         ));
     }
     let rows = span.max(0) as usize;
-    let within = |v: i128| match (step > 0, inclusive) {
-        (true, true) => v <= stop as i128,
-        (true, false) => v < stop as i128,
-        (false, true) => v >= stop as i128,
-        (false, false) => v > stop as i128,
-    };
-    // In batches, so the token is seen between them: a filter over one batch is a single poll.
-    let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Int64, false)]));
-    let columns = super::bound::charge_columns(limits, rows * 8, || {
-        let (mut v, mut columns) = (start as i128, Vec::new());
-        while within(v) || columns.is_empty() {
-            let mut values = Vec::with_capacity(batch_size.min(rows));
-            while values.len() < batch_size && within(v) {
-                values.push(v as i64);
-                v += step as i128;
-            }
-            columns.push(Arc::new(Int64Array::from(values)) as arrow::array::ArrayRef);
+    let column = super::bound::charge_column(limits, rows * 8, || {
+        let mut values = Vec::with_capacity(rows);
+        let mut v = start as i128;
+        let within = |v: i128| match (step > 0, inclusive) {
+            (true, true) => v <= stop as i128,
+            (true, false) => v < stop as i128,
+            (false, true) => v >= stop as i128,
+            (false, false) => v > stop as i128,
+        };
+        while within(v) {
+            values.push(v as i64);
+            v += step as i128;
         }
-        columns
+        Arc::new(Int64Array::from(values))
     })?;
-    let batches = columns
-        .into_iter()
-        .map(|c| arrow::record_batch::RecordBatch::try_new(Arc::clone(&schema), vec![c]))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let table = datafusion_catalog::MemTable::try_new(schema, vec![batches])?;
+    let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Int64, false)]));
+    let batch = arrow::record_batch::RecordBatch::try_new(Arc::clone(&schema), vec![column])?;
+    let table = datafusion_catalog::MemTable::try_new(schema, vec![vec![batch]])?;
     Ok(provider_as_source(Arc::new(table)))
-}
-
-/// `batches` in batches of at most `rows`, copied, so each is charged as itself by whatever holds
-/// it, where a slice would be charged its whole buffer.
-fn in_batches(
-    batches: Vec<arrow::record_batch::RecordBatch>,
-    rows: usize,
-) -> DFResult<Vec<arrow::record_batch::RecordBatch>> {
-    let Some(schema) = batches.first().map(|b| b.schema()) else {
-        return Ok(batches);
-    };
-    if batches.iter().all(|b| b.num_rows() <= rows) {
-        return Ok(batches);
-    }
-    let mut c = arrow::compute::BatchCoalescer::new(schema, rows);
-    let mut out = Vec::new();
-    for b in batches {
-        c.push_batch(b)?;
-        while let Some(b) = c.next_completed_batch() {
-            out.push(b);
-        }
-    }
-    c.finish_buffered_batch()?;
-    while let Some(b) = c.next_completed_batch() {
-        out.push(b);
-    }
-    Ok(out)
 }
 
 impl ContextProvider for MiniSession {
@@ -1127,9 +1079,7 @@ impl ContextProvider for MiniSession {
         args: Vec<Expr>,
     ) -> DFResult<Arc<dyn TableSource>> {
         match name.to_ascii_lowercase().as_str() {
-            n @ ("range" | "generate_series") => {
-                series(n, &args, &self.limits, self.config.batch_size())
-            }
+            n @ ("range" | "generate_series") => series(n, &args, &self.limits),
             other => {
                 datafusion_common::not_impl_err!("table function {other} is not supported here")
             }
