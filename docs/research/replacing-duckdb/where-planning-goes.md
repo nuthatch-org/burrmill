@@ -111,3 +111,30 @@ and at run time through the contract and `serve::tests`). The bound is 128 since
 here. `addresses` is still the dearest rule of ours. Shared-subquery ids differ from one run to
 the next of the same build, which no answer depends on and every plan comparison has to work
 around.
+
+## #347: the copies
+
+2026-11-19. The issue's 42 to 47 s was a nuthatch router test of many statements on DataFusion
+50-era planning; on 55.2 the contract's dearest statement plans in 0.6 s on a quiet ThinkPad, and
+physical planning is an eighth of it. `tests/df_deepviews.rs` replays that statement from what
+nuthatch registers (`corpus/deep-views/`). What is left is the size of the tree the analyzer walks:
+a view is inlined as a copy of its root over shared `Arc`s, 1,080 distinct nodes in a tree of 6,458,
+and DataFusion's walks give the sharing up at the first rule, so every rule before `share_repeats`
+did its work once per copy (`docs/upstream/datafusion-walks-copy-shared-subtrees.md`).
+
+Those rules now walk with `dag.rs`, which does a shared subtree once and keeps an unchanged one as
+the `Arc` it was; `type_coercion` is DataFusion's per-node work given to that walk (`coercion.rs`).
+1,555 distinct nodes reach `share_repeats` where 6,440 did, and the plans that leave it are the size
+they were. Transcript: `docs/bench/deep-views-thinkpad-2026-11-19.txt`.
+
+| | before | after |
+|---|---:|---:|
+| the replay, release | 596 ms | 410 ms |
+| the replay, debug | 3.11 s | 2.22 s |
+| contract analyzer stage, 240 statements (probe, not back to back) | 66.5 s | 19.1 s |
+| contract, whole run, back to back | 127.6, 125.3 s | 95.9, 102.0 s |
+
+What now leads is DataFusion's optimizer over the 2,500 nodes `share_repeats` leaves
+(`optimize_projections`, `common_sub_expression_eliminate`, `simplify_expressions`),
+`EnsureRequirements`, and `share_repeats` itself, which still hashes every copy. Two optimizer
+passes instead of three changes this statement's plan, so it was not taken.
