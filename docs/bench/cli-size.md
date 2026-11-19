@@ -18,5 +18,16 @@ CARGO_PROFILE_RELEASE_STRIP=symbols cargo install --locked datafusion-cli --vers
 without the variables for the release row, burrmill's built with `CARGO_PROFILE_RELEASE_STRIP=symbols`
 and datafusion-cli's stripped with `strip`.
 
-Both are glibc binaries. A static musl build is not measured yet: the only C in burrmill's graph is
-zstd-sys, through arrow-ipc, and it needs a musl C compiler the ThinkPad does not have.
+Both rows are glibc binaries. The static one, measured 2026-11-19:
+
+| Profile | burrmill, x86_64 musl, static | gzip -9 |
+|---|---:|---:|
+| `profile.cli` | **78.6 MB** | **28.3 MB** |
+
+2.2 MB under the glibc build at the same profile. Built on the Mac with
+`cargo zigbuild --locked --profile cli -p burrmill-cli --target x86_64-unknown-linux-musl`, since the
+only C in the graph is zstd-sys (through arrow-ipc) and zig is a musl C compiler, then run on the
+ThinkPad (Debian 13, Linux 6.12): `ldd` reports no dynamic executable, and a `--strict
+--deterministic --receipt` answer verified, with a file removed it was refused. datafusion-cli was
+not built for musl. CI builds the static binary with musl-gcc and runs it (`yatr cli-musl`,
+`crates/burrmill-cli/musl-smoke.sh`), at the release profile, to keep it buildable.

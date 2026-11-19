@@ -18,6 +18,7 @@ This project's build, test and lint commands are [yatr](https://github.com/cargo
 | `bench-lint` | Clippy on the bench, which builds a bundled DuckDB |  | cached on its inputs |
 | `ci` | Every CI job but demo | `fmt-check`, `fuzz-lock`, `agents-check`, `lint`, `test`, `cli`, `bench-lint`, `deny`, `ingest`, `ingest-size`, `tab`, `tab-build`, `engine-size` | runs its dependencies only |
 | `cli` | Clippy and tests on burrmill-cli, the burrmill binary |  | cached on its inputs |
+| `cli-musl` | The burrmill binary static on x86_64 musl, and run (Linux, needs musl-gcc) |  | cached on its inputs |
 | `demo-build` | demo/pkg: burrmill-wasm and its JS glue (needs the pinned wasm-bindgen) |  | cached on its inputs |
 | `demo-test` | Every demo/*.mjs against the built engine on a static server | `demo-build` | always runs |
 | `deny` | Advisories, licences, duplicates and sources, from deny.toml |  | always runs |
