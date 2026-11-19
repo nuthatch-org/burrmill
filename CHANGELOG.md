@@ -8,6 +8,46 @@ version number promises.
 A release that changes any receipt in `corpus/receipts/receipts.jsonl` says which, and why, in its
 entry: a receipt someone kept stops verifying on that release (`tests/receipt_corpus.rs`).
 
+## 0.1.0 - 2026-11-19
+
+The first release on crates.io, with `burrmill-parquet-source` 55.2.0. What changed since 0.0.1:
+
+Engine (`burrmill`, feature `datafusion`)
+
+- Any Parquet file, directory or store prefix opens as a table, with hive partitions (#352).
+- Strict decimals: exact at the declared scale or refused, with `div(a, b, scale, mode)` (#353);
+  `DECIMAL` up to 76 digits, strict mode included (#359).
+- Deterministic mode answers the same bytes at any thread count and segment layout (#354).
+- Query receipts: a re-checkable hash of statement, settings, inputs and answer (#355). A receipt
+  verifies on the release that made it; `corpus/receipts` is regenerated for 0.1.0, with every
+  statement, input and answer unchanged.
+- `ASOF [LEFT] JOIN ... ON` and `USING`, at DuckDB's answers (#357).
+- A join under an aggregate stops within 100 ms of its deadline, now tested (#365).
+- A spilling budget's pool is shared fairly, a spilled repartition batch gets its own file, and
+  a fold is left to DataFusion's aggregate when the budget can spill (#285, #330).
+- A metered statement is costed from kept row-group statistics and column sizes, not footers
+  (#317); a scan's bookkeeping is charged to the pool, and its parquet metrics are one set per
+  partition (#313, #325).
+- A held definition's built values are charged once (#316). A `HAVING` with no aggregate answers,
+  and a panic below `Engine::sql` is an internal error (#328).
+- `inspect` exports the functions a statement calls (#321); every statement path parses with the
+  engine's dialect (#319).
+
+The tab (`burrmill-wasm`, `demo/`)
+
+- Aggregates and pseudonymised modes leak less: counts as order-of-magnitude buckets, failures by
+  variant only, pseudonyms dealt afresh per ask and never applied to a literal (#282, #314, #315,
+  #324). SQL runs with no model at all (#335).
+
+Tools and packaging
+
+- `burrmill`, the CLI, for strict, deterministic and receipted queries over Parquet (#356), static
+  on x86_64 musl (#363).
+- The Parquet source is its own crate, `burrmill-parquet-source`, so no consumer needs a
+  `[patch]`; the README states the semver and MSRV policy (#364).
+- TPC-H at SF1 and SF10 against DuckDB and datafusion-cli, losses first (#358).
+- yatr runs every task (#331-#337).
+
 ## 0.0.1 - 2026-11-11
 
 The first tag, on main as it stands. What the pull requests since #95 changed, #277 the last:
