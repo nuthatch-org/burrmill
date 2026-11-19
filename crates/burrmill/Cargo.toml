@@ -248,6 +248,11 @@ path = "tests/df_subqueries.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_deepviews"
+path = "tests/df_deepviews.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_viewbudget"
 path = "tests/df_viewbudget.rs"
 required-features = ["datafusion"]
