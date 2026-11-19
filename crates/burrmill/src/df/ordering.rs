@@ -1,5 +1,5 @@
 //! DataFusion's functions with a sort property read from their argument's range, as they are but
-//! for the error a nested call gets (#367).
+//! for the error a nested call gets; docs/upstream/datafusion-nested-abs-loses-its-ordering.md.
 //!
 //! A function's range is unbounded and typed NULL unless it says otherwise, and `abs`, `sqrt`, `ln`
 //! and thirteen others refuse a NULL-typed range of their argument. One error
