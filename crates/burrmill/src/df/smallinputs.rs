@@ -98,9 +98,9 @@ impl PhysicalOptimizerRule for SmallInputs {
     }
 }
 
-/// Whether everything `plan` scans, subqueries included, is under [`SMALL_BYTES`]: such a
-/// statement is planned in one partition, and none of its operators repartitions or spawns.
-pub(super) fn small_statement(plan: &LogicalPlan) -> bool {
+/// Whether everything `plan` scans, subqueries included, is under `below` bytes: such a statement
+/// is planned in one partition, and none of its operators repartitions or spawns.
+pub(super) fn small_statement(plan: &LogicalPlan, below: u64) -> bool {
     let mut bytes = 0u64;
     let mut measured = true;
     let _ = plan.apply_with_subqueries(|p| {
@@ -113,13 +113,13 @@ pub(super) fn small_statement(plan: &LogicalPlan) -> bool {
                 None => measured = false,
             }
         }
-        Ok(if measured && bytes < SMALL_BYTES {
+        Ok(if measured && bytes < below {
             TreeNodeRecursion::Continue
         } else {
             TreeNodeRecursion::Stop
         })
     });
-    measured && bytes < SMALL_BYTES
+    measured && bytes < below
 }
 
 fn table_bytes(t: &Arc<dyn TableProvider>) -> Option<u64> {

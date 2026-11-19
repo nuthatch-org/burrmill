@@ -643,6 +643,13 @@ impl Engine {
             .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// A statement whose tables hold fewer bytes than this, 4 MiB unless set, is planned in one
+    /// partition: no repartition, merge or partition task for a few rows. Zero plans every
+    /// statement across the engine's threads.
+    pub fn set_small_statement_bytes(&self, bytes: u64) {
+        self.session.set_small_bytes(bytes);
+    }
+
     /// Whether `EXPLAIN` and `EXPLAIN ANALYZE` answer or are refused. A host serving untrusted SQL
     /// refuses them: a plan shows the server's segment paths and the `__raw`, `__hot` and `__union`
     /// registrations the surface otherwise hides.

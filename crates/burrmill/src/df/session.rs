@@ -126,6 +126,8 @@ pub struct MiniSession {
     config: SessionConfig,
     /// `config` at one target partition, for a statement over small inputs.
     one_partition: SessionConfig,
+    /// A statement scanning fewer bytes than this is planned in `one_partition`; zero, none is.
+    small_bytes: std::sync::atomic::AtomicU64,
     runtime: Arc<RuntimeEnv>,
     footers: Arc<Footers>,
     _local_share: LocalShare,
@@ -558,6 +560,7 @@ impl MiniSession {
             session_id: "s".into(),
             config,
             one_partition,
+            small_bytes: std::sync::atomic::AtomicU64::new(super::smallinputs::SMALL_BYTES),
             runtime,
             footers,
             _local_share: LocalShare::new(footer_limit),
@@ -802,7 +805,8 @@ impl MiniSession {
     pub async fn physical_plan(&self, plan: &LogicalPlan) -> DFResult<Arc<dyn ExecutionPlan>> {
         // A partition a thread over a few kilobytes is a task each, the repartitions and merges
         // between them, and the passes that place them: most of what a small statement cost.
-        if self.config.target_partitions() > 1 && super::smallinputs::small_statement(plan) {
+        let below = self.small_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        if self.config.target_partitions() > 1 && super::smallinputs::small_statement(plan, below) {
             let one = OnePartition {
                 inner: self,
                 config: &self.one_partition,
@@ -811,6 +815,11 @@ impl MiniSession {
             return self.query_planner.create_physical_plan(plan, &one).await;
         }
         self.query_planner.create_physical_plan(plan, self).await
+    }
+
+    pub fn set_small_bytes(&self, bytes: u64) {
+        self.small_bytes
+            .store(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn limits(&self) -> &super::bound::Limits {

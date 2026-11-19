@@ -30,6 +30,7 @@ pub struct EngineBuilder {
     threads: usize,
     budget: Option<Budget>,
     pool: Option<SharedPool>,
+    small_bytes: Option<u64>,
 }
 
 impl Engine {
@@ -41,6 +42,7 @@ impl Engine {
             threads: Limits::default().max_threads,
             budget: None,
             pool: None,
+            small_bytes: None,
         }
     }
 
@@ -141,6 +143,12 @@ impl EngineBuilder {
         self
     }
 
+    /// See [`Engine::set_small_statement_bytes`].
+    pub fn small_statement_bytes(mut self, bytes: u64) -> Self {
+        self.small_bytes = Some(bytes);
+        self
+    }
+
     /// Open a local or empty source. A store source refuses: it opens with
     /// [`EngineBuilder::open_async`].
     pub fn open(self) -> Result<Engine> {
@@ -238,13 +246,17 @@ impl EngineBuilder {
                     .into(),
             ));
         }
-        Engine::from_tables(
+        let engine = Engine::from_tables(
             tables,
             self.threads,
             self.budget,
             self.pool.as_ref(),
             stores,
-        )
+        )?;
+        if let Some(bytes) = self.small_bytes {
+            engine.set_small_statement_bytes(bytes);
+        }
+        Ok(engine)
     }
 }
 

@@ -13,48 +13,32 @@ use parquet::file::properties::WriterProperties;
 
 /// Eight segments of 4,096 rows in row groups of 512, so a filter on `block_number` can skip most.
 fn nest(root: &Path) {
-    nest_of(root, false)
-}
-
-/// As [`nest`], with 256 bytes of noise a row, so the nest is past what is planned in one partition.
-fn nest_of(root: &Path, padded: bool) {
     let segs = root.join("segments");
     std::fs::create_dir_all(&segs).unwrap();
-    let mut fields = vec![
+    let schema = Arc::new(Schema::new(vec![
         Field::new("block_number", DataType::UInt64, false),
         Field::new("who", DataType::Utf8, false),
         Field::new("amount", DataType::Utf8, false),
-    ];
-    if padded {
-        fields.push(Field::new("memo", DataType::Utf8, false));
-    }
-    let schema = Arc::new(Schema::new(fields));
+    ]));
     let props = WriterProperties::builder()
         .set_max_row_group_row_count(Some(512))
         .build();
     for s in 0..8u64 {
         let rows = 4_096u64;
         let first = s * rows;
-        let mut columns: Vec<arrow::array::ArrayRef> = vec![
-            Arc::new(UInt64Array::from_iter_values(first..first + rows)),
-            Arc::new(StringArray::from_iter_values(
-                (first..first + rows).map(|n| format!("0x{:040x}", n % 97)),
-            )),
-            Arc::new(StringArray::from_iter_values(
-                (first..first + rows).map(|n| (n * 7 % 1_000).to_string()),
-            )),
-        ];
-        if padded {
-            let noise = |n: u64| {
-                (0..16u64)
-                    .map(|k| format!("{:016x}", (n * 16 + k).wrapping_mul(0x9e37_79b9_7f4a_7c15)))
-                    .collect::<String>()
-            };
-            columns.push(Arc::new(StringArray::from_iter_values(
-                (first..first + rows).map(noise),
-            )));
-        }
-        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(UInt64Array::from_iter_values(first..first + rows)),
+                Arc::new(StringArray::from_iter_values(
+                    (first..first + rows).map(|n| format!("0x{:040x}", n % 97)),
+                )),
+                Arc::new(StringArray::from_iter_values(
+                    (first..first + rows).map(|n| (n * 7 % 1_000).to_string()),
+                )),
+            ],
+        )
+        .unwrap();
         let f = std::fs::File::create(segs.join(format!("transfer-{s:064x}.parquet"))).unwrap();
         let mut w =
             parquet::arrow::ArrowWriter::try_new(f, schema.clone(), Some(props.clone())).unwrap();
@@ -213,8 +197,10 @@ fn sql_for_each_answers_as_before() {
 #[test]
 fn a_topk_reads_by_the_race_and_selects_the_same() {
     let tmp = tempfile::tempdir().unwrap();
-    nest_of(tmp.path(), true);
+    nest(tmp.path());
     let e = engine(tmp.path());
+    // The race is between partitions; small, the statement would have one.
+    e.set_small_statement_bytes(0);
     let runs: Vec<QueryMetrics> = (0..30).map(|_| metered(&e, TOPK)).collect();
     let read: std::collections::BTreeSet<u64> = runs.iter().map(|m| m.sealed_bytes_read).collect();
     let selected: std::collections::BTreeSet<u64> =

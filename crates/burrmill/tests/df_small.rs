@@ -27,6 +27,10 @@ fn a_small_statement_is_planned_in_one_partition() {
     assert!(!p.contains("RepartitionExec"), "{p}");
     assert!(!p.contains("SortPreservingMergeExec"), "{p}");
     assert_eq!(answer(&e, sql), r#"[{"k":1,"n":2},{"k":2,"n":1}]"#);
+    e.set_small_statement_bytes(0);
+    let p = plan(&e, sql);
+    assert!(p.contains("RepartitionExec"), "{p}");
+    assert_eq!(answer(&e, sql), r#"[{"k":1,"n":2},{"k":2,"n":1}]"#);
 }
 
 #[test]

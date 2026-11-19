@@ -1240,7 +1240,8 @@ pub fn determinism() -> anyhow::Result<()> {
         let dir = root.join(format!("layout{i}"));
         std::fs::create_dir_all(&dir)?;
         fixture(&dir, *layout)?;
-        for threads in [1, 2, 8, 32] {
+        // Every partition count, and as a small statement is planned by default, in one.
+        for (threads, small) in [(1, 0), (2, 0), (8, 0), (32, 0), (8, 4 << 20), (32, 4 << 20)] {
             let e = burrmill::Engine::builder()
                 .segments(&dir)
                 .budget(burrmill::Budget {
@@ -1248,10 +1249,14 @@ pub fn determinism() -> anyhow::Result<()> {
                     threads,
                     spill: None,
                 })
+                .small_statement_bytes(small)
                 .open()?;
             e.set_deterministic(true);
             engines.push((
-                format!("{} segments, {threads} threads", layout.segments),
+                format!(
+                    "{} segments, {threads} threads, small below {small}",
+                    layout.segments
+                ),
                 e,
             ));
         }
