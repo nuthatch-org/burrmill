@@ -378,6 +378,75 @@ fn a_cancelled_join_returns_its_memory() {
     assert_eq!(rows(&engine, "SELECT 1 AS one"), vec![json!({"one": 1})]);
 }
 
+/// Each join under an aggregate, past its deadline: `Timeout` to the caller, and every partition
+/// task gone, within 100 ms of the deadline (#344, #350). The aggregate drains the join inside one
+/// poll and DataFusion's leaves rarely spend the task's budget (apache/datafusion#19358), so without
+/// `Cancellable` these ran on for seconds; docs/upstream/datafusion-join-cancellation.md.
+#[test]
+fn a_join_under_an_aggregate_stops_at_its_deadline() {
+    use std::time::{Duration, Instant};
+    let tmp = tempfile::tempdir().unwrap();
+    let many: Vec<(u64, &str, &str)> = (0..60_000u64).map(|i| (i, "x", "1")).collect();
+    let seg = segment(tmp.path(), 1, &many);
+    let mut engine = Engine::open_empty().unwrap();
+    engine
+        .register_facts("t", &declared(), vec![seg], &[], (None, None))
+        .unwrap();
+    engine.set_explain(true);
+    for (shape, sql) in [
+        (
+            "CrossJoinExec",
+            "SELECT sum(a.block_number * b.block_number) AS s FROM t a, t b",
+        ),
+        (
+            "NestedLoopJoinExec",
+            "SELECT count(*) AS n FROM t a JOIN t b \
+             ON (a.block_number * 3 + b.block_number) % 1000003 = 7",
+        ),
+        (
+            "HashJoinExec",
+            "SELECT sum(a.block_number + b.block_number) AS s FROM t a JOIN t b ON a.who = b.who",
+        ),
+        // Emits nothing at all: only the check in its filter sees the deadline.
+        (
+            "HashJoinExec",
+            "SELECT count(*) AS n FROM t a JOIN t b \
+             ON a.who = b.who AND a.block_number + b.block_number < 0",
+        ),
+    ] {
+        let plan = format!("{:?}", rows(&engine, &format!("EXPLAIN {sql}")));
+        assert!(plan.contains(shape), "{shape} not in {plan}");
+        let deadline = Instant::now() + Duration::from_millis(300);
+        let stop = burrmill::Stop {
+            deadline: Some(deadline),
+            ..Default::default()
+        };
+        let mut metrics = burrmill::QueryMetrics::default();
+        let r = engine.sql_for_each_stoppable(sql, &[], &stop, Some(&mut metrics), |_| Ok(()));
+        let returned = deadline.elapsed();
+        while engine.tasks_alive() > 0 && deadline.elapsed() < Duration::from_secs(60) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let stopped = deadline.elapsed();
+        eprintln!("{shape}: returned {returned:?}, stopped {stopped:?} after the deadline");
+        assert!(
+            matches!(r, Err(BurrmillError::Timeout)),
+            "{shape}: {:?}",
+            r.map(|_| ())
+        );
+        // Stopped while running, not while still being planned.
+        assert!(metrics.sealed_bytes_read > 0, "{shape}: {metrics:?}");
+        assert!(
+            returned < Duration::from_millis(100),
+            "{shape} returned {returned:?} after its deadline"
+        );
+        assert!(
+            stopped < Duration::from_millis(100),
+            "{shape}'s tasks ran on {stopped:?} past its deadline"
+        );
+    }
+}
+
 #[test]
 fn rows_become_a_text_table() {
     let mut engine = Engine::open_empty().unwrap();
