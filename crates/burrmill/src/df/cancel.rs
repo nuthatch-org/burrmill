@@ -52,6 +52,8 @@ pub(super) struct CancelExec {
     cpu: Option<ScanCpu>,
     /// A segment scan's reservations, which its reader factory charges as each segment opens.
     opened: Option<Arc<super::catalog::Opened>>,
+    /// A scan of rows in memory: its batches are cut to the statement's size as they are read.
+    in_memory: bool,
 }
 
 /// A plan is made for one statement, so the first token set is the only one.
@@ -78,6 +80,18 @@ impl CancelExec {
             filter,
             cpu: None,
             opened: None,
+            in_memory: false,
+        })
+    }
+
+    /// A scan of rows in memory, which never waits: one batch would be one poll from start to end.
+    fn wrap_in_memory(inner: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+        Arc::new(Self {
+            inner,
+            filter: None,
+            cpu: None,
+            opened: None,
+            in_memory: true,
         })
     }
 
@@ -91,6 +105,7 @@ impl CancelExec {
             filter: None,
             cpu: Some(ScanCpu::default()),
             opened: Some(opened),
+            in_memory: false,
         })
     }
 }
@@ -142,6 +157,7 @@ impl ExecutionPlan for CancelExec {
             filter: self.filter.clone(),
             cpu: self.cpu.clone(),
             opened: self.opened.clone(),
+            in_memory: self.in_memory,
         }))
     }
     // Passes a top-k's dynamic filter through, which would otherwise stop here short of the scan.
@@ -187,7 +203,11 @@ impl ExecutionPlan for CancelExec {
                 super::catalog::listed(&self.inner, partition),
             )?;
         }
+        let rows = ctx.session_config().batch_size().max(1);
         let mut stream = self.inner.execute(partition, ctx)?;
+        if self.in_memory {
+            stream = cut(stream, rows);
+        }
         if let Some(cpu) = self
             .cpu
             .as_ref()
@@ -207,6 +227,27 @@ impl ExecutionPlan for CancelExec {
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, checked)))
     }
+}
+
+/// `stream` with each batch over `rows` handed on as copies of `rows` at a time, made as they are
+/// read. Copies, not slices: an operator holding a slice is charged its whole buffer.
+fn cut(stream: SendableRecordBatchStream, rows: usize) -> SendableRecordBatchStream {
+    let schema = stream.schema();
+    let pieces = stream.flat_map(move |item| {
+        let pieces: Box<dyn Iterator<Item = Result<RecordBatch>> + Send> = match item {
+            Ok(b) if b.num_rows() > rows => {
+                Box::new((0..b.num_rows()).step_by(rows).map(move |at| {
+                    let n = rows.min(b.num_rows() - at);
+                    let indices =
+                        arrow::array::UInt32Array::from_iter_values((at as u32)..((at + n) as u32));
+                    Ok(arrow::compute::take_record_batch(&b, &indices)?)
+                }))
+            }
+            other => Box::new(std::iter::once(other)),
+        };
+        futures::stream::iter(pieces)
+    });
+    Box::pin(RecordBatchStreamAdapter::new(schema, pieces))
 }
 
 /// A scan's stream, adding the thread CPU each poll takes to `nanos`. A poll runs on one thread from
@@ -256,8 +297,8 @@ fn thread_cpu_nanos() -> u64 {
     0
 }
 
-/// Wraps every join's output in [`CancelExec`] and its filter in [`CancelExpr`]. Last among the
-/// physical rules, so it sees the joins `RangeJoin` made.
+/// Wraps every join's output and every in-memory scan in [`CancelExec`], and a join's filter in
+/// [`CancelExpr`]. Last among the physical rules, so it sees the joins `RangeJoin` made.
 #[derive(Debug)]
 pub(super) struct Cancellable;
 
@@ -268,6 +309,9 @@ impl PhysicalOptimizerRule for Cancellable {
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         plan.transform_up(|p| {
+            if in_memory(&p) {
+                return Ok(Transformed::yes(CancelExec::wrap_in_memory(p)));
+            }
             if !p.name().ends_with("JoinExec") {
                 return Ok(Transformed::no(p));
             }
@@ -304,6 +348,18 @@ impl PhysicalOptimizerRule for Cancellable {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+/// A scan of rows already in memory: `range`, `VALUES`, a host's table. It never waits, so a plan
+/// over it with no join is one poll from start to end unless its batches are checked.
+fn in_memory(p: &Arc<dyn ExecutionPlan>) -> bool {
+    use datafusion_datasource::memory::MemorySourceConfig;
+    use datafusion_datasource::source::DataSourceExec;
+    p.downcast_ref::<DataSourceExec>().is_some_and(|d| {
+        d.data_source()
+            .downcast_ref::<MemorySourceConfig>()
+            .is_some()
+    })
 }
 
 fn checked(f: &JoinFilter, slot: &Slot) -> JoinFilter {

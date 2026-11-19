@@ -287,6 +287,7 @@ fn no_function(func: &str, args: &[String]) -> String {
 /// DuckDB's line first when there is one, then DataFusion's own text. The kept text must not
 /// trip a class of its own ahead of the restated one, so its "No function matches" is lower-cased.
 pub fn restate(msg: String) -> String {
+    let msg = without_bug_report(msg);
     match duckdb_phrase(&msg) {
         Some(p) => format!(
             "{p}\n{}",
@@ -294,6 +295,19 @@ pub fn restate(msg: String) -> String {
         ),
         None => msg,
     }
+}
+
+/// DataFusion's `Internal` text asks the reader to file a DataFusion bug, which a statement's
+/// author cannot do, and DataFusion raises a call matching no signature as one: a type error.
+fn without_bug_report(msg: String) -> String {
+    const ADVICE: &str = ".\nThis issue was likely caused by a bug in DataFusion's code. Please help \
+                          us to resolve this by filing a bug report in our issue tracker: \
+                          https://github.com/apache/datafusion/issues";
+    if !msg.contains(ADVICE) {
+        return msg;
+    }
+    msg.replace(ADVICE, "")
+        .replace("Internal error: Function '", "Function '")
 }
 
 /// DataFusion's out-of-memory text tells the reader to change two of its settings; neither is
