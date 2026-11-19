@@ -298,7 +298,7 @@ fn a_statement_stops_at_its_own_token_and_deadline() {
 #[test]
 fn a_cancel_stops_a_statement_still_planning() {
     let mut chain = String::from("SELECT count(*) AS n FROM range(1) t0");
-    for i in 1..128 {
+    for i in 1..96 {
         chain.push_str(&format!(
             " JOIN range(1) t{i} ON t{i}.range = t{}.range",
             i - 1
@@ -445,6 +445,52 @@ fn a_join_under_an_aggregate_stops_at_its_deadline() {
             "{shape}'s tasks ran on {stopped:?} past its deadline"
         );
     }
+}
+
+/// A plan over rows already in memory with no join never waits, so the token was seen only at its
+/// end: this `range` statement returned 18 s past a one-second deadline, and a host's one-batch
+/// table read the same way.
+#[test]
+fn a_statement_over_rows_in_memory_stops_at_its_deadline() {
+    use std::time::{Duration, Instant};
+    let mut engine = Engine::open_empty_budgeted(Budget {
+        memory_bytes: 256 << 20,
+        threads: 4,
+        spill: None,
+    })
+    .unwrap();
+    let n = 1_000_000u64;
+    let one = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![Field::new("who", DataType::Utf8, false)])),
+        vec![Arc::new(StringArray::from_iter_values(
+            (0..n).map(|i| format!("0x{i:040x}")),
+        ))],
+    )
+    .unwrap();
+    engine.register_batch("h", vec![one]).unwrap();
+    for sql in [
+        "SELECT sum(length(repeat(CAST(range AS VARCHAR), 300))) AS n FROM range(9000000)",
+        "SELECT count(*) AS n FROM h WHERE regexp_like(repeat(who, 20), '(\\w+\\s?)*$')",
+        "SELECT count(*) AS n FROM (VALUES (1), (2)) v(x), h WHERE regexp_like(repeat(who, 20), 'z')",
+    ] {
+        let deadline = Instant::now() + Duration::from_millis(300);
+        let stop = burrmill::Stop {
+            deadline: Some(deadline),
+            ..Default::default()
+        };
+        let r = engine.sql_for_each_stoppable(sql, &[], &stop, None, |_| Ok(()));
+        let late = deadline.elapsed();
+        assert!(
+            matches!(r, Err(BurrmillError::Timeout)),
+            "{sql}: {:?}",
+            r.map(|_| ())
+        );
+        assert!(late < Duration::from_millis(500), "{sql}: {late:?} late");
+    }
+    assert_eq!(
+        rows(&engine, "SELECT count(*) AS n FROM h"),
+        vec![json!({"n": n})]
+    );
 }
 
 #[test]

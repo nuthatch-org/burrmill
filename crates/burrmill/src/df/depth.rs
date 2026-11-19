@@ -18,8 +18,8 @@ const MAX_EXPR_TERMS: usize = 1024;
 const MAX_SET_DEPTH: usize = 64;
 /// Tables, subqueries and table functions in one statement. Planning is about cubic in them,
 /// inside one DataFusion rule where no cancel reaches: a chain of 256 `JOIN ... ON` took 14 s in
-/// a release build and 128 takes 1.6. The largest authored view reads 65.
-const MAX_RELATIONS: usize = 128;
+/// a release build, 128 took 1.3 and 96 takes 0.67. The largest authored view reads 65.
+const MAX_RELATIONS: usize = 96;
 
 /// Refuse a statement whose plan would recurse deep enough to abort the process.
 ///

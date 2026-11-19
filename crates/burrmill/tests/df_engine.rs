@@ -822,22 +822,22 @@ fn a_statement_over_too_many_relations_is_refused_before_planning() {
         value_of(engine, &format!("SELECT count(*) AS n FROM {}", from(50))),
         r#"[{"n":1}]"#
     );
-    // The bound itself, by the walk alone: 128 relations plan for seconds unoptimized.
-    let at_the_bound = format!("SELECT count(*) FROM {}", from(128));
+    // The bound itself, by the walk alone: 96 relations plan for seconds unoptimized.
+    let at_the_bound = format!("SELECT count(*) FROM {}", from(96));
     assert!(burrmill::df::check_expr_bounds(&at_the_bound).is_ok());
-    let joins = (1..129)
+    let joins = (1..97)
         .map(|i| format!(" JOIN range(1) t{i} ON t0.range = t{i}.range"))
         .collect::<String>();
     // One relation over: a chain of 256 joins planned for 14 s and could not be cancelled.
     for sql in [
-        format!("SELECT count(*) FROM {}", from(129)),
+        format!("SELECT count(*) FROM {}", from(97)),
         format!("SELECT count(*) FROM range(1) t0{joins}"),
-        format!("EXPLAIN SELECT count(*) FROM {}", from(129)),
+        format!("EXPLAIN SELECT count(*) FROM {}", from(97)),
     ] {
         let started = std::time::Instant::now();
         let err = Engine::open_empty().unwrap().sql(&sql).unwrap_err();
         assert!(matches!(err, BurrmillError::NotAllowed(_)), "{err}");
-        assert!(err.to_string().contains("more than 128"), "{err}");
+        assert!(err.to_string().contains("more than 96"), "{err}");
         assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
     }
 }
@@ -855,6 +855,27 @@ fn levenshtein_answers_short_strings_and_refuses_a_long_pair_at_once() {
     let err = engine
         .sql("SELECT levenshtein(repeat('a', 100000), repeat('b', 100000)) AS n")
         .unwrap_err();
+    assert!(matches!(err, BurrmillError::LimitExceeded(_)), "{err}");
     assert!(err.to_string().contains("levenshtein over"), "{err}");
     assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+}
+
+/// A call matching no signature is a type error in the statement. DataFusion raises it as an
+/// internal error, whose text asks the caller to file a DataFusion bug.
+#[test]
+fn a_call_matching_no_signature_is_a_plan_error_and_asks_for_no_bug_report() {
+    let (_tmp, engine) = nest_with_transfer();
+    for sql in [
+        r#"SELECT sum("value") FROM token__transfer"#,
+        r#"SELECT avg("value") OVER () FROM token__transfer"#,
+    ] {
+        let err = engine.sql(sql).unwrap_err();
+        assert!(matches!(err, BurrmillError::Plan(_)), "{sql}: {err}");
+        let text = err.to_string();
+        assert!(text.contains("No function matches"), "{sql}: {text}");
+        assert!(
+            !text.contains("Internal error") && !text.contains("bug report"),
+            "{sql}: {text}"
+        );
+    }
 }
