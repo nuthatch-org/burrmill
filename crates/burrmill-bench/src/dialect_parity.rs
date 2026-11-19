@@ -578,7 +578,8 @@ fn fixture(root: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn run() -> anyhow::Result<()> {
+/// The fixture, DuckDB over it as nuthatch sets it up, and Burrmill over the same directory.
+fn open() -> anyhow::Result<(tempfile::TempDir, duckdb::Connection, Arc<burrmill::Engine>)> {
     let tmp = tempfile::tempdir()?;
     fixture(tmp.path())?;
     let segs = tmp.path().join("segments");
@@ -599,7 +600,11 @@ pub fn run() -> anyhow::Result<()> {
     let engine = std::thread::spawn(move || burrmill::Engine::open_nest(&root))
         .join()
         .expect("open")?;
-    let engine = Arc::new(engine);
+    Ok((tmp, duck, Arc::new(engine)))
+}
+
+pub fn run() -> anyhow::Result<()> {
+    let (_tmp, duck, engine) = open()?;
     let mut failed = 0;
     // `SQL=<query>` runs that one query against the fixture instead of the corpus.
     let adhoc = std::env::var("SQL").ok();
@@ -658,6 +663,93 @@ pub fn run() -> anyhow::Result<()> {
         .expect("drop engine");
     anyhow::ensure!(failed == 0, "{failed} dialect differences");
     Ok(())
+}
+
+/// `dialect-latency`: each corpus statement both engines answer in under 1,000 rows, timed warm
+/// on each, `REPEATS` rounds (31 unless set) after `WARMUP` (5), the engines alternating first.
+/// Both return Arrow and nothing is encoded; DuckDB gets Burrmill's thread count. One line per
+/// statement, then the count at or under DuckDB's p50 and the worst ratios.
+pub fn latency() -> anyhow::Result<()> {
+    let (_tmp, duck, engine) = open()?;
+    let threads = crate::env_usize("THREADS", burrmill::Limits::default().max_threads);
+    duck.execute_batch(&format!("SET threads TO {threads};"))?;
+    let warmup = crate::env_usize("WARMUP", 5);
+    let repeats = crate::env_usize("REPEATS", 31).max(1);
+    let only = std::env::var("SQL").ok();
+    // Off the bench's runtime: `Engine::sql` blocks on one of its own.
+    std::thread::spawn(move || -> anyhow::Result<()> {
+        let corpus: Vec<&str> = match &only {
+            Some(q) => vec![q.as_str()],
+            None => CORPUS.to_vec(),
+        };
+        let duck_once = |sql: &str| -> anyhow::Result<usize> {
+            let mut stmt = duck.prepare(sql)?;
+            Ok(stmt.query_arrow([])?.map(|b| b.num_rows()).sum())
+        };
+        let burr_once = |sql: &str| -> anyhow::Result<usize> {
+            Ok(engine.sql(sql)?.iter().map(|b| b.num_rows()).sum())
+        };
+        let p50 = |v: &mut Vec<u128>| {
+            v.sort_unstable();
+            v[v.len() / 2]
+        };
+        let mut timed = Vec::new();
+        let mut skipped = 0;
+        for sql in corpus {
+            let (Ok(n), Ok(m)) = (duck_once(sql), burr_once(sql)) else {
+                skipped += 1;
+                continue;
+            };
+            if n != m || n >= 1000 {
+                skipped += 1;
+                continue;
+            }
+            let (mut d, mut b) = (Vec::new(), Vec::new());
+            for round in 0..warmup + repeats {
+                let time = |burr: bool| -> anyhow::Result<u128> {
+                    let t = std::time::Instant::now();
+                    if burr {
+                        burr_once(sql)?;
+                    } else {
+                        duck_once(sql)?;
+                    }
+                    Ok(t.elapsed().as_micros())
+                };
+                let burr_first = round % 2 == 0;
+                let (x, y) = (time(burr_first)?, time(!burr_first)?);
+                if round >= warmup {
+                    let (burr, duck) = if burr_first { (x, y) } else { (y, x) };
+                    b.push(burr);
+                    d.push(duck);
+                }
+            }
+            let (d, b) = (p50(&mut d), p50(&mut b));
+            let ratio = b as f64 / d.max(1) as f64;
+            println!("LAT\tduck_us={d}\tburr_us={b}\tratio={ratio:.2}\trows={n}\t{sql}");
+            timed.push((ratio, d, b, sql));
+        }
+        anyhow::ensure!(!timed.is_empty(), "no statement answered by both engines");
+        let at_or_under = timed.iter().filter(|r| r.2 <= r.1).count();
+        let geomean = (timed.iter().map(|r| r.0.ln()).sum::<f64>() / timed.len() as f64).exp();
+        let duck_sum: u128 = timed.iter().map(|r| r.1).sum();
+        let burr_sum: u128 = timed.iter().map(|r| r.2).sum();
+        timed.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (ratio, d, b, sql) in timed.iter().take(10) {
+            println!("WORST\tratio={ratio:.2}\tduck_us={d}\tburr_us={b}\t{sql}");
+        }
+        println!(
+            "LATENCY\tstatements={}\tat_or_under={at_or_under}\tskipped={skipped}\t\
+             geomean_ratio={geomean:.2}\tduck_sum_us={duck_sum}\tburr_sum_us={burr_sum}\t\
+             threads={threads}\trepeats={repeats}",
+            timed.len()
+        );
+        std::thread::spawn(move || drop(engine))
+            .join()
+            .expect("drop engine");
+        Ok(())
+    })
+    .join()
+    .expect("latency thread")
 }
 
 fn corpus_len(adhoc: &Option<String>) -> usize {
