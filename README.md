@@ -99,6 +99,9 @@ executor, with Burrmill owning the parts DataFusion gets wrong for an indexer:
 - **A catalogue that knows the nest and nothing else**: `Engine::open_nest` reads the seal manifest,
   offers `_dec` and `_overflow` beside every wide column as nuthatch does, and registers no table
   factory and no file function. An unconfigured DataFusion `SessionContext` will read `/etc/hosts`.
+  [docs/sandbox.md](docs/sandbox.md) is the threat model for SQL a host did not write: the
+  configuration it needs, what each refusal rests on, the corpus of attempts CI refuses, and the
+  gaps.
 
 **The operator** (`burrmill::Burrmill`, the default build) is the vectorised partitioned fold that
 the RFC began with: arrow for the format and kernels, parquet-rs for decode, checked `i128`
