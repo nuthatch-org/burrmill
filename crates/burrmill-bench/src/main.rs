@@ -36,6 +36,7 @@ mod reach_parity;
 mod scan_parity;
 mod serve;
 mod shapes;
+mod tpch;
 mod views;
 
 use std::path::{Path, PathBuf};
@@ -201,6 +202,7 @@ async fn run() -> anyhow::Result<()> {
         ),
         Some("duck-keywords") => dialect_parity::duck_keywords(),
         Some("fuzz") => fuzz::run(),
+        Some("tpch") => tpch::run(),
         Some("determinism") => fuzz::determinism(),
         Some("asof") => fuzz::asof(),
         Some("duck-eval") => dialect_parity::duck_eval(

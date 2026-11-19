@@ -962,7 +962,7 @@ fn widened(sql: &str) -> Option<String> {
 
 /// The same rows but for floats within a few units in the last place: a sum of DOUBLEs taken in
 /// another order, which each engine's partitioning decides and neither answer gets wrong.
-fn float_close(w: &[String], g: &[String], ordered: bool) -> bool {
+pub(crate) fn float_close(w: &[String], g: &[String], ordered: bool) -> bool {
     fn close(a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Number(x), Value::Number(y)) if x.is_f64() || y.is_f64() => {
@@ -1006,7 +1006,7 @@ fn float_close(w: &[String], g: &[String], ordered: bool) -> bool {
         })
 }
 
-fn duck_rows(conn: &duckdb::Connection, sql: &str) -> Result<Vec<String>, String> {
+pub(crate) fn duck_rows(conn: &duckdb::Connection, sql: &str) -> Result<Vec<String>, String> {
     match crate::encode_parity::nuthatch_rows(conn, sql) {
         Ok(Value::Array(rows)) => Ok(rows.iter().map(|r| r.to_string()).collect()),
         Ok(v) => Ok(vec![v.to_string()]),
@@ -1014,7 +1014,7 @@ fn duck_rows(conn: &duckdb::Connection, sql: &str) -> Result<Vec<String>, String
     }
 }
 
-fn burrmill_rows(e: &burrmill::Engine, sql: &str) -> Result<Vec<String>, String> {
+pub(crate) fn burrmill_rows(e: &burrmill::Engine, sql: &str) -> Result<Vec<String>, String> {
     let batches = e.sql(sql).map_err(|e| e.to_string().replace('\n', " | "))?;
     let mut out = Vec::new();
     for b in &batches {
