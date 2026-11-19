@@ -57,7 +57,7 @@ impl AnalyzerRule for Written {
             return Ok(plan);
         }
         let double = Arc::new(ScalarUDF::from(StrictDouble::default()));
-        let t = plan.transform_up_with_subqueries(|p| {
+        let t = super::dag::transform_up(plan, |p, _| {
             let schema = input_schema(&p);
             let t = p.map_expressions(|e| {
                 let name = e.schema_name().to_string();
@@ -136,7 +136,7 @@ impl AnalyzerRule for StrictDecimals {
         if !self.flag.load(Ordering::Relaxed) {
             return Ok(plan);
         }
-        let t = plan.transform_up_with_subqueries(|p| {
+        let t = super::dag::transform_up(plan, |p, _| {
             let schema = input_schema(&p);
             let t = p.map_expressions(|e| {
                 let name = e.schema_name().to_string();

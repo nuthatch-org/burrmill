@@ -29,7 +29,7 @@ impl AnalyzerRule for DistinctSplit {
     }
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
-        plan.transform_up_with_subqueries(|p| match &p {
+        super::dag::transform_up(plan, |p, _| match &p {
             LogicalPlan::Aggregate(a) => Ok(match split(a)? {
                 Some(n) => Transformed::yes(n),
                 None => Transformed::no(p),

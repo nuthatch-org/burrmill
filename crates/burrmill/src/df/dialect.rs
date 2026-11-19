@@ -25,7 +25,7 @@ use arrow::datatypes::{
     UInt16Type, UInt32Type, UInt64Type,
 };
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{DFSchema, Result as DFResult, ScalarValue, exec_err, plan_err};
 use datafusion_expr::{
     BinaryExpr, Cast, ColumnarValue, Expr, ExprSchemable, LogicalPlan, Operator,
@@ -2348,7 +2348,7 @@ impl AnalyzerRule for DuckSemantics {
     }
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> DFResult<LogicalPlan> {
-        plan.transform_up_with_subqueries(|p| {
+        super::dag::transform_up(plan, |p, _| {
             let mut schema = DFSchema::empty();
             for i in p.inputs() {
                 schema.merge(i.schema());
@@ -2735,93 +2735,74 @@ impl AnalyzerRule for DuckComparisons {
     }
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> DFResult<LogicalPlan> {
-        plan.rewrite_with_subqueries(&mut Comparisons(Vec::new()))
-            .map(|t| t.data)
+        super::dag::transform_up(plan, comparisons).map(|t| t.data)
     }
 }
 
-/// One pass, bottom-up. A node is re-derived where its own expressions changed or an input's schema
-/// did, and tells its parent whether its own schema changed. A union's schema was fixed when the
-/// SQL was planned, from the types before this rule, and `recompute_schema` keeps it while the width
-/// is unchanged, so a union under a changed input is rebuilt from its inputs instead.
-struct Comparisons(Vec<bool>);
-
-impl TreeNodeRewriter for Comparisons {
-    type Node = LogicalPlan;
-
-    fn f_down(&mut self, p: LogicalPlan) -> DFResult<Transformed<LogicalPlan>> {
-        self.0.push(false);
-        Ok(Transformed::no(p))
-    }
-
-    fn f_up(&mut self, p: LogicalPlan) -> DFResult<Transformed<LogicalPlan>> {
-        let below = self.0.pop().unwrap_or(false);
-        let before = Arc::clone(p.schema());
-        let t = if let Some(n) = set_op_types(&p)? {
-            Transformed::yes(n)
-        } else if let Some(n) = union_floats(&p)? {
-            Transformed::yes(n)
-        } else if let LogicalPlan::Union(u) = p {
-            if below {
-                Transformed::yes(LogicalPlan::Union(
-                    datafusion_expr::logical_plan::Union::try_new_with_loose_types(u.inputs)?,
-                ))
-            } else {
-                Transformed::no(LogicalPlan::Union(u))
-            }
+/// One node, bottom-up. A node is re-derived where its own expressions changed or an input's schema
+/// did (`below`). A union's schema was fixed when the SQL was planned, from the types before this
+/// rule, and `recompute_schema` keeps it while the width is unchanged, so a union under a changed
+/// input is rebuilt from its inputs instead.
+fn comparisons(p: LogicalPlan, below: bool) -> DFResult<Transformed<LogicalPlan>> {
+    let t = if let Some(n) = set_op_types(&p)? {
+        Transformed::yes(n)
+    } else if let Some(n) = union_floats(&p)? {
+        Transformed::yes(n)
+    } else if let LogicalPlan::Union(u) = p {
+        if below {
+            Transformed::yes(LogicalPlan::Union(
+                datafusion_expr::logical_plan::Union::try_new_with_loose_types(u.inputs)?,
+            ))
         } else {
-            let mut schema = DFSchema::empty();
-            for i in p.inputs() {
-                schema.merge(i.schema());
-            }
-            let names_matter = matches!(
-                p,
-                LogicalPlan::Projection(_) | LogicalPlan::Aggregate(_) | LogicalPlan::Window(_)
-            );
-            let mut intdiv = false;
-            p.apply_expressions(|e| {
-                e.apply(|x| {
-                    intdiv |=
-                        matches!(x, Expr::ScalarFunction(f) if f.func.name() == "burrmill_intdiv");
-                    Ok(if intdiv {
-                        TreeNodeRecursion::Stop
-                    } else {
-                        TreeNodeRecursion::Continue
-                    })
-                })
-            })?;
-            let inputs: Vec<LogicalPlan> = if intdiv {
-                p.inputs().into_iter().cloned().collect()
-            } else {
-                vec![]
-            };
-            let inputs: Vec<&LogicalPlan> = inputs.iter().collect();
-            let t = p.map_expressions(|e| {
-                let name = names_matter.then(|| e.schema_name().to_string());
-                let t = e.transform_up(|e| {
-                    compare_as_duckdb(e, &schema)?
-                        .transform_data(|e| decimal_intdiv(e, &schema, &inputs))
-                })?;
-                match name {
-                    Some(name) if t.transformed && t.data.schema_name().to_string() != name => {
-                        Ok(Transformed::yes(t.data.alias(name)))
-                    }
-                    _ => Ok(t),
-                }
-            })?;
-            if t.transformed || below {
-                Transformed::yes(t.data.recompute_schema()?)
-            } else {
-                t
-            }
-        };
-        if t.data.schema() != &before
-            && let Some(parent) = self.0.last_mut()
-        {
-            *parent = true;
+            Transformed::no(LogicalPlan::Union(u))
         }
-        Ok(t)
-    }
+    } else {
+        let mut schema = DFSchema::empty();
+        for i in p.inputs() {
+            schema.merge(i.schema());
+        }
+        let names_matter = matches!(
+            p,
+            LogicalPlan::Projection(_) | LogicalPlan::Aggregate(_) | LogicalPlan::Window(_)
+        );
+        let mut intdiv = false;
+        p.apply_expressions(|e| {
+            e.apply(|x| {
+                intdiv |=
+                    matches!(x, Expr::ScalarFunction(f) if f.func.name() == "burrmill_intdiv");
+                Ok(if intdiv {
+                    TreeNodeRecursion::Stop
+                } else {
+                    TreeNodeRecursion::Continue
+                })
+            })
+        })?;
+        let inputs: Vec<LogicalPlan> = if intdiv {
+            p.inputs().into_iter().cloned().collect()
+        } else {
+            vec![]
+        };
+        let inputs: Vec<&LogicalPlan> = inputs.iter().collect();
+        let t = p.map_expressions(|e| {
+            let name = names_matter.then(|| e.schema_name().to_string());
+            let t = e.transform_up(|e| {
+                compare_as_duckdb(e, &schema)?
+                    .transform_data(|e| decimal_intdiv(e, &schema, &inputs))
+            })?;
+            match name {
+                Some(name) if t.transformed && t.data.schema_name().to_string() != name => {
+                    Ok(Transformed::yes(t.data.alias(name)))
+                }
+                _ => Ok(t),
+            }
+        })?;
+        if t.transformed || below {
+            Transformed::yes(t.data.recompute_schema()?)
+        } else {
+            t
+        }
+    };
+    Ok(t)
 }
 
 const DUP_ROW: &str = "__burrmill_dup";

@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::tree_node::Transformed;
+use datafusion_common::tree_node::{Transformed, TreeNodeRecursion};
 use datafusion_common::{Column, DFSchema, Result, plan_err};
 use datafusion_expr::expr::{ScalarFunction, Sort, WindowFunction};
 use datafusion_expr::logical_plan::{Join, JoinType};
@@ -312,6 +312,22 @@ impl AnalyzerRule for AsofJoins {
     }
 
     fn analyze(&self, plan: LogicalPlan, _: &ConfigOptions) -> Result<LogicalPlan> {
+        let marked = |p: &LogicalPlan| {
+            matches!(p, LogicalPlan::Join(j) if j.filter.as_ref()
+                .is_some_and(|f| split_conjunction(f).into_iter().any(is_marker)))
+        };
+        // Its walk copies every shared view (`dag.rs`), so it is taken only where there is work.
+        let mut any = false;
+        plan.apply_with_subqueries(|p| {
+            any = marked(p);
+            Ok(match any {
+                true => TreeNodeRecursion::Stop,
+                false => TreeNodeRecursion::Continue,
+            })
+        })?;
+        if !any {
+            return Ok(plan);
+        }
         let mut n = 0usize;
         plan.transform_up_with_subqueries(|p| match p {
             LogicalPlan::Join(j)
