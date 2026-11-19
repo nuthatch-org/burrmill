@@ -256,9 +256,11 @@ Said plainly, because a README that implies otherwise is the thing this project 
   admits (8/8), but each sits inside a CTE or a join, so whole statements run on the engine.
 - **No redb `HotTip`.** The hot/cold seam holds under concurrent seal (COR-1), but the only tip is
   in-memory (roadmap 3.4).
-- **DataFusion joins do not yield to cancellation** (apache/datafusion#19358). A statement with a join
-  cannot promise the one-morsel cancellation bound; the mitigation is a per-query timeout at
-  nuthatch's 30 s guard.
+- **DataFusion joins do not yield to cancellation** (apache/datafusion#19358). Burrmill checks the
+  statement's token on every join's output and in every join filter instead, and a cross,
+  nested-loop or hash join under an aggregate stops within 100 ms of its deadline
+  (`tests/df_host.rs`, docs/upstream/datafusion-join-cancellation.md). Work inside one operator that
+  passes neither, such as building a large hash table, still runs to its end.
 - **4.2c is still owed**: the earliest `views` bench gave DuckDB no `parquet_metadata_cache`, worth
   about 9% on the curation fold. The Gate 1 harnesses set DuckDB up as nuthatch does; the old
   synthetic sweep has not been re-run with it.
