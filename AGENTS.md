@@ -14,6 +14,7 @@ This project's build, test and lint commands are [yatr](https://github.com/cargo
 | Task | What it does | Runs after | Notes |
 |---|---|---|---|
 | `agents-check` | Fail if the task table in AGENTS.md has drifted from this file |  | cached on its inputs |
+| `asof` | Generated ASOF joins on DuckDB and Burrmill, CASES cases, 3,000 unless set |  | cached on its inputs |
 | `bench-lint` | Clippy on the bench, which builds a bundled DuckDB |  | cached on its inputs |
 | `ci` | Every CI job but demo | `fmt-check`, `fuzz-lock`, `agents-check`, `lint`, `test`, `cli`, `bench-lint`, `deny`, `ingest`, `ingest-size`, `tab`, `tab-build`, `engine-size` | runs its dependencies only |
 | `cli` | Clippy and tests on burrmill-cli, the burrmill binary |  | cached on its inputs |
