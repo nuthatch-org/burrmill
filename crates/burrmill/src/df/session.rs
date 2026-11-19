@@ -424,6 +424,7 @@ impl MiniSession {
             scalar.insert("to_timestamp".into(), t);
         }
         scalar.insert("div".into(), super::strict::Div::udf());
+        scalar.insert(super::asof::MARKER.into(), super::asof::Marker::udf());
         for f in super::duckfns::all() {
             for a in f.aliases() {
                 scalar.insert(a.clone(), Arc::clone(&f));
@@ -559,6 +560,8 @@ impl MiniSession {
                     Arc::new(super::outerorder::OutermostOrder)
                         as Arc<dyn AnalyzerRule + Send + Sync>,
                     Arc::new(ResolveGroupingFunction::new()),
+                    // Before every rule that reads a join: a marked one is not one yet.
+                    Arc::new(super::asof::AsofJoins),
                     // Before every rule that compares text, an address is fixed binary or text.
                     Arc::new(super::addresses::Addresses(addresses.clone())),
                     Arc::new(super::nullsub::NullableSubqueries::default()),

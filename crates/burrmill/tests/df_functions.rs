@@ -820,20 +820,45 @@ fn an_alias_spelled_glob_is_an_alias_and_the_operator_still_refuses() {
 }
 
 #[test]
-fn asof_join_is_refused_by_name_and_the_word_stays_usable() {
+fn asof_join_is_planned_and_the_word_stays_usable() {
     let engine = Engine::open_empty().unwrap();
-    for sql in [
-        "SELECT * FROM (SELECT 1 AS k) a ASOF JOIN (SELECT 2 AS k) b ON a.k >= b.k",
-        "SELECT * FROM (SELECT 1 AS k) a ASOF JOIN (SELECT 2 AS k) b USING (k)",
-        "SELECT (SELECT count(*) FROM (SELECT 1 AS k) a ASOF JOIN (SELECT 2 AS k) b ON a.k >= b.k)",
+    for (sql, rows) in [
+        (
+            "SELECT * FROM (SELECT 1 AS k) a ASOF JOIN (SELECT 2 AS k) b ON a.k >= b.k",
+            0,
+        ),
+        (
+            "SELECT a.k FROM (SELECT 3 AS k) a ASOF JOIN (SELECT 2 AS k) b USING (k)",
+            1,
+        ),
+        (
+            "SELECT * FROM (SELECT 1 AS k) a ASOF LEFT JOIN (SELECT 2 AS k) b ON a.k >= b.k",
+            1,
+        ),
     ] {
-        let e = engine.sql(sql).expect_err(sql);
-        assert!(matches!(e, BurrmillError::Parse(_)), "{sql}: {e:?}");
-        let e = e.to_string();
-        assert!(
-            e.contains("ASOF JOIN is not supported here; join on the inequality"),
-            "{sql}: {e}"
-        );
+        let got: usize = engine.sql(sql).unwrap().iter().map(|b| b.num_rows()).sum();
+        assert_eq!(got, rows, "{sql}");
+    }
+    for (sql, says) in [
+        (
+            "SELECT * FROM (SELECT 1 AS k) a ASOF JOIN (SELECT 2 AS k) b MATCH_CONDITION (a.k >= b.k) ON true",
+            "Snowflake",
+        ),
+        (
+            "SELECT * FROM (SELECT 1 AS k) a ASOF JOIN (SELECT 2 AS k) b USING (k)",
+            "SELECT * over ASOF JOIN ... USING",
+        ),
+        (
+            "SELECT * FROM (SELECT 1 AS k) a ASOF JOIN (SELECT 2 AS k) b ON a.k = b.k",
+            "one inequality",
+        ),
+        (
+            "SELECT * FROM (SELECT 1 AS k) a ASOF JOIN (SELECT 2 AS k) b ON a.k >= b.k AND a.k <= b.k",
+            "exactly one inequality",
+        ),
+    ] {
+        let e = engine.sql(sql).expect_err(sql).to_string();
+        assert!(e.contains(says), "{sql}: {e}");
     }
     for sql in [
         "SELECT 1 AS asof",
@@ -873,4 +898,21 @@ fn parsing_grows_linearly_with_the_statement() {
         large.as_secs_f64() < small.as_secs_f64() * 3.0,
         "8 KiB took {small:?}, 16 KiB took {large:?}"
     );
+}
+
+#[test]
+fn asof_after_a_relation_named_by_a_keyword_is_the_join() {
+    let engine = Engine::open_empty().unwrap();
+    let sql = "WITH events(ts) AS (VALUES (5)), prices(ts, px) AS (VALUES (1, 10), (4, 11)) \
+               SELECT events.ts, prices.px FROM events ASOF JOIN prices ON events.ts >= prices.ts";
+    let b = engine.sql(sql).unwrap();
+    assert_eq!(
+        arrow::util::pretty::pretty_format_batches(&b)
+            .unwrap()
+            .to_string()
+            .matches("11")
+            .count(),
+        1
+    );
+    assert_eq!(b.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
 }

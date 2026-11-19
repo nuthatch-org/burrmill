@@ -202,6 +202,7 @@ async fn run() -> anyhow::Result<()> {
         Some("duck-keywords") => dialect_parity::duck_keywords(),
         Some("fuzz") => fuzz::run(),
         Some("determinism") => fuzz::determinism(),
+        Some("asof") => fuzz::asof(),
         Some("duck-eval") => dialect_parity::duck_eval(
             &std::env::args()
                 .nth(2)

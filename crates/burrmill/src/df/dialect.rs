@@ -46,6 +46,7 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
     // Before the parser: sqlparser rejects `[expr FOR x IN list]`, which the views still write.
     let expanded = crate::listcomp::before_parse(sql);
     super::depth::refuse_set_op_tokens(&expanded)?;
+    let (expanded, asof_at) = super::asof::blank(&expanded);
     let parsed = DFParser::parse_sql_with_dialect(expanded.as_str(), &Duck).map_err(|e| {
         let text = parser_text(&e);
         BurrmillError::Parse(if asof_error(&text) {
@@ -61,7 +62,13 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
     if asof {
         return Err(BurrmillError::Parse(ASOF_REFUSAL.into()));
     }
-    Ok(parsed.into_iter().collect())
+    let mut parsed: Vec<DfStatement> = parsed.into_iter().collect();
+    for s in &mut parsed {
+        if let DfStatement::Statement(s) = s {
+            super::asof::mark(s, &asof_at).map_err(BurrmillError::Parse)?;
+        }
+    }
+    Ok(parsed)
 }
 
 /// The parser's own words, without the span and diagnostic DataFusion wraps around them.
@@ -85,7 +92,8 @@ fn pivot_refusal(pivot: bool) -> String {
     format!("{word} is not supported here; write {instead}")
 }
 
-const ASOF_REFUSAL: &str = "ASOF JOIN is not supported here; join on the inequality and keep the nearest row with row_number() OVER (PARTITION BY ... ORDER BY ... DESC) = 1";
+const ASOF_REFUSAL: &str =
+    "ASOF JOIN ... MATCH_CONDITION is Snowflake's; write ASOF [LEFT] JOIN ... ON or USING";
 
 /// sqlparser reads only Snowflake's `ASOF JOIN ... MATCH_CONDITION`, so DuckDB's `ON` or `USING`
 /// fails on the missing keyword. That failure, or a `MATCH_CONDITION` that parses, is an `ASOF JOIN`.
@@ -129,7 +137,19 @@ impl sq::Visitor for HasAsof {
 }
 
 /// What [`inspect::parse`](crate::inspect) returns: the parse, with an `ASOF JOIN` refused by name.
-pub(crate) fn refuse_asof(
+/// `sql` parsed as the engine parses it: DuckDB's `ASOF [LEFT] JOIN` read as the join it marks.
+pub(crate) fn parse_asof(
+    sql: &str,
+) -> std::result::Result<Vec<sq::Statement>, sqlparser::parser::ParserError> {
+    let (blanked, at) = super::asof::blank(sql);
+    let mut parsed = refuse_asof(sqlparser::parser::Parser::parse_sql(&Duck, &blanked))?;
+    for s in &mut parsed {
+        super::asof::mark(s, &at).map_err(sqlparser::parser::ParserError::ParserError)?;
+    }
+    Ok(parsed)
+}
+
+fn refuse_asof(
     parsed: std::result::Result<Vec<sq::Statement>, sqlparser::parser::ParserError>,
 ) -> std::result::Result<Vec<sq::Statement>, sqlparser::parser::ParserError> {
     match parsed {
