@@ -680,7 +680,7 @@ fn edit_steps(args: &[ColumnarValue], number_rows: usize) -> Result<()> {
         let pair = la.saturating_mul(lb);
         total = total.saturating_add(pair);
         if pair > EDIT_STEPS_PAIR || total > EDIT_STEPS_CALL {
-            return Err(DataFusionError::Execution(format!(
+            return Err(DataFusionError::ResourcesExhausted(format!(
                 "levenshtein over {la} and {lb} bytes is {pair} steps; at most \
                  {EDIT_STEPS_PAIR} a pair and {EDIT_STEPS_CALL} a batch are computed"
             )));

@@ -28,8 +28,8 @@ pub enum BurrmillError {
     /// The hot tip and the sealed cold segments disagree about the boundary - COR-1. A seam bug can
     /// double-count or drop rows, so it refuses rather than answering.
     Seam(String),
-    /// The result exceeded `max_rows` or `max_bytes`, or the statement its memory budget or the
-    /// value limit.
+    /// The result exceeded `max_rows` or `max_bytes`, or the statement its memory budget, the
+    /// value limit or a function's bound on work.
     LimitExceeded(String),
     /// The statement does not plan: a name it cannot resolve, a type it cannot reconcile, a shape
     /// a rule refuses. Raised before any page is read, as DuckDB's binder errors are, so a host can
