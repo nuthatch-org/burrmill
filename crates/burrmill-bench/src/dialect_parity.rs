@@ -668,13 +668,15 @@ pub fn run() -> anyhow::Result<()> {
 /// `dialect-latency`: each corpus statement both engines answer in under 1,000 rows, timed warm
 /// on each, `REPEATS` rounds (31 unless set) after `WARMUP` (5), the engines alternating first.
 /// Both return Arrow and nothing is encoded; DuckDB gets Burrmill's thread count. One line per
-/// statement, then the count at or under DuckDB's p50 and the worst ratios.
+/// statement, then the count at or under DuckDB's p50 and the worst ratios. `FRESH=1` gives each run
+/// text of its own, so neither engine reuses a plan.
 pub fn latency() -> anyhow::Result<()> {
     let (_tmp, duck, engine) = open()?;
-    let threads = crate::env_usize("THREADS", burrmill::Limits::default().max_threads);
+    let threads = burrmill::Limits::default().max_threads;
     duck.execute_batch(&format!("SET threads TO {threads};"))?;
     let warmup = crate::env_usize("WARMUP", 5);
     let repeats = crate::env_usize("REPEATS", 31).max(1);
+    let fresh = crate::env_flag("FRESH");
     let only = std::env::var("SQL").ok();
     // Off the bench's runtime: `Engine::sql` blocks on one of its own.
     std::thread::spawn(move || -> anyhow::Result<()> {
@@ -706,12 +708,16 @@ pub fn latency() -> anyhow::Result<()> {
             }
             let (mut d, mut b) = (Vec::new(), Vec::new());
             for round in 0..warmup + repeats {
+                let text = match fresh {
+                    true => format!("{sql}\n-- {round}"),
+                    false => sql.to_string(),
+                };
                 let time = |burr: bool| -> anyhow::Result<u128> {
                     let t = std::time::Instant::now();
                     if burr {
-                        burr_once(sql)?;
+                        burr_once(&text)?;
                     } else {
-                        duck_once(sql)?;
+                        duck_once(&text)?;
                     }
                     Ok(t.elapsed().as_micros())
                 };
@@ -740,7 +746,7 @@ pub fn latency() -> anyhow::Result<()> {
         println!(
             "LATENCY\tstatements={}\tat_or_under={at_or_under}\tskipped={skipped}\t\
              geomean_ratio={geomean:.2}\tduck_sum_us={duck_sum}\tburr_sum_us={burr_sum}\t\
-             threads={threads}\trepeats={repeats}",
+             threads={threads}\trepeats={repeats}\tfresh={fresh}",
             timed.len()
         );
         std::thread::spawn(move || drop(engine))
