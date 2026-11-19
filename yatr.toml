@@ -23,7 +23,7 @@ sources = ["crates/**/*.rs"]
 desc = "fuzz/ has its own lock; fail if it no longer resolves"
 run = ["cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null"]
 shell = true
-sources = ["fuzz/Cargo.toml", "fuzz/Cargo.lock", "crates/*/Cargo.toml"]
+sources = ["fuzz/Cargo.toml", "fuzz/Cargo.lock", "crates/*/Cargo.toml", "vendor/*/Cargo.toml"]
 
 [tasks.lint]
 desc = "Clippy on burrmill, default graph and with datafusion"
