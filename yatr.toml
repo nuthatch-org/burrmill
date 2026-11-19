@@ -167,6 +167,15 @@ cargo +nightly fuzz run "$target" "fuzz/corpus/$target" $seeds -- \
 """]
 no_cache = true
 
+[tasks.cli-musl]
+desc = "The burrmill binary static on x86_64 musl, and run (Linux, needs musl-gcc)"
+run = [
+    "cargo build --locked --release -p burrmill-cli --target x86_64-unknown-linux-musl",
+    "crates/burrmill-cli/musl-smoke.sh",
+]
+env = { CC_x86_64_unknown_linux_musl = "musl-gcc" }
+sources = ["crates/burrmill/**", "crates/burrmill-cli/**", "vendor/**", "corpus/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+
 [tasks.agents-check]
 desc = "Fail if the task table in AGENTS.md has drifted from this file"
 run = ["yatr agents --check"]
