@@ -855,6 +855,27 @@ fn levenshtein_answers_short_strings_and_refuses_a_long_pair_at_once() {
     let err = engine
         .sql("SELECT levenshtein(repeat('a', 100000), repeat('b', 100000)) AS n")
         .unwrap_err();
+    assert!(matches!(err, BurrmillError::LimitExceeded(_)), "{err}");
     assert!(err.to_string().contains("levenshtein over"), "{err}");
     assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+}
+
+/// A call matching no signature is a type error in the statement. DataFusion raises it as an
+/// internal error, whose text asks the caller to file a DataFusion bug.
+#[test]
+fn a_call_matching_no_signature_is_a_plan_error_and_asks_for_no_bug_report() {
+    let (_tmp, engine) = nest_with_transfer();
+    for sql in [
+        r#"SELECT sum("value") FROM token__transfer"#,
+        r#"SELECT avg("value") OVER () FROM token__transfer"#,
+    ] {
+        let err = engine.sql(sql).unwrap_err();
+        assert!(matches!(err, BurrmillError::Plan(_)), "{sql}: {err}");
+        let text = err.to_string();
+        assert!(text.contains("No function matches"), "{sql}: {text}");
+        assert!(
+            !text.contains("Internal error") && !text.contains("bug report"),
+            "{sql}: {text}"
+        );
+    }
 }
