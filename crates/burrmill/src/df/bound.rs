@@ -20,6 +20,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
+use arrow::alloc::Allocation;
 use arrow::array::{Array, ArrayData, ArrayRef, AsArray, BooleanArray, make_array};
 use arrow::buffer::Buffer;
 use arrow::datatypes::{
@@ -159,7 +160,8 @@ impl Limits {
         }
         let r = held.unwrap_or_else(|| charge.new_empty());
         r.try_resize(fresh)?;
-        let mut charged = Some(Charged::new(built, r));
+        let mut charged: Option<Arc<dyn Allocation>> =
+            Some(Arc::new(AssertUnwindSafe(Charged::new(built, r))));
         Ok(match attach(&data, biggest.1, &mut charged) {
             Some(d) => make_array(d),
             None => array,
@@ -249,10 +251,14 @@ impl Drop for Charged {
 }
 
 /// `d` with the buffer at `target` owned by `charge` as well, which then lasts as long as the bytes.
-fn attach(d: &ArrayData, target: *const u8, charge: &mut Option<Charged>) -> Option<ArrayData> {
+fn attach(
+    d: &ArrayData,
+    target: *const u8,
+    charge: &mut Option<Arc<dyn Allocation>>,
+) -> Option<ArrayData> {
     if let Some(k) = d.buffers().iter().position(|b| b.as_ptr() == target) {
         let b = &d.buffers()[k];
-        let owner = Arc::new(AssertUnwindSafe(charge.take()?));
+        let owner = charge.take()?;
         // SAFETY: the owner holds the original buffer, so the bytes stay valid as long as it does.
         let held = unsafe {
             Buffer::from_custom_allocation(NonNull::new(b.as_ptr() as *mut u8)?, b.len(), owner)
@@ -1146,15 +1152,36 @@ impl OptimizerRule for BoundValues {
     }
 }
 
-/// The column `build` makes in `bytes`, charged to the pool before it is built and for as long as
-/// it lives.
-pub fn charge_column(
+/// The columns `build` makes in `bytes`, charged to the pool together before they are built and
+/// for as long as any of them lives: a series' batches, each under what the pool charges alone.
+pub fn charge_columns(
     limits: &Limits,
     bytes: usize,
-    build: impl FnOnce() -> ArrayRef,
-) -> Result<ArrayRef> {
-    let held = limits.reserve(bytes as u128)?;
-    limits.keep(build(), &[], held)
+    build: impl FnOnce() -> Vec<ArrayRef>,
+) -> Result<Vec<ArrayRef>> {
+    let Some(r) = limits.reserve(bytes as u128)? else {
+        return Ok(build());
+    };
+    let columns = build();
+    let data: Vec<ArrayData> = columns.iter().map(|c| c.to_data()).collect();
+    let (mut seen, mut built, mut fresh, mut biggest) =
+        (Vec::new(), Vec::new(), 0, (0, std::ptr::null()));
+    for d in &data {
+        new_buffers(d, &[], &mut seen, &mut built, &mut fresh, &mut biggest);
+    }
+    r.try_resize(fresh)?;
+    let owner: Arc<dyn Allocation> = Arc::new(AssertUnwindSafe(Charged::new(built, r)));
+    Ok(columns
+        .into_iter()
+        .zip(&data)
+        .map(|(c, d)| {
+            let target = d.buffers().first().filter(|b| !b.is_empty());
+            match target.and_then(|b| attach(d, b.as_ptr(), &mut Some(Arc::clone(&owner)))) {
+                Some(d) => make_array(d),
+                None => c,
+            }
+        })
+        .collect())
 }
 
 /// The delimiter's bytes, for `string_agg(x, sep)`; zero when it is not a literal.

@@ -200,8 +200,11 @@ impl Engine {
             present.extend(schema.fields().iter().map(|f| f.name().clone()));
             self.session
                 .note_addresses(&hot_name, addresses.iter().cloned());
-            let hot_provider: Arc<dyn TableProvider> =
-                Arc::new(MemTable::try_new(schema, vec![vec![batch]]).map_err(df_err)?);
+            let hot_provider: Arc<dyn TableProvider> = Arc::new(
+                self.session
+                    .memory_table(schema, vec![batch])
+                    .map_err(df_err)?,
+            );
             self.session
                 .register_table(&hot_name, Arc::clone(&hot_provider));
             let plan =
@@ -285,7 +288,11 @@ impl Engine {
         let (schema, batch) = json_batch(rows, false)?;
         self.session.register_table(
             name,
-            Arc::new(MemTable::try_new(schema, vec![vec![batch]]).map_err(df_err)?),
+            Arc::new(
+                self.session
+                    .memory_table(schema, vec![batch])
+                    .map_err(df_err)?,
+            ),
         );
         self.session
             .build_information_schema(hidden)
@@ -300,7 +307,7 @@ impl Engine {
         };
         self.session.register_table(
             name,
-            Arc::new(MemTable::try_new(schema, vec![batches]).map_err(df_err)?),
+            Arc::new(self.session.memory_table(schema, batches).map_err(df_err)?),
         );
         self.session
             .build_information_schema(hidden)

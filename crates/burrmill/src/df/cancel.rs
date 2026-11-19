@@ -256,8 +256,8 @@ fn thread_cpu_nanos() -> u64 {
     0
 }
 
-/// Wraps every join's output in [`CancelExec`] and its filter in [`CancelExpr`]. Last among the
-/// physical rules, so it sees the joins `RangeJoin` made.
+/// Wraps every join's output and every in-memory scan in [`CancelExec`], and a join's filter in
+/// [`CancelExpr`]. Last among the physical rules, so it sees the joins `RangeJoin` made.
 #[derive(Debug)]
 pub(super) struct Cancellable;
 
@@ -268,6 +268,9 @@ impl PhysicalOptimizerRule for Cancellable {
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         plan.transform_up(|p| {
+            if in_memory(&p) {
+                return Ok(Transformed::yes(CancelExec::wrap(p, None)));
+            }
             if !p.name().ends_with("JoinExec") {
                 return Ok(Transformed::no(p));
             }
@@ -304,6 +307,18 @@ impl PhysicalOptimizerRule for Cancellable {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+/// A scan of rows already in memory: `range`, `VALUES`, a host's table. It never waits, so a plan
+/// over it with no join is one poll from start to end unless its batches are checked.
+fn in_memory(p: &Arc<dyn ExecutionPlan>) -> bool {
+    use datafusion_datasource::memory::MemorySourceConfig;
+    use datafusion_datasource::source::DataSourceExec;
+    p.downcast_ref::<DataSourceExec>().is_some_and(|d| {
+        d.data_source()
+            .downcast_ref::<MemorySourceConfig>()
+            .is_some()
+    })
 }
 
 fn checked(f: &JoinFilter, slot: &Slot) -> JoinFilter {
