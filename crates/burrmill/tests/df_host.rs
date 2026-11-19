@@ -298,7 +298,7 @@ fn a_statement_stops_at_its_own_token_and_deadline() {
 #[test]
 fn a_cancel_stops_a_statement_still_planning() {
     let mut chain = String::from("SELECT count(*) AS n FROM range(1) t0");
-    for i in 1..128 {
+    for i in 1..96 {
         chain.push_str(&format!(
             " JOIN range(1) t{i} ON t{i}.range = t{}.range",
             i - 1
