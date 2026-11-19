@@ -235,15 +235,14 @@ fn cut(stream: SendableRecordBatchStream, rows: usize) -> SendableRecordBatchStr
     let schema = stream.schema();
     let pieces = stream.flat_map(move |item| {
         let pieces: Box<dyn Iterator<Item = Result<RecordBatch>> + Send> = match item {
-            Ok(b) if b.num_rows() > rows => Box::new((0..b.num_rows()).step_by(rows).map(
-                move |at| {
+            Ok(b) if b.num_rows() > rows => {
+                Box::new((0..b.num_rows()).step_by(rows).map(move |at| {
                     let n = rows.min(b.num_rows() - at);
-                    let indices = arrow::array::UInt32Array::from_iter_values(
-                        (at as u32)..((at + n) as u32),
-                    );
+                    let indices =
+                        arrow::array::UInt32Array::from_iter_values((at as u32)..((at + n) as u32));
                     Ok(arrow::compute::take_record_batch(&b, &indices)?)
-                },
-            )),
+                }))
+            }
             other => Box::new(std::iter::once(other)),
         };
         futures::stream::iter(pieces)
