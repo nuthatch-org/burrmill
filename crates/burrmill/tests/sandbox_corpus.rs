@@ -1,7 +1,7 @@
 //! The sandbox corpus (#344): every statement under `corpus/sandbox/` is refused, with the kind its
 //! header names, by an engine opened as docs/sandbox.md tells a host to open one, inside a time and
-//! a memory bound. A case marked `pending` waits on #350 and one marked `gap` is a known gap in
-//! docs/sandbox.md; each runs only in its ignored test below, to be switched on by its fix.
+//! a memory bound. A case marked `gap` is a known gap in docs/sandbox.md, and runs only in the
+//! ignored test below until its fix switches it on.
 #![cfg(feature = "datafusion")]
 
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ const DEADLINE: Duration = Duration::from_secs(1);
 /// What the host reads of one answer before it refuses it, as `Limits::serving` caps a result.
 const RESULT_BYTES: usize = 32 << 20;
 
-/// Past the deadline a refused case may take this long to return. #350's bound is 100 ms.
+/// Past the deadline a refused case may take this long to return. A join's bound is 100 ms.
 const LATE: Duration = Duration::from_secs(1);
 /// What the whole corpus may add to the process's resident high-water mark: the pool, what a
 /// statement holds outside it, and what the allocator keeps between statements.
@@ -33,7 +33,6 @@ struct Case {
     /// first, depending on the machine.
     expect: Vec<String>,
     says: Option<String>,
-    pending: Option<String>,
     gap: Option<String>,
     sql: String,
 }
@@ -57,8 +56,7 @@ fn cases() -> Vec<Case> {
 fn case(path: &Path) -> Case {
     let text = std::fs::read_to_string(path).unwrap();
     let name = path.file_stem().unwrap().to_string_lossy().into_owned();
-    let (mut expect, mut says, mut pending, mut gap, mut pad, mut tries) =
-        (None, None, None, None, None, false);
+    let (mut expect, mut says, mut gap, mut pad, mut tries) = (None, None, None, None, false);
     let mut body = Vec::new();
     for line in text.lines() {
         let header = body.is_empty().then(|| line.strip_prefix("-- ")).flatten();
@@ -66,7 +64,6 @@ fn case(path: &Path) -> Case {
         match header.and_then(|h| h.split_once(": ")) {
             Some(("expect", v)) => expect = Some(v.split('|').map(|k| k.trim().into()).collect()),
             Some(("says", v)) => says = value(v),
-            Some(("pending", v)) => pending = value(v),
             Some(("gap", v)) => gap = value(v),
             Some(("pad-to", v)) => pad = Some(v.trim().parse::<usize>().unwrap()),
             Some(("tries", _)) => tries = true,
@@ -85,7 +82,6 @@ fn case(path: &Path) -> Case {
         expect: expect.unwrap_or_else(|| panic!("{name}: no `-- expect:` line")),
         name,
         says,
-        pending,
         gap,
         sql,
     }
@@ -257,10 +253,7 @@ fn every_attempt_in_the_corpus_is_refused() {
     let before = resident_peak();
     let mut wrong = Vec::new();
     let mut grew = Vec::new();
-    for case in cases
-        .iter()
-        .filter(|c| c.pending.is_none() && c.gap.is_none())
-    {
+    for case in cases.iter().filter(|c| c.gap.is_none()) {
         let at = resident_peak();
         let (r, took) = run(&engine, &case.sql);
         if let Some(why) = judge(case, &r, took) {
@@ -297,17 +290,16 @@ fn every_attempt_in_the_corpus_is_refused() {
     assert_eq!(labels.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
 }
 
-/// The third clause of #344: a join-heavy statement stops within 100 ms of its deadline.
+/// The third clause of #344: a join-heavy statement stops within 100 ms of its deadline (#350).
 #[test]
-#[ignore = "a DataFusion join does not yield inside itself; switched on by #350"]
 fn a_join_stops_within_100ms_of_its_deadline() {
     let (_tmp, engine) = sandboxed();
-    let pending: Vec<Case> = cases()
+    let joins: Vec<Case> = cases()
         .into_iter()
-        .filter(|c| c.pending.is_some())
+        .filter(|c| c.name.starts_with("join-"))
         .collect();
-    assert!(!pending.is_empty());
-    for case in &pending {
+    assert!(!joins.is_empty());
+    for case in &joins {
         let (r, took) = run(&engine, &case.sql);
         assert!(
             judge(case, &r, took).is_none(),
