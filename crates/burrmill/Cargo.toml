@@ -424,3 +424,8 @@ required-features = ["datafusion"]
 name = "receipt_corpus"
 path = "tests/receipt_corpus.rs"
 required-features = ["datafusion"]
+
+[[test]]
+name = "df_small"
+path = "tests/df_small.rs"
+required-features = ["datafusion"]
