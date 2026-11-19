@@ -27,6 +27,7 @@ wherever the statement names them.
 | Written | Planned as | |
 |---|---|---|
 | `HUGEINT`, `BIGNUM` | `DECIMAL(38,0)`, refused past 38 digits | corpus |
+| `DECIMAL(p, s)`, `38 < p <= 76` (DuckDB stops at 38) | a 256-bit decimal: exact `+ - *` and `SUM`, refused past 76 digits; `AVG` is DOUBLE, as for any DECIMAL | `tests/df_decimal76.rs` |
 | `UBIGINT`, `UINTEGER`, `USMALLINT`, `UTINYINT` | the unsigned types | corpus |
 | `a // b` | exact truncating division; DOUBLE beside a DuckDB DECIMAL | corpus |
 | `a / b` | DOUBLE, as DuckDB divides | corpus |
@@ -116,7 +117,7 @@ checks a generated corpus against an exact oracle):
 
 `div(a, b, scale, mode)` is admitted in either mode: `a / b` exactly, rounded once to `scale`
 digits by `half_even`, `half_up`, `down`, `up`, `floor` or `ceiling`, as `DECIMAL(38, scale)`, and
-refused for a zero divisor or past 38 digits.
+refused for a zero divisor or past 38 digits, and for a wider DECIMAL, which is cast down first.
 
 ## Deterministic mode
 

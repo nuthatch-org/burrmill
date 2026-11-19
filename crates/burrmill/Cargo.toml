@@ -399,6 +399,11 @@ path = "tests/df_deterministic.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_decimal76"
+path = "tests/df_decimal76.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_receipt"
 path = "tests/df_receipt.rs"
 required-features = ["datafusion"]
