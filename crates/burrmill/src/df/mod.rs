@@ -765,33 +765,39 @@ impl Engine {
     ) -> Result<()> {
         // Parsed first, so malformed SQL is a syntax error as DuckDB reports it, not a refusal.
         self.refuse_long_sql(sql)?;
-        refuse_hidden_names(sql)?;
-        let logical = plan_query(&self.session, sql, token)?;
-        refuse_non_query(sql)?;
-        self.refuse_explain(&logical)?;
-        let logical = params::bind(logical, params)?;
-        // The host arms the engine's token and clears it. Clearing it here would run a statement
-        // whose cancel arrived before it, or while it was still being planned.
-        if token.is_cancelled() {
-            return Err(BurrmillError::Cancelled);
+        let cached = self.cached_plan(sql, params);
+        if cached.is_none() {
+            refuse_hidden_names(sql)?;
         }
-        // A cancel also frees a statement queued behind slow ones.
-        let _pass = self
-            .gate
-            .enter_cancellable(token)
-            .ok_or(BurrmillError::Cancelled)?;
-        let started = std::time::Instant::now();
-        // The statement runs on a thread of its own, its batches come back here, and `f` stays on
-        // the caller's. A host runtime will not be blocked; and without one, physical planning and
-        // execution ran on the caller's stack, which a 1 MiB thread could not hold in debug (#168).
+        let admitted = std::sync::OnceLock::new();
+        // The statement is planned and runs on a thread of its own, its batches come back here,
+        // and `f` stays on the caller's. A host runtime will not be blocked; and without one,
+        // planning and execution ran on the caller's stack, which a 1 MiB thread could not hold
+        // in debug (#168).
         let held = metrics.as_deref_mut();
         let r = std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             let (done, waited) = std::sync::mpsc::sync_channel(1);
+            let admitted = &admitted;
             let run = std::thread::Builder::new()
                 .name("burrmill-statement".into())
                 .stack_size(PLAN_STACK_BYTES)
                 .spawn_scoped(s, move || {
+                    let planned = match cached {
+                        Some(p) => Planned::Optimized(p),
+                        None => Planned::Fresh(self.plan_fresh(sql, params, token)?),
+                    };
+                    // The host arms the engine's token and clears it. Clearing it here would run a
+                    // statement whose cancel arrived before it, or while it was still being planned.
+                    if token.is_cancelled() {
+                        return Err(BurrmillError::Cancelled);
+                    }
+                    // A cancel also frees a statement queued behind slow ones.
+                    let _pass = self
+                        .gate
+                        .enter_cancellable(token)
+                        .ok_or(BurrmillError::Cancelled)?;
+                    let _ = admitted.set(std::time::Instant::now());
                     // Not `Cancelled`: the caller's `f` refused, and what was read still counts.
                     let gone = || BurrmillError::Substrate("the caller stopped reading".into());
                     let mut send = |b: RecordBatch| {
@@ -804,7 +810,7 @@ impl Engine {
                     };
                     cancel::planning(token, || {
                         self.runtime()
-                            .block_on(self.stream(logical, sql, params, token, &mut send, held))
+                            .block_on(self.stream(planned, sql, params, token, &mut send, held))
                     })
                 })
                 .map_err(|e| BurrmillError::Substrate(format!("statement thread: {e}")))?;
@@ -821,7 +827,7 @@ impl Engine {
             let run = run.join().unwrap_or_else(|p| Err(panicked(p)));
             taken.and(run)
         });
-        if let Some(m) = metrics {
+        if let (Some(m), Some(started)) = (metrics, admitted.get()) {
             m.exec_nanos += started.elapsed().as_nanos() as u64;
         }
         r
@@ -881,17 +887,40 @@ impl Engine {
         mut f: impl FnMut(RecordBatch) -> Result<()>,
     ) -> Result<()> {
         self.refuse_long_sql(sql)?;
-        refuse_hidden_names(sql)?;
         let token = crate::CancelToken::under(&[&self.cancel], None);
-        let logical = plan_query(&self.session, sql, &token)?;
-        refuse_non_query(sql)?;
-        self.refuse_explain(&logical)?;
-        let logical = params::bind(logical, params)?;
+        let planned = match self.cached_plan(sql, params) {
+            Some(p) => Planned::Optimized(p),
+            None => {
+                refuse_hidden_names(sql)?;
+                Planned::Fresh(self.plan_fresh(sql, params, &token)?)
+            }
+        };
         if token.is_cancelled() {
             return Err(BurrmillError::Cancelled);
         }
-        self.stream(logical, sql, params, &token, &mut f, None)
+        self.stream(planned, sql, params, &token, &mut f, None)
             .await
+    }
+
+    /// A statement run before, under the same catalogue and settings, is not planned again.
+    fn cached_plan(&self, sql: &str, params: &[Param]) -> Option<datafusion_expr::LogicalPlan> {
+        if !params.is_empty() {
+            return None;
+        }
+        self.session.cached_plan(sql)
+    }
+
+    /// `sql` parsed, refused or planned, and bound to `params`. On the statement's own thread.
+    fn plan_fresh(
+        &self,
+        sql: &str,
+        params: &[Param],
+        token: &crate::CancelToken,
+    ) -> Result<datafusion_expr::LogicalPlan> {
+        let logical = plan_query_on_stack(&self.session, sql, token)?;
+        refuse_non_query(sql)?;
+        self.refuse_explain(&logical)?;
+        params::bind(logical, params)
     }
 
     /// Addresses are read as fixed binary while every value in an address column is one. The
@@ -899,7 +928,7 @@ impl Engine {
     /// reads addresses as text from then on and runs the statement again.
     async fn stream(
         &self,
-        logical: datafusion_expr::LogicalPlan,
+        planned: Planned,
         sql: &str,
         params: &[Param],
         token: &crate::CancelToken,
@@ -909,7 +938,9 @@ impl Engine {
         let mut sent = 0usize;
         let r = self
             .stream_once(
-                logical,
+                planned,
+                sql,
+                params,
                 token,
                 &mut |b| {
                     sent += 1;
@@ -928,7 +959,8 @@ impl Engine {
                 log::warn!("{m}: addresses are read as text from now on");
                 // Planned afresh: the plan that refused holds what its shared subqueries ran.
                 let fresh = params::bind(plan_query(&self.session, sql, token)?, params)?;
-                self.stream_once(fresh, token, f, metrics).await
+                self.stream_once(Planned::Fresh(fresh), sql, params, token, f, metrics)
+                    .await
             }
             r => r,
         }
@@ -936,14 +968,30 @@ impl Engine {
 
     async fn stream_once(
         &self,
-        logical: datafusion_expr::LogicalPlan,
+        planned: Planned,
+        sql: &str,
+        params: &[Param],
         token: &crate::CancelToken,
         f: &mut impl FnMut(RecordBatch) -> Result<()>,
         metrics: Option<&mut QueryMetrics>,
     ) -> Result<()> {
+        let optimized = match planned {
+            Planned::Optimized(p) => p,
+            Planned::Fresh(logical) => {
+                let stamp = self.session.stamp();
+                let optimized = self
+                    .session
+                    .optimize(&logical)
+                    .map_err(|e| planning_err(token, e))?;
+                if params.is_empty() {
+                    self.session.keep_plan(sql, stamp, &optimized);
+                }
+                optimized
+            }
+        };
         let physical = self
             .session
-            .create_physical_plan(&logical)
+            .physical_plan(&optimized)
             .await
             .map_err(|e| planning_err(token, e))?;
         // A host sees an address as the text it wrote.
@@ -1055,6 +1103,12 @@ impl Engine {
     fn runtime(&self) -> &tokio::runtime::Runtime {
         self.rt.as_ref().expect("taken only by drop")
     }
+}
+
+/// A statement's logical plan as parsed and bound, or as optimized by an earlier run of it.
+enum Planned {
+    Fresh(datafusion_expr::LogicalPlan),
+    Optimized(datafusion_expr::LogicalPlan),
 }
 
 /// A task stopped with the statement that spawned it, refused or cancelled.
@@ -1249,7 +1303,10 @@ fn plan_query_on_stack(
     cancel: &crate::CancelToken,
 ) -> Result<datafusion_expr::LogicalPlan> {
     #[cfg(not(target_arch = "wasm32"))]
-    debug_assert_eq!(std::thread::current().name(), Some("burrmill-plan"));
+    debug_assert!(matches!(
+        std::thread::current().name(),
+        Some("burrmill-plan" | "burrmill-statement")
+    ));
     let (stmt, names) = dialect::parse(sql, &session.known_names())?;
     refuse_df_statement(&stmt)?;
     refuse_wide_literals(&stmt)?;
@@ -1349,20 +1406,7 @@ fn leading_keyword(sql: &str) -> &str {
 /// `__raw`, `__hot` and `__union` are refused when the walk can see them. A statement it cannot
 /// parse is left to the engine parser, which accepts more of DuckDB than the walk does (#10).
 fn refuse_hidden_names(sql: &str) -> Result<()> {
-    if let Some(table) = crate::inspect::hidden_name(sql) {
-        return Err(BurrmillError::NotAllowed(format!(
-            "`{table}` is not a table this surface serves - the SQL surface serves this nest's \
-             tables and views only"
-        )));
-    }
-    match crate::inspect::reach(sql) {
-        Err(BurrmillError::NotAllowed(why))
-            if why.contains("is not a table this surface serves") =>
-        {
-            Err(BurrmillError::NotAllowed(why))
-        }
-        _ => Ok(()),
-    }
+    crate::inspect::unserved(sql).map_or(Ok(()), Err)
 }
 
 fn refuse_non_query(sql: &str) -> Result<()> {

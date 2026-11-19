@@ -294,6 +294,9 @@ impl Noted {
             .cloned()
             .unwrap_or_default()
     }
+    pub fn is_off(&self) -> bool {
+        self.off.load(Ordering::Relaxed)
+    }
     /// Whether a placed decode refused since this was last asked.
     pub fn refused(&self) -> bool {
         self.refused.swap(false, Ordering::Relaxed)

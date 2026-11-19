@@ -11,18 +11,23 @@
 
 use std::sync::Arc;
 
+use datafusion_catalog::default_table_source::source_as_provider;
+use datafusion_catalog::{MemTable, TableProvider};
 use datafusion_common::Result;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_datasource::file_scan_config::FileScanConfig;
 use datafusion_datasource::memory::MemorySourceConfig;
 use datafusion_datasource::source::DataSourceExec;
+use datafusion_expr::LogicalPlan;
 use datafusion_physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion_physical_plan::empty::EmptyExec;
 use datafusion_physical_plan::placeholder_row::PlaceholderRowExec;
 use datafusion_physical_plan::repartition::RepartitionExec;
 use datafusion_physical_plan::{ExecutionPlan, Partitioning};
 use datafusion_session::PhysicalOptimizerRule;
+
+use super::catalog::SegmentTable;
 
 pub const SMALL_BYTES: u64 = 4 << 20;
 
@@ -91,4 +96,44 @@ impl PhysicalOptimizerRule for SmallInputs {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+/// Whether everything `plan` scans, subqueries included, is under [`SMALL_BYTES`]: such a
+/// statement is planned in one partition, and none of its operators repartitions or spawns.
+pub(super) fn small_statement(plan: &LogicalPlan) -> bool {
+    let mut bytes = 0u64;
+    let mut measured = true;
+    let _ = plan.apply_with_subqueries(|p| {
+        if let LogicalPlan::TableScan(s) = p {
+            match source_as_provider(&s.source)
+                .ok()
+                .and_then(|t| table_bytes(&t))
+            {
+                Some(b) => bytes = bytes.saturating_add(b),
+                None => measured = false,
+            }
+        }
+        Ok(if measured && bytes < SMALL_BYTES {
+            TreeNodeRecursion::Continue
+        } else {
+            TreeNodeRecursion::Stop
+        })
+    });
+    measured && bytes < SMALL_BYTES
+}
+
+fn table_bytes(t: &Arc<dyn TableProvider>) -> Option<u64> {
+    if let Some(s) = t.downcast_ref::<SegmentTable>() {
+        return Some(s.located().1.map(|f| f.object_meta.size).sum());
+    }
+    let m = t.downcast_ref::<MemTable>()?;
+    let mut bytes = 0u64;
+    for p in &m.batches {
+        let held = p.try_read().ok()?;
+        bytes += held
+            .iter()
+            .map(|b| b.get_array_memory_size() as u64)
+            .sum::<u64>();
+    }
+    Some(bytes)
 }

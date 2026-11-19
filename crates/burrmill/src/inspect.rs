@@ -143,7 +143,39 @@ pub(crate) fn hidden_table(name: &str) -> bool {
 /// Separate from [`reach`], which stops at its first fault: a quoted CTE name ahead of a hidden
 /// one was that fault, and the hidden name was never looked at (#189).
 #[cfg(feature = "datafusion")]
+#[cfg(test)]
 pub(crate) fn hidden_name(sql: &str) -> Option<String> {
+    let stmts = parse(&crate::listcomp::before_parse(sql)).ok()?;
+    hidden_in(&stmts)
+}
+
+/// Why the engine's surface refuses what `sql` reaches before planning it, from one parse: the
+/// first hidden name any statement names, then a table position [`reach`] would not serve. A
+/// statement that does not parse is left to the engine's parser.
+#[cfg(feature = "datafusion")]
+pub(crate) fn unserved(sql: &str) -> Option<BurrmillError> {
+    let stmts = parse(&crate::listcomp::before_parse(sql)).ok()?;
+    if let Some(table) = hidden_in(&stmts) {
+        return Some(refused(format!(
+            "`{table}` is not a table this surface serves - the SQL surface serves this nest's \
+             tables and views only"
+        )));
+    }
+    let [stmt @ Statement::Query(_)] = stmts.as_slice() else {
+        return None;
+    };
+    let mut w = Walk {
+        reach: Reach::default(),
+        bad: None,
+    };
+    let _ = crate::walk::walk(stmt, &mut w);
+    w.bad
+        .filter(|why| why.contains("is not a table this surface serves"))
+        .map(|why| unreachable(why, NEST))
+}
+
+#[cfg(feature = "datafusion")]
+fn hidden_in(stmts: &[Statement]) -> Option<String> {
     struct Find(Option<String>);
     impl Visitor for Find {
         type Break = ();
@@ -159,10 +191,8 @@ pub(crate) fn hidden_name(sql: &str) -> Option<String> {
             ControlFlow::Continue(())
         }
     }
-    let expanded = crate::listcomp::before_parse(sql);
-    let stmts = parse(&expanded).ok()?;
     let mut find = Find(None);
-    for stmt in &stmts {
+    for stmt in stmts {
         let _ = crate::walk::walk(stmt, &mut find);
         if find.0.is_some() {
             break;

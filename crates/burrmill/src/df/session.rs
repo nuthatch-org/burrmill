@@ -15,6 +15,7 @@ use datafusion_catalog::{
 use datafusion_common::alias::AliasGenerator;
 use datafusion_common::config::{ConfigOptions, TableOptions};
 use datafusion_common::display::{PlanType, ToStringifiedPlan};
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{
     DFSchema, Result as DFResult, TableReference, plan_datafusion_err, resources_datafusion_err,
 };
@@ -111,9 +112,20 @@ pub(super) fn local_sizes_limit() -> usize {
     local_limit(&LOCAL_SHARES.lock().unwrap_or_else(|p| p.into_inner())) / 5
 }
 
+/// Strict decimals, deterministic mode, addresses as text, and the value limit.
+pub type Stamp = (bool, bool, bool, usize);
+
+/// Plans kept for statements run again; past it they are all let go.
+const PLANS_KEPT: usize = 128;
+
+/// A statement longer than this is not kept: a long one is seldom run twice.
+const PLANNED_SQL_BYTES: usize = 64 << 10;
+
 pub struct MiniSession {
     session_id: String,
     config: SessionConfig,
+    /// `config` at one target partition, for a statement over small inputs.
+    one_partition: SessionConfig,
     runtime: Arc<RuntimeEnv>,
     footers: Arc<Footers>,
     _local_share: LocalShare,
@@ -127,6 +139,9 @@ pub struct MiniSession {
     /// By table, the columns the host writes as addresses; the `Addresses` rule reads it.
     addresses: super::addresses::Noted,
     known: std::sync::Mutex<Option<super::dialect::Known>>,
+    /// Each statement's optimized plan by its text, under the settings it was planned with. Every
+    /// registration clears it.
+    plans: Mutex<HashMap<String, (Stamp, LogicalPlan)>>,
     /// Built on first read: rebuilding it at every registration was quadratic in the views.
     information_schema: std::sync::Mutex<Option<HashMap<String, Arc<dyn TableSource>>>>,
     hidden: fn(&str) -> bool,
@@ -536,10 +551,13 @@ impl MiniSession {
             .register_schema("public", Arc::new(MemorySchemaProvider::new()))
             .expect("schema");
         catalog_list.register_catalog("datafusion".into(), Arc::new(catalog));
+        let mut one_partition = config.clone().with_target_partitions(1);
+        one_partition.options_mut().optimizer.prefer_existing_union = true;
 
         Ok(Self {
             session_id: "s".into(),
             config,
+            one_partition,
             runtime,
             footers,
             _local_share: LocalShare::new(footer_limit),
@@ -554,6 +572,7 @@ impl MiniSession {
             information_schema: std::sync::Mutex::new(None),
             hidden: |_| false,
             known: std::sync::Mutex::new(None),
+            plans: Mutex::new(HashMap::new()),
             analyzer: Analyzer::with_rules(
                 [
                     // First, so no later rule meets a sort that cannot order the answer.
@@ -710,6 +729,90 @@ impl MiniSession {
         })
     }
 
+    /// What the analyzer reads besides the catalogue, as it stands now.
+    pub fn stamp(&self) -> Stamp {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.strict.load(Relaxed),
+            self.deterministic.load(Relaxed),
+            self.addresses.is_off(),
+            self.limits.value_limit(),
+        )
+    }
+
+    /// `sql`'s optimized plan from an earlier run under the same settings.
+    pub fn cached_plan(&self, sql: &str) -> Option<LogicalPlan> {
+        let plans = self.plans.lock().unwrap_or_else(|e| e.into_inner());
+        let (stamp, plan) = plans.get(sql)?;
+        (*stamp == self.stamp()).then(|| plan.clone())
+    }
+
+    /// Keeps `plan`, optimized under `stamp`, for `sql` run again. A shared subquery's nodes hold
+    /// what its run computed, and a `range` holds rows charged to the pool, so a plan with either
+    /// is planned afresh each time.
+    pub fn keep_plan(&self, sql: &str, stamp: Stamp, plan: &LogicalPlan) {
+        if sql.len() > PLANNED_SQL_BYTES
+            || matches!(plan, LogicalPlan::Explain(_) | LogicalPlan::Analyze(_))
+            || super::sharing::shares(plan)
+            || !self.reads_only_the_catalogue(plan)
+        {
+            return;
+        }
+        let mut plans = self.plans.lock().unwrap_or_else(|e| e.into_inner());
+        if plans.len() >= PLANS_KEPT {
+            plans.clear();
+        }
+        plans.insert(sql.to_string(), (stamp, plan.clone()));
+    }
+
+    /// Whether every table `plan` scans is one the catalogue holds now.
+    fn reads_only_the_catalogue(&self, plan: &LogicalPlan) -> bool {
+        let schema = self
+            .information_schema
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let held = |s: &Arc<dyn TableSource>| {
+            self.tables
+                .values()
+                .chain(schema.iter().flat_map(|m| m.values()))
+                .any(|t| Arc::ptr_eq(t, s))
+        };
+        let mut all = true;
+        let _ = plan.apply_with_subqueries(|p| {
+            if let LogicalPlan::TableScan(s) = p {
+                all = held(&s.source);
+            }
+            Ok(if all {
+                TreeNodeRecursion::Continue
+            } else {
+                TreeNodeRecursion::Stop
+            })
+        });
+        all
+    }
+
+    fn forget_plans(&mut self) {
+        self.plans
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    /// The physical plan of an optimized `plan`.
+    pub async fn physical_plan(&self, plan: &LogicalPlan) -> DFResult<Arc<dyn ExecutionPlan>> {
+        // A partition a thread over a few kilobytes is a task each, the repartitions and merges
+        // between them, and the passes that place them: most of what a small statement cost.
+        if self.config.target_partitions() > 1 && super::smallinputs::small_statement(plan) {
+            let one = OnePartition {
+                inner: self,
+                config: &self.one_partition,
+                table_options: self.table_options.clone(),
+            };
+            return self.query_planner.create_physical_plan(plan, &one).await;
+        }
+        self.query_planner.create_physical_plan(plan, self).await
+    }
+
     pub fn limits(&self) -> &super::bound::Limits {
         &self.limits
     }
@@ -730,6 +833,7 @@ impl MiniSession {
     }
 
     pub fn build_information_schema(&mut self, hidden: fn(&str) -> bool) -> DFResult<()> {
+        self.forget_plans();
         self.hidden = hidden;
         *self
             .information_schema
@@ -805,6 +909,7 @@ impl MiniSession {
 
     /// A scalar function under its name and aliases, replacing any of the same name.
     pub fn register_udf(&mut self, f: Arc<ScalarUDF>) {
+        self.forget_plans();
         let f = super::bound::wrap(f, &self.limits);
         for a in f.aliases() {
             self.scalar.insert(a.clone(), Arc::clone(&f));
@@ -819,6 +924,7 @@ impl MiniSession {
 
     /// Bind `name` to `source`, or unbind it.
     pub fn set_table_source(&mut self, name: &str, source: Option<Arc<dyn TableSource>>) {
+        self.forget_plans();
         let old = match &source {
             Some(s) => self.tables.insert(name.to_string(), Arc::clone(s)),
             None => self.tables.remove(name),
@@ -829,6 +935,7 @@ impl MiniSession {
     /// `columns` of `table` are addresses: fixed binary inside a plan.
     pub fn note_addresses(&self, table: &str, columns: impl IntoIterator<Item = String>) {
         self.addresses.note(table, columns);
+        self.plans.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// Addresses are text from now on; whether they were fixed binary until now.
@@ -841,6 +948,7 @@ impl MiniSession {
     }
 
     pub fn register_table(&mut self, name: &str, table: Arc<dyn TableProvider>) {
+        self.forget_plans();
         let new = provider_as_source(table);
         let old = self.tables.insert(name.to_string(), Arc::clone(&new));
         self.renamed(name, old.as_ref(), Some(&new));
@@ -1211,9 +1319,7 @@ impl Session for MiniSession {
         logical_plan: &LogicalPlan,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
         let logical_plan = self.optimize(logical_plan)?;
-        self.query_planner
-            .create_physical_plan(&logical_plan, self)
-            .await
+        self.physical_plan(&logical_plan).await
     }
     fn create_physical_expr(
         &self,
@@ -1268,6 +1374,85 @@ impl Session for MiniSession {
             self.window.clone(),
             Arc::clone(&self.runtime),
         ))
+    }
+}
+
+/// The session a small statement is physically planned in: its own, at one target partition.
+struct OnePartition<'a> {
+    inner: &'a MiniSession,
+    config: &'a SessionConfig,
+    table_options: TableOptions,
+}
+
+#[async_trait]
+impl Session for OnePartition<'_> {
+    fn session_id(&self) -> &str {
+        self.inner.session_id()
+    }
+    fn config(&self) -> &SessionConfig {
+        self.config
+    }
+    fn catalog_list(&self) -> Arc<dyn CatalogProviderList> {
+        self.inner.catalog_list()
+    }
+    fn query_planner(&self) -> Arc<dyn QueryPlanner + Send + Sync> {
+        self.inner.query_planner()
+    }
+    fn optimize(&self, plan: &LogicalPlan) -> DFResult<LogicalPlan> {
+        self.inner.optimize(plan)
+    }
+    fn physical_optimizers(&self) -> &[Arc<dyn PhysicalOptimizerRule + Send + Sync>] {
+        self.inner.physical_optimizers()
+    }
+    async fn create_physical_plan(
+        &self,
+        logical_plan: &LogicalPlan,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        let logical_plan = self.inner.optimize(logical_plan)?;
+        self.inner
+            .query_planner
+            .create_physical_plan(&logical_plan, self)
+            .await
+    }
+    fn create_physical_expr(
+        &self,
+        expr: Expr,
+        df_schema: &DFSchema,
+    ) -> DFResult<Arc<dyn PhysicalExpr>> {
+        Session::create_physical_expr(self.inner, expr, df_schema)
+    }
+    fn scalar_functions(&self) -> &HashMap<String, Arc<ScalarUDF>> {
+        self.inner.scalar_functions()
+    }
+    fn higher_order_functions(&self) -> &HashMap<String, Arc<HigherOrderUDF>> {
+        Session::higher_order_functions(self.inner)
+    }
+    fn aggregate_functions(&self) -> &HashMap<String, Arc<AggregateUDF>> {
+        self.inner.aggregate_functions()
+    }
+    fn window_functions(&self) -> &HashMap<String, Arc<WindowUDF>> {
+        self.inner.window_functions()
+    }
+    fn extension_type_registry(&self) -> &ExtensionTypeRegistryRef {
+        self.inner.extension_type_registry()
+    }
+    fn runtime_env(&self) -> &Arc<RuntimeEnv> {
+        self.inner.runtime_env()
+    }
+    fn execution_props(&self) -> &ExecutionProps {
+        Session::execution_props(self.inner)
+    }
+    fn as_any(&self) -> &dyn Any {
+        Session::as_any(self.inner)
+    }
+    fn table_options(&self) -> &TableOptions {
+        &self.table_options
+    }
+    fn table_options_mut(&mut self) -> &mut TableOptions {
+        &mut self.table_options
+    }
+    fn task_ctx(&self) -> Arc<TaskContext> {
+        self.inner.task_ctx()
     }
 }
 
