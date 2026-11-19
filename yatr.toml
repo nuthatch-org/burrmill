@@ -11,12 +11,12 @@ cache = true
 
 [tasks.fmt]
 desc = "Format the tree"
-run = ["cargo fmt --all"]
+run = ["cargo fmt"]
 no_cache = true
 
 [tasks.fmt-check]
 desc = "Fail if the tree is unformatted"
-run = ["cargo fmt --all --check"]
+run = ["cargo fmt --check"]
 sources = ["crates/**/*.rs"]
 
 [tasks.fuzz-lock]
