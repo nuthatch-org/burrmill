@@ -126,6 +126,8 @@ pub struct MiniSession {
     config: SessionConfig,
     /// `config` at one target partition, for a statement over small inputs.
     one_partition: SessionConfig,
+    /// `config`'s options with one optimizer pass, for the same statements.
+    one_pass: Arc<ConfigOptions>,
     /// A statement scanning fewer bytes than this is planned in `one_partition`; zero, none is.
     small_bytes: std::sync::atomic::AtomicU64,
     runtime: Arc<RuntimeEnv>,
@@ -555,11 +557,14 @@ impl MiniSession {
         catalog_list.register_catalog("datafusion".into(), Arc::new(catalog));
         let mut one_partition = config.clone().with_target_partitions(1);
         one_partition.options_mut().optimizer.prefer_existing_union = true;
+        let mut one_pass = config.options().as_ref().clone();
+        one_pass.optimizer.max_passes = 1;
 
         Ok(Self {
             session_id: "s".into(),
             config,
             one_partition,
+            one_pass: Arc::new(one_pass),
             small_bytes: std::sync::atomic::AtomicU64::new(super::smallinputs::SMALL_BYTES),
             runtime,
             footers,
@@ -592,7 +597,7 @@ impl MiniSession {
                     // Before coercion: DuckDB's text comparisons depend on what was written.
                     Arc::new(super::dialect::DuckComparisons),
                     Arc::new(super::rule::CheckedShifts::default()),
-                    Arc::new(super::coercion::Coercion),
+                    Arc::new(super::coercion::First(Arc::new(super::coercion::Coercion))),
                     // Before DuckDB's `/` and rounding casts, which it refuses or replaces.
                     Arc::new(super::strict::StrictDecimals {
                         flag: Arc::clone(&strict),
@@ -612,13 +617,16 @@ impl MiniSession {
                     // After every rule that rewrites a subquery from outside it, as the checked
                     // sums trace a value to its cast; the rest then see each shared one once.
                     Arc::new(super::sharing::ShareRepeats),
+                    // Checked sums change their output type, so coercion runs again.
+                    Arc::new(super::coercion::Again(Arc::new(
+                        super::sharing::OverShared(Arc::new(super::coercion::Coercion)),
+                    ))),
                 ]
                 .into_iter()
                 .chain(
                     [
-                        // Checked sums change their output type, so coercion runs again.
-                        Arc::new(super::coercion::Coercion) as Arc<dyn AnalyzerRule + Send + Sync>,
-                        Arc::new(super::doubles::DuckDoubles::default()),
+                        Arc::new(super::doubles::DuckDoubles::default())
+                            as Arc<dyn AnalyzerRule + Send + Sync>,
                         Arc::new(super::onerow::SingleRowSubqueries::default()),
                         Arc::new(super::correlate::KeyedCorrelation),
                         Arc::new(super::correlate::SubqueriesBelowAggregates),
@@ -730,6 +738,35 @@ impl MiniSession {
             strict,
             deterministic,
         })
+    }
+
+    /// The context a statement's physical plan runs in. Operators never look a function up by
+    /// name, so the registries are left out rather than copied for each statement.
+    pub fn statement_ctx(&self) -> TaskContext {
+        TaskContext::new(
+            None,
+            self.session_id.clone(),
+            self.config.clone(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            Arc::clone(&self.runtime),
+        )
+    }
+
+    /// The optimizer's view of the session for `analyzed`. A small statement gets one pass, since
+    /// the second seldom changes a few nodes and costs as much as the first; not through a join,
+    /// where a limit reaches each side of a chain one pass at a time.
+    fn passes(&self, analyzed: &LogicalPlan) -> Passes<'_> {
+        let below = self.small_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        let one =
+            super::smallinputs::small_statement(analyzed, below) && !joins_or_subqueries(analyzed);
+        Passes {
+            session: self,
+            one,
+            start: Utc::now(),
+        }
     }
 
     /// What the analyzer reads besides the catalogue, as it stands now.
@@ -1081,37 +1118,6 @@ fn calls_mutable(plan: &LogicalPlan) -> bool {
     found
 }
 
-/// The session as one statement's optimizer sees it: `now()` is when the statement was planned,
-/// not when the session was opened.
-struct Statement<'a> {
-    session: &'a MiniSession,
-    start: DateTime<Utc>,
-}
-
-impl<'a> Statement<'a> {
-    fn now(session: &'a MiniSession) -> Self {
-        Self {
-            session,
-            start: Utc::now(),
-        }
-    }
-}
-
-impl OptimizerConfig for Statement<'_> {
-    fn query_execution_start_time(&self) -> Option<DateTime<Utc>> {
-        Some(self.start)
-    }
-    fn alias_generator(&self) -> &Arc<AliasGenerator> {
-        self.session.alias_generator()
-    }
-    fn options(&self) -> Arc<ConfigOptions> {
-        OptimizerConfig::options(self.session)
-    }
-    fn function_registry(&self) -> Option<&dyn FunctionRegistry> {
-        Some(self.session)
-    }
-}
-
 impl OptimizerConfig for MiniSession {
     fn query_execution_start_time(&self) -> Option<DateTime<Utc>> {
         Some(self.query_start)
@@ -1124,6 +1130,49 @@ impl OptimizerConfig for MiniSession {
     }
     fn function_registry(&self) -> Option<&dyn FunctionRegistry> {
         Some(self)
+    }
+}
+
+/// Whether `plan` holds a join, or a subquery the optimizer may make one.
+fn joins_or_subqueries(plan: &LogicalPlan) -> bool {
+    datafusion_common::tree_node::TreeNode::exists(plan, |p| {
+        Ok(matches!(p, LogicalPlan::Join(_) | LogicalPlan::Subquery(_))
+            || super::dag::holds(p, |e| {
+                matches!(
+                    e,
+                    Expr::ScalarSubquery(_)
+                        | Expr::Exists(_)
+                        | Expr::InSubquery(_)
+                        | Expr::SetComparison(_)
+                )
+            }))
+    })
+    .unwrap_or(true)
+}
+
+/// The session as the optimizer sees it, with one pass or the configured number.
+struct Passes<'a> {
+    session: &'a MiniSession,
+    one: bool,
+    /// What `now()` answers: when the statement was planned, not when the session was opened.
+    start: DateTime<Utc>,
+}
+
+impl OptimizerConfig for Passes<'_> {
+    fn query_execution_start_time(&self) -> Option<DateTime<Utc>> {
+        Some(self.start)
+    }
+    fn alias_generator(&self) -> &Arc<AliasGenerator> {
+        self.session.alias_generator()
+    }
+    fn options(&self) -> Arc<ConfigOptions> {
+        match self.one {
+            true => Arc::clone(&self.session.one_pass),
+            false => OptimizerConfig::options(self.session),
+        }
+    }
+    fn function_registry(&self) -> Option<&dyn FunctionRegistry> {
+        Some(self.session)
     }
 }
 
@@ -1345,9 +1394,8 @@ impl Session for MiniSession {
                 self.config.options().as_ref(),
                 |_, _| {},
             )?;
-            let optimized = self
-                .optimizer
-                .optimize(analyzed, &Statement::now(self), |_, _| {})?;
+            let passes = self.passes(&analyzed);
+            let optimized = self.optimizer.optimize(analyzed, &passes, |_, _| {})?;
             return super::narrow::narrow(optimized);
         };
         // As the umbrella crate's `SessionState::optimize`: without this, EXPLAIN shows only the
@@ -1364,14 +1412,13 @@ impl Session for MiniSession {
             },
         )?;
         stringified_plans.push(analyzed.to_stringified(PlanType::FinalAnalyzedLogicalPlan));
-        let optimized = self
-            .optimizer
-            .optimize(analyzed, &Statement::now(self), |p, rule| {
-                let plan_type = PlanType::OptimizedLogicalPlan {
-                    optimizer_name: rule.name().into(),
-                };
-                stringified_plans.push(p.to_stringified(plan_type));
-            })?;
+        let passes = self.passes(&analyzed);
+        let optimized = self.optimizer.optimize(analyzed, &passes, |p, rule| {
+            let plan_type = PlanType::OptimizedLogicalPlan {
+                optimizer_name: rule.name().into(),
+            };
+            stringified_plans.push(p.to_stringified(plan_type));
+        })?;
         let optimized = super::narrow::narrow(optimized)?;
         stringified_plans.push(optimized.to_stringified(PlanType::OptimizedLogicalPlan {
             optimizer_name: "narrow_joins".into(),

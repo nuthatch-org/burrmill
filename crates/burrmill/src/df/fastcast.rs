@@ -31,15 +31,18 @@ impl AnalyzerRule for FastTextCasts {
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
         super::dag::transform_up(plan, |p, _| {
-            let mut schema = DFSchema::empty();
-            for i in p.inputs() {
-                schema.merge(i.schema());
+            if !super::dag::holds(&p, is_cast) {
+                return Ok(Transformed::no(p));
             }
+            let schema = super::dag::input_schema(&p);
             let names_matter = matches!(
                 p,
                 LogicalPlan::Projection(_) | LogicalPlan::Aggregate(_) | LogicalPlan::Window(_)
             );
             let t = p.map_expressions(|e| {
+                if !e.exists(|x| Ok(is_cast(x)))? {
+                    return Ok(Transformed::no(e));
+                }
                 let name = e.schema_name().to_string();
                 let t = e.transform_up(|e| fast(e, &schema))?;
                 if t.transformed && names_matter && t.data.schema_name().to_string() != name {
@@ -56,6 +59,10 @@ impl AnalyzerRule for FastTextCasts {
         })
         .map(|t| t.data)
     }
+}
+
+fn is_cast(e: &Expr) -> bool {
+    matches!(e, Expr::Cast(_) | Expr::TryCast(_))
 }
 
 fn is_text(t: &DataType) -> bool {

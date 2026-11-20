@@ -1,0 +1,25 @@
+# dialect-latency on the thinkpad, 2026-11-20, #348: base d98222e (main), fix 7856c55. Both pinned to cores 16-23 (taskset),
+# DuckDB and Burrmill at 8 threads. REPEATS=31 WARMUP=5. Three rounds interleaved base, fix; fresh text (FRESH=1) then reused plans.
+base 1 fresh  LATENCY	statements=321	at_or_under=4	skipped=49	geomean_ratio=2.19	duck_sum_us=489851	burr_sum_us=974464	threads=8	repeats=31	fresh=true
+base 1 reused LATENCY	statements=321	at_or_under=222	skipped=49	geomean_ratio=0.85	duck_sum_us=415609	burr_sum_us=350695	threads=8	repeats=31	fresh=false
+fix 1 fresh  LATENCY	statements=321	at_or_under=4	skipped=49	geomean_ratio=2.00	duck_sum_us=510354	burr_sum_us=945507	threads=8	repeats=31	fresh=true
+fix 1 reused LATENCY	statements=321	at_or_under=252	skipped=49	geomean_ratio=0.79	duck_sum_us=412156	burr_sum_us=330638	threads=8	repeats=31	fresh=false
+base 2 fresh  LATENCY	statements=321	at_or_under=4	skipped=49	geomean_ratio=2.15	duck_sum_us=511298	burr_sum_us=998029	threads=8	repeats=31	fresh=true
+base 2 reused LATENCY	statements=321	at_or_under=225	skipped=49	geomean_ratio=0.84	duck_sum_us=416256	burr_sum_us=347402	threads=8	repeats=31	fresh=false
+fix 2 fresh  LATENCY	statements=321	at_or_under=5	skipped=49	geomean_ratio=2.01	duck_sum_us=491998	burr_sum_us=925418	threads=8	repeats=31	fresh=true
+fix 2 reused LATENCY	statements=321	at_or_under=250	skipped=49	geomean_ratio=0.79	duck_sum_us=411062	burr_sum_us=330520	threads=8	repeats=31	fresh=false
+base 3 fresh  LATENCY	statements=321	at_or_under=3	skipped=49	geomean_ratio=2.20	duck_sum_us=487791	burr_sum_us=970854	threads=8	repeats=31	fresh=true
+base 3 reused LATENCY	statements=321	at_or_under=235	skipped=49	geomean_ratio=0.83	duck_sum_us=414650	burr_sum_us=343844	threads=8	repeats=31	fresh=false
+fix 3 fresh  LATENCY	statements=321	at_or_under=5	skipped=49	geomean_ratio=1.98	duck_sum_us=517195	burr_sum_us=963169	threads=8	repeats=31	fresh=true
+fix 3 reused LATENCY	statements=321	at_or_under=246	skipped=49	geomean_ratio=0.81	duck_sum_us=414701	burr_sum_us=340635	threads=8	repeats=31	fresh=false
+
+# checks on the fix
+parity base: DIALECT	cases=370	differing=0
+parity fix: DIALECT	cases=370	differing=0
+determinism, CASES=10000, base and fix alike: 10000 cases over 18 engines: 9444 byte-identical, 556 refused everywhere, 0 differ
+generated-folds, BURRMILL_CASES=3000: test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.77s
+
+# Where a fresh statement's time still goes, the fix, by stage (a probe timing each rule, thread CPU on the
+# statement thread, the box loaded by another user's builds, so read the shares): analyze+optimize 1.23 ms,
+# physical 0.68 (EnsureRequirements 0.21), parse 0.46, execute 0.30. Against the base under the same probe,
+# analyze+optimize fell 18 to 23% in each of three rounds and physical did not move.

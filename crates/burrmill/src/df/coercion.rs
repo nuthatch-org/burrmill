@@ -5,7 +5,7 @@
 //! `analyze_internal` in `datafusion-optimizer` 55.2.0, given to [`super::dag::transform_up`], less
 //! the `MERGE` target, which no statement here reaches.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
@@ -32,6 +32,48 @@ impl AnalyzerRule for Coercion {
         }
         static EMPTY: LazyLock<DFSchema> = LazyLock::new(DFSchema::empty);
         super::dag::transform_up(plan, |p, below| coerce(&EMPTY, p, below)).map(|t| t.data)
+    }
+}
+
+thread_local! {
+    /// The plan as the first coercion left it, for the second on the same thread.
+    static COERCED: std::cell::RefCell<Option<LogicalPlan>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The first coercion, remembering what it made.
+#[derive(Debug)]
+pub struct First(pub Arc<dyn AnalyzerRule + Send + Sync>);
+
+impl AnalyzerRule for First {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn analyze(&self, plan: LogicalPlan, config: &ConfigOptions) -> Result<LogicalPlan> {
+        let plan = self.0.analyze(plan, config)?;
+        COERCED.with(|c| *c.borrow_mut() = Some(plan.clone()));
+        Ok(plan)
+    }
+}
+
+/// The second, left out where no rule since the first changed the plan: coercion is idempotent,
+/// and on most statements nothing between the two does.
+#[derive(Debug)]
+pub struct Again(pub Arc<dyn AnalyzerRule + Send + Sync>);
+
+impl AnalyzerRule for Again {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn analyze(&self, plan: LogicalPlan, config: &ConfigOptions) -> Result<LogicalPlan> {
+        if COERCED
+            .with(|c| c.borrow_mut().take())
+            .is_some_and(|c| c == plan)
+        {
+            return Ok(plan);
+        }
+        self.0.analyze(plan, config)
     }
 }
 

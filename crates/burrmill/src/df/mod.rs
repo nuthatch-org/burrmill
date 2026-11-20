@@ -1004,8 +1004,7 @@ impl Engine {
         // A host sees an address as the text it wrote.
         let physical = addresses::rendered(physical, &self.session).map_err(df_err)?;
         // The plan's operators find the statement's token in the context it runs under.
-        let ctx = Arc::try_unwrap(self.session.task_ctx())
-            .map_err(|_| BurrmillError::Substrate("a task context already shared".into()))?;
+        let ctx = self.session.statement_ctx();
         let config = ctx
             .session_config()
             .clone()

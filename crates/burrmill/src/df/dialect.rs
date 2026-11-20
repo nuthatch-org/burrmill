@@ -71,6 +71,18 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
     Ok(parsed)
 }
 
+/// Whether `sql` may hold one of `words` as a keyword: false only for ASCII text that does not
+/// contain any of them in any case. Not for other text, since `ı` upper-cases to `I`, and a
+/// keyword is matched upper-cased.
+pub(crate) fn may_hold_keyword(sql: &str, words: &[&str]) -> bool {
+    !sql.is_ascii()
+        || words.iter().any(|w| {
+            sql.as_bytes()
+                .windows(w.len())
+                .any(|x| x.eq_ignore_ascii_case(w.as_bytes()))
+        })
+}
+
 /// The parser's own words, without the span and diagnostic DataFusion wraps around them.
 fn parser_text(e: &datafusion_common::DataFusionError) -> String {
     match e.find_root() {
@@ -4003,6 +4015,17 @@ impl ScalarUDFImpl for Decode {
 #[cfg(test)]
 mod tests {
     use super::Known;
+
+    #[test]
+    fn a_keyword_is_looked_for_in_any_case_and_never_ruled_out_in_other_text() {
+        use super::may_hold_keyword as may;
+        assert!(may("select 1 UNION all select 2", &["union"]));
+        assert!(may("SELECT 1 UnIoN SELECT 2", &["union"]));
+        assert!(!may("SELECT a FROM t", &["union", "asof"]));
+        // sqlparser matches a keyword upper-cased, and `ı` upper-cases to `I`.
+        assert_eq!("UNıON".to_uppercase(), "UNION");
+        assert!(may("SELECT 1 UNıON SELECT 2", &["union"]));
+    }
 
     fn cols(c: &[&str]) -> Vec<String> {
         c.iter().map(|s| s.to_string()).collect()
