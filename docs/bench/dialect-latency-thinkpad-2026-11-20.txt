@@ -1,0 +1,61 @@
+# dialect-latency on the thinkpad, 2026-11-20, #348: base d98222e (main), fix 7856c55. Both pinned to cores 16-23 (taskset),
+# DuckDB and Burrmill at 8 threads. REPEATS=31 WARMUP=5. Three rounds interleaved base, fix; fresh text (FRESH=1) then reused plans.
+base 1 fresh  LATENCY	statements=321	at_or_under=4	skipped=49	geomean_ratio=2.19	duck_sum_us=489851	burr_sum_us=974464	threads=8	repeats=31	fresh=true
+base 1 reused LATENCY	statements=321	at_or_under=222	skipped=49	geomean_ratio=0.85	duck_sum_us=415609	burr_sum_us=350695	threads=8	repeats=31	fresh=false
+fix 1 fresh  LATENCY	statements=321	at_or_under=4	skipped=49	geomean_ratio=2.00	duck_sum_us=510354	burr_sum_us=945507	threads=8	repeats=31	fresh=true
+fix 1 reused LATENCY	statements=321	at_or_under=252	skipped=49	geomean_ratio=0.79	duck_sum_us=412156	burr_sum_us=330638	threads=8	repeats=31	fresh=false
+base 2 fresh  LATENCY	statements=321	at_or_under=4	skipped=49	geomean_ratio=2.15	duck_sum_us=511298	burr_sum_us=998029	threads=8	repeats=31	fresh=true
+base 2 reused LATENCY	statements=321	at_or_under=225	skipped=49	geomean_ratio=0.84	duck_sum_us=416256	burr_sum_us=347402	threads=8	repeats=31	fresh=false
+fix 2 fresh  LATENCY	statements=321	at_or_under=5	skipped=49	geomean_ratio=2.01	duck_sum_us=491998	burr_sum_us=925418	threads=8	repeats=31	fresh=true
+fix 2 reused LATENCY	statements=321	at_or_under=250	skipped=49	geomean_ratio=0.79	duck_sum_us=411062	burr_sum_us=330520	threads=8	repeats=31	fresh=false
+base 3 fresh  LATENCY	statements=321	at_or_under=3	skipped=49	geomean_ratio=2.20	duck_sum_us=487791	burr_sum_us=970854	threads=8	repeats=31	fresh=true
+base 3 reused LATENCY	statements=321	at_or_under=235	skipped=49	geomean_ratio=0.83	duck_sum_us=414650	burr_sum_us=343844	threads=8	repeats=31	fresh=false
+fix 3 fresh  LATENCY	statements=321	at_or_under=5	skipped=49	geomean_ratio=1.98	duck_sum_us=517195	burr_sum_us=963169	threads=8	repeats=31	fresh=true
+fix 3 reused LATENCY	statements=321	at_or_under=246	skipped=49	geomean_ratio=0.81	duck_sum_us=414701	burr_sum_us=340635	threads=8	repeats=31	fresh=false
+
+# checks on the fix
+parity base: DIALECT	cases=370	differing=0
+parity fix: DIALECT	cases=370	differing=0
+determinism, CASES=10000, base and fix alike: 10000 cases over 18 engines: 9444 byte-identical, 556 refused everywhere, 0 differ
+generated-folds, BURRMILL_CASES=3000: test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.77s
+
+# Where a fresh statement's time still goes, the fix, by stage (a probe timing each rule, thread CPU on the
+# statement thread, the box loaded by another user's builds, so read the shares): analyze+optimize 1.23 ms,
+# physical 0.68 (EnsureRequirements 0.21), parse 0.46, execute 0.30. Against the base under the same probe,
+# analyze+optimize fell 18 to 23% in each of three rounds and physical did not move.
+
+# Round two, the served-surface check on the engine's own parse and the known names shared: a = 795cfae, b = the
+# branch head. Same cores, rounds and repeats.
+parity b: DIALECT	cases=370	differing=0
+a 1 fresh  LATENCY	statements=321	at_or_under=5	skipped=49	geomean_ratio=2.01	duck_sum_us=497355	burr_sum_us=928260	threads=8	repeats=31	fresh=true
+a 1 reused LATENCY	statements=321	at_or_under=251	skipped=49	geomean_ratio=0.77	duck_sum_us=410405	burr_sum_us=327677	threads=8	repeats=31	fresh=false
+b 1 fresh  LATENCY	statements=321	at_or_under=5	skipped=49	geomean_ratio=1.93	duck_sum_us=500658	burr_sum_us=911726	threads=8	repeats=31	fresh=true
+b 1 reused LATENCY	statements=321	at_or_under=250	skipped=49	geomean_ratio=0.79	duck_sum_us=411865	burr_sum_us=337106	threads=8	repeats=31	fresh=false
+a 2 fresh  LATENCY	statements=321	at_or_under=6	skipped=49	geomean_ratio=1.98	duck_sum_us=493637	burr_sum_us=912068	threads=8	repeats=31	fresh=true
+a 2 reused LATENCY	statements=321	at_or_under=246	skipped=49	geomean_ratio=0.80	duck_sum_us=411770	burr_sum_us=332824	threads=8	repeats=31	fresh=false
+b 2 fresh  LATENCY	statements=321	at_or_under=7	skipped=49	geomean_ratio=1.94	duck_sum_us=504834	burr_sum_us=916374	threads=8	repeats=31	fresh=true
+b 2 reused LATENCY	statements=321	at_or_under=251	skipped=49	geomean_ratio=0.78	duck_sum_us=413768	burr_sum_us=329832	threads=8	repeats=31	fresh=false
+a 3 fresh  LATENCY	statements=321	at_or_under=5	skipped=49	geomean_ratio=2.00	duck_sum_us=510576	burr_sum_us=949025	threads=8	repeats=31	fresh=true
+a 3 reused LATENCY	statements=321	at_or_under=255	skipped=49	geomean_ratio=0.79	duck_sum_us=418791	burr_sum_us=341252	threads=8	repeats=31	fresh=false
+b 3 fresh  LATENCY	statements=321	at_or_under=5	skipped=49	geomean_ratio=1.95	duck_sum_us=507243	burr_sum_us=924634	threads=8	repeats=31	fresh=true
+b 3 reused LATENCY	statements=321	at_or_under=253	skipped=49	geomean_ratio=0.79	duck_sum_us=418417	burr_sum_us=337075	threads=8	repeats=31	fresh=false
+determinism on b, CASES=10000: 10000 cases over 18 engines: 9444 byte-identical, 556 refused everywhere, 0 differ
+nuthatch serve::tests on b, --features graph,counter,crash-points: 212 passed; 0 failed; 1 ignored
+
+# Round three, EnsureRequirements without its distribution pass where a plan is one partition throughout: a = 0ad79fd,
+# b = the branch head. Same cores, rounds and repeats.
+parity b: DIALECT	cases=370	differing=0
+a 1 fresh  LATENCY	statements=321	at_or_under=6	skipped=49	geomean_ratio=1.92	duck_sum_us=512701	burr_sum_us=916028	threads=8	repeats=31	fresh=true
+a 1 reused LATENCY	statements=321	at_or_under=254	skipped=49	geomean_ratio=0.79	duck_sum_us=411997	burr_sum_us=330373	threads=8	repeats=31	fresh=false
+b 1 fresh  LATENCY	statements=321	at_or_under=7	skipped=49	geomean_ratio=1.85	duck_sum_us=492912	burr_sum_us=856979	threads=8	repeats=31	fresh=true
+b 1 reused LATENCY	statements=321	at_or_under=277	skipped=49	geomean_ratio=0.72	duck_sum_us=413582	burr_sum_us=313087	threads=8	repeats=31	fresh=false
+a 2 fresh  LATENCY	statements=321	at_or_under=8	skipped=49	geomean_ratio=1.92	duck_sum_us=504096	burr_sum_us=903570	threads=8	repeats=31	fresh=true
+a 2 reused LATENCY	statements=321	at_or_under=249	skipped=49	geomean_ratio=0.79	duck_sum_us=414580	burr_sum_us=339310	threads=8	repeats=31	fresh=false
+b 2 fresh  LATENCY	statements=321	at_or_under=8	skipped=49	geomean_ratio=1.87	duck_sum_us=493701	burr_sum_us=865212	threads=8	repeats=31	fresh=true
+b 2 reused LATENCY	statements=321	at_or_under=280	skipped=49	geomean_ratio=0.71	duck_sum_us=410961	burr_sum_us=309482	threads=8	repeats=31	fresh=false
+a 3 fresh  LATENCY	statements=321	at_or_under=6	skipped=49	geomean_ratio=1.95	duck_sum_us=504694	burr_sum_us=929483	threads=8	repeats=31	fresh=true
+a 3 reused LATENCY	statements=321	at_or_under=248	skipped=49	geomean_ratio=0.80	duck_sum_us=410244	burr_sum_us=329572	threads=8	repeats=31	fresh=false
+b 3 fresh  LATENCY	statements=321	at_or_under=5	skipped=49	geomean_ratio=1.88	duck_sum_us=485791	burr_sum_us=861122	threads=8	repeats=31	fresh=true
+b 3 reused LATENCY	statements=321	at_or_under=279	skipped=49	geomean_ratio=0.70	duck_sum_us=411677	burr_sum_us=307676	threads=8	repeats=31	fresh=false
+10000 cases over 18 engines: 9444 byte-identical, 556 refused everywhere, 0 differ
+test result: ok. 212 passed; 0 failed; 1 ignored; 0 measured; 2551 filtered out; finished in 77.62s

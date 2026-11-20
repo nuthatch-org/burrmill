@@ -76,6 +76,7 @@ mod ordered_agg;
 mod printf;
 mod rangebounds;
 mod rangejoin;
+mod requirements;
 mod rule;
 mod sequential;
 mod session;
@@ -773,9 +774,6 @@ impl Engine {
         // Parsed first, so malformed SQL is a syntax error as DuckDB reports it, not a refusal.
         self.refuse_long_sql(sql)?;
         let cached = self.cached_plan(sql, params);
-        if cached.is_none() {
-            refuse_hidden_names(sql)?;
-        }
         let admitted = std::sync::OnceLock::new();
         // The statement is planned and runs on a thread of its own, its batches come back here,
         // and `f` stays on the caller's. A host runtime will not be blocked; and without one,
@@ -897,10 +895,7 @@ impl Engine {
         let token = crate::CancelToken::under(&[&self.cancel], None);
         let planned = match self.cached_plan(sql, params) {
             Some(p) => Planned::Optimized(p),
-            None => {
-                refuse_hidden_names(sql)?;
-                Planned::Fresh(self.plan_fresh(sql, params, &token)?)
-            }
+            None => Planned::Fresh(self.plan_fresh(sql, params, &token)?),
         };
         if token.is_cancelled() {
             return Err(BurrmillError::Cancelled);
@@ -924,7 +919,7 @@ impl Engine {
         params: &[Param],
         token: &crate::CancelToken,
     ) -> Result<datafusion_expr::LogicalPlan> {
-        let logical = plan_query_on_stack(&self.session, sql, token)?;
+        let logical = plan_on_stack(&self.session, sql, token, true)?;
         refuse_non_query(sql)?;
         self.refuse_explain(&logical)?;
         params::bind(logical, params)
@@ -1004,8 +999,7 @@ impl Engine {
         // A host sees an address as the text it wrote.
         let physical = addresses::rendered(physical, &self.session).map_err(df_err)?;
         // The plan's operators find the statement's token in the context it runs under.
-        let ctx = Arc::try_unwrap(self.session.task_ctx())
-            .map_err(|_| BurrmillError::Substrate("a task context already shared".into()))?;
+        let ctx = self.session.statement_ctx();
         let config = ctx
             .session_config()
             .clone()
@@ -1309,12 +1303,22 @@ fn plan_query_on_stack(
     sql: &str,
     cancel: &crate::CancelToken,
 ) -> Result<datafusion_expr::LogicalPlan> {
+    plan_on_stack(session, sql, cancel, false)
+}
+
+/// `served` refuses, from the same parse, what the SQL surface does not serve.
+fn plan_on_stack(
+    session: &MiniSession,
+    sql: &str,
+    cancel: &crate::CancelToken,
+    served: bool,
+) -> Result<datafusion_expr::LogicalPlan> {
     #[cfg(not(target_arch = "wasm32"))]
     debug_assert!(matches!(
         std::thread::current().name(),
         Some("burrmill-plan" | "burrmill-statement")
     ));
-    let (stmt, names) = dialect::parse(sql, &session.known_names())?;
+    let (stmt, names) = dialect::parse(sql, &session.known_names(), served)?;
     refuse_df_statement(&stmt)?;
     refuse_wide_literals(&stmt)?;
     if cancel.is_cancelled() {
@@ -1412,6 +1416,7 @@ fn leading_keyword(sql: &str) -> &str {
 
 /// `__raw`, `__hot` and `__union` are refused when the walk can see them. A statement it cannot
 /// parse is left to the engine parser, which accepts more of DuckDB than the walk does (#10).
+#[cfg(not(target_arch = "wasm32"))]
 fn refuse_hidden_names(sql: &str) -> Result<()> {
     crate::inspect::unserved(sql).map_or(Ok(()), Err)
 }

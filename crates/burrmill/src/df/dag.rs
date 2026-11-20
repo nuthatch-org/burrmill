@@ -14,11 +14,40 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
-use datafusion_common::Result;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+use datafusion_common::{DFSchema, DFSchemaRef, Result};
 use datafusion_expr::expr::{Exists, InSubquery, SetComparison};
 use datafusion_expr::logical_plan::{Distinct, EmptyRelation, Subquery};
 use datafusion_expr::{Expr, LogicalPlan};
+
+/// Whether any expression of `p` holds a sub-expression `f` picks: a read, so a rule can pass over
+/// a node it would not change without building anything for it.
+pub(crate) fn holds(p: &LogicalPlan, f: impl Fn(&Expr) -> bool) -> bool {
+    let mut found = false;
+    let _ = p.apply_expressions(|e| {
+        found = e.exists(|x| Ok(f(x)))?;
+        Ok(if found {
+            TreeNodeRecursion::Stop
+        } else {
+            TreeNodeRecursion::Continue
+        })
+    });
+    found
+}
+
+/// The schema `p`'s expressions are typed against: its one input's, shared, or its inputs' merged.
+pub(crate) fn input_schema(p: &LogicalPlan) -> DFSchemaRef {
+    match p.inputs().as_slice() {
+        [one] => Arc::clone(one.schema()),
+        all => {
+            let mut schema = DFSchema::empty();
+            for i in all {
+                schema.merge(i.schema());
+            }
+            Arc::new(schema)
+        }
+    }
+}
 
 /// `f` over every node of `plan` and of the subqueries in its expressions, bottom up, as
 /// `LogicalPlan::transform_up_with_subqueries`: a node is given to `f` with its inputs and

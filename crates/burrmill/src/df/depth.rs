@@ -48,6 +48,9 @@ pub(crate) fn check_statement(stmt: &sq::Statement) -> Result<()> {
 /// `UNION` / `INTERSECT` / `EXCEPT` as keywords, not as text. The tokenizer is iterative.
 /// A comment or a string containing the word is not a keyword, and a quoted identifier is not either.
 pub(crate) fn refuse_set_op_tokens(sql: &str) -> Result<()> {
+    if !super::dialect::may_hold_keyword(sql, &["union", "intersect", "except"]) {
+        return Ok(());
+    }
     let mut tokenizer = Tokenizer::new(&super::dialect::Duck, sql);
     let tokens = match tokenizer.tokenize() {
         Ok(tokens) => tokens,

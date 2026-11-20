@@ -152,18 +152,30 @@ pub(crate) fn hidden_name(sql: &str) -> Option<String> {
 /// Why the engine's surface refuses what `sql` reaches before planning it, from one parse: the
 /// first hidden name any statement names, then a table position [`reach`] would not serve. A
 /// statement that does not parse is left to the engine's parser.
-#[cfg(feature = "datafusion")]
+#[cfg(all(feature = "datafusion", not(target_arch = "wasm32")))]
 pub(crate) fn unserved(sql: &str) -> Option<BurrmillError> {
     let stmts = parse(&crate::listcomp::before_parse(sql)).ok()?;
-    if let Some(table) = hidden_in(&stmts) {
+    let query = match stmts.as_slice() {
+        [q @ Statement::Query(_)] => Some(q),
+        _ => None,
+    };
+    unserved_parsed(stmts.iter(), query)
+}
+
+/// As [`unserved`], over statements already parsed as written: `all` for hidden names, and
+/// `query`, the statement when it is a single query, for the table positions.
+#[cfg(feature = "datafusion")]
+pub(crate) fn unserved_parsed<'a>(
+    all: impl IntoIterator<Item = &'a Statement>,
+    query: Option<&Statement>,
+) -> Option<BurrmillError> {
+    if let Some(table) = hidden_in(all) {
         return Some(refused(format!(
             "`{table}` is not a table this surface serves - the SQL surface serves this nest's \
              tables and views only"
         )));
     }
-    let [stmt @ Statement::Query(_)] = stmts.as_slice() else {
-        return None;
-    };
+    let stmt = query?;
     let mut w = Walk {
         reach: Reach::default(),
         bad: None,
@@ -175,7 +187,7 @@ pub(crate) fn unserved(sql: &str) -> Option<BurrmillError> {
 }
 
 #[cfg(feature = "datafusion")]
-fn hidden_in(stmts: &[Statement]) -> Option<String> {
+fn hidden_in<'a>(stmts: impl IntoIterator<Item = &'a Statement>) -> Option<String> {
     struct Find(Option<String>);
     impl Visitor for Find {
         type Break = ();

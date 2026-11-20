@@ -71,6 +71,18 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
     Ok(parsed)
 }
 
+/// Whether `sql` may hold one of `words` as a keyword: false only for ASCII text that does not
+/// contain any of them in any case. Not for other text, since `ı` upper-cases to `I`, and a
+/// keyword is matched upper-cased.
+pub(crate) fn may_hold_keyword(sql: &str, words: &[&str]) -> bool {
+    !sql.is_ascii()
+        || words.iter().any(|w| {
+            sql.as_bytes()
+                .windows(w.len())
+                .any(|x| x.eq_ignore_ascii_case(w.as_bytes()))
+        })
+}
+
 /// The parser's own words, without the span and diagnostic DataFusion wraps around them.
 fn parser_text(e: &datafusion_common::DataFusionError) -> String {
     match e.find_root() {
@@ -166,9 +178,31 @@ fn refuse_asof(
 }
 
 /// Parse with DuckDB's dialect and rewrite into what DataFusion plans. The result columns' DuckDB
-/// names come back too, taken from the statement as written, before any rewrite.
-pub fn parse(sql: &str, known: &Known) -> Result<(DfStatement, Vec<Option<String>>)> {
+/// names come back too, taken from the statement as written, before any rewrite. `served` first
+/// refuses what the SQL surface does not serve, as [`crate::inspect::unserved`]
+/// would, from the statements as written and this one parse.
+pub fn parse(sql: &str, known: &Known, served: bool) -> Result<(DfStatement, Vec<Option<String>>)> {
     let mut stmts = parse_statements(sql)?;
+    if served {
+        fn written<'a>(s: &'a DfStatement, out: &mut Vec<&'a sq::Statement>) {
+            match s {
+                DfStatement::Statement(s) => out.push(s.as_ref()),
+                DfStatement::Explain(e) => written(e.statement.as_ref(), out),
+                _ => {}
+            }
+        }
+        let mut all = Vec::new();
+        stmts.iter().for_each(|s| written(s, &mut all));
+        let query = match stmts.as_slice() {
+            [DfStatement::Statement(q)] if matches!(q.as_ref(), sq::Statement::Query(_)) => {
+                Some(q.as_ref())
+            }
+            _ => None,
+        };
+        if let Some(e) = crate::inspect::unserved_parsed(all, query) {
+            return Err(e);
+        }
+    }
     if stmts.len() > 1 {
         return Err(BurrmillError::NotAllowed(format!(
             "{} statements where one is allowed",
@@ -4004,6 +4038,17 @@ impl ScalarUDFImpl for Decode {
 mod tests {
     use super::Known;
 
+    #[test]
+    fn a_keyword_is_looked_for_in_any_case_and_never_ruled_out_in_other_text() {
+        use super::may_hold_keyword as may;
+        assert!(may("select 1 UNION all select 2", &["union"]));
+        assert!(may("SELECT 1 UnIoN SELECT 2", &["union"]));
+        assert!(!may("SELECT a FROM t", &["union", "asof"]));
+        // sqlparser matches a keyword upper-cased, and `ı` upper-cases to `I`.
+        assert_eq!("UNıON".to_uppercase(), "UNION");
+        assert!(may("SELECT 1 UNıON SELECT 2", &["union"]));
+    }
+
     fn cols(c: &[&str]) -> Vec<String> {
         c.iter().map(|s| s.to_string()).collect()
     }
@@ -4035,7 +4080,7 @@ mod tests {
             let rewritten = (1..=3).any(|n| {
                 let args = ["a", "b", "c"][..n].join(", ");
                 let sql = format!("SELECT {name}({args}) FROM t");
-                let (stmt, _) = super::parse(&sql, &Known::default()).unwrap();
+                let (stmt, _) = super::parse(&sql, &Known::default(), false).unwrap();
                 !stmt
                     .to_string()
                     .to_ascii_lowercase()

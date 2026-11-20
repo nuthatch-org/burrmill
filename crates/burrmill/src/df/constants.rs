@@ -27,21 +27,24 @@ impl AnalyzerRule for MoveConstants {
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
         super::dag::transform_up(plan, |p, _| {
-            let mut schema = DFSchema::empty();
-            for i in p.inputs() {
-                schema.merge(i.schema());
+            if !super::dag::holds(&p, could_move) {
+                return Ok(Transformed::no(p));
             }
+            let schema = super::dag::input_schema(&p);
             let names_matter = matches!(
                 p,
                 LogicalPlan::Projection(_) | LogicalPlan::Aggregate(_) | LogicalPlan::Window(_)
             );
             let t = p.map_expressions(|e| {
+                if !e.exists(|x| Ok(could_move(x)))? {
+                    return Ok(Transformed::no(e));
+                }
                 let name = e.schema_name().to_string();
                 let t = e.transform_up(|e| {
                     if let Some(split) = between(&e, &schema)? {
                         return Ok(Transformed::yes(split));
                     }
-                    Ok(match settled(e.clone(), &schema)? {
+                    Ok(match settled(&e, &schema)? {
                         Some(n) => Transformed::yes(n),
                         None => Transformed::no(e),
                     })
@@ -63,13 +66,27 @@ impl AnalyzerRule for MoveConstants {
 }
 
 /// `e` with its constants moved as far as they go, if they moved at all.
-fn settled(mut e: Expr, schema: &DFSchema) -> Result<Option<Expr>> {
-    let mut changed = false;
+fn settled(e: &Expr, schema: &DFSchema) -> Result<Option<Expr>> {
+    let Some(mut e) = moved(e, schema)? else {
+        return Ok(None);
+    };
     while let Some(n) = moved(&e, schema)? {
         e = n;
-        changed = true;
     }
-    Ok(changed.then_some(e))
+    Ok(Some(e))
+}
+
+/// A shape `between` or `moved` may rewrite: a BETWEEN, or a comparison with arithmetic on a side.
+fn could_move(e: &Expr) -> bool {
+    match e {
+        Expr::Between(_) => true,
+        Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
+            op.supports_propagation()
+                && (matches!(left.as_ref(), Expr::BinaryExpr(_))
+                    || matches!(right.as_ref(), Expr::BinaryExpr(_)))
+        }
+        _ => false,
+    }
 }
 
 /// `x [NOT] BETWEEN a AND b` over integer arithmetic with a constant, as the two comparisons
@@ -89,7 +106,7 @@ fn between(e: &Expr, schema: &DFSchema) -> Result<Option<Expr>> {
     }
     let side = |op, bound: &Expr| -> Result<Expr> {
         let c = Expr::BinaryExpr(BinaryExpr::new(b.expr.clone(), op, Box::new(bound.clone())));
-        Ok(settled(c.clone(), schema)?.unwrap_or(c))
+        Ok(settled(&c, schema)?.unwrap_or(c))
     };
     let both = side(Operator::GtEq, &b.low)?.and(side(Operator::LtEq, &b.high)?);
     Ok(Some(if b.negated { !both } else { both }))

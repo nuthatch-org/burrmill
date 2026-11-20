@@ -56,6 +56,9 @@ const STRUCTURAL: &[Keyword] = &[
 /// `sql` with each `ASOF` before `[LEFT [OUTER]] JOIN` blanked to spaces, and where each such
 /// join's relation starts. Strings and comments are the tokenizer's, so never touched.
 pub(crate) fn blank(sql: &str) -> (String, Vec<Location>) {
+    if !super::dialect::may_hold_keyword(sql, &["asof"]) {
+        return (sql.to_string(), Vec::new());
+    }
     let dialect = super::duck_dialect();
     let Ok(tokens) = Tokenizer::new(&dialect, sql).tokenize_with_location() else {
         return (sql.to_string(), Vec::new());
