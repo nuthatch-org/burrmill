@@ -15,7 +15,7 @@ use datafusion_catalog::{
 use datafusion_common::alias::AliasGenerator;
 use datafusion_common::config::{ConfigOptions, TableOptions};
 use datafusion_common::display::{PlanType, ToStringifiedPlan};
-use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{
     DFSchema, Result as DFResult, TableReference, plan_datafusion_err, resources_datafusion_err,
 };
@@ -750,12 +750,14 @@ impl MiniSession {
         (*stamp == self.stamp()).then(|| plan.clone())
     }
 
-    /// Keeps `plan`, optimized under `stamp`, for `sql` run again. A shared subquery's nodes hold
-    /// what its run computed, and a `range` holds rows charged to the pool, so a plan with either
-    /// is planned afresh each time.
-    pub fn keep_plan(&self, sql: &str, stamp: Stamp, plan: &LogicalPlan) {
+    /// Keeps `plan`, optimized under `stamp` from `written`, for `sql` run again. A shared
+    /// subquery's nodes hold what its run computed, and a `range` holds rows charged to the pool,
+    /// so a plan with either is planned afresh each time; so is one calling `now()` or anything
+    /// else not immutable, which the optimizer folds to what it answered this time.
+    pub fn keep_plan(&self, sql: &str, stamp: Stamp, written: &LogicalPlan, plan: &LogicalPlan) {
         if sql.len() > PLANNED_SQL_BYTES
             || matches!(plan, LogicalPlan::Explain(_) | LogicalPlan::Analyze(_))
+            || calls_mutable(written)
             || super::sharing::shares(plan)
             || !self.reads_only_the_catalogue(plan)
         {
@@ -1050,6 +1052,66 @@ impl QueryPlanner for MiniQueryPlanner {
     }
 }
 
+/// Whether `plan` calls a function that is not immutable, subqueries included.
+fn calls_mutable(plan: &LogicalPlan) -> bool {
+    use datafusion_expr::Volatility;
+    let mut found = false;
+    let _ = plan.apply_with_subqueries(|p| {
+        let _ = p.apply_expressions(|e| {
+            found = TreeNode::exists(e, |x| {
+                Ok(match x {
+                    Expr::ScalarFunction(f) => {
+                        f.func.signature().volatility != Volatility::Immutable
+                    }
+                    _ => false,
+                })
+            })?;
+            Ok(if found {
+                TreeNodeRecursion::Stop
+            } else {
+                TreeNodeRecursion::Continue
+            })
+        });
+        Ok(if found {
+            TreeNodeRecursion::Stop
+        } else {
+            TreeNodeRecursion::Continue
+        })
+    });
+    found
+}
+
+/// The session as one statement's optimizer sees it: `now()` is when the statement was planned,
+/// not when the session was opened.
+struct Statement<'a> {
+    session: &'a MiniSession,
+    start: DateTime<Utc>,
+}
+
+impl<'a> Statement<'a> {
+    fn now(session: &'a MiniSession) -> Self {
+        Self {
+            session,
+            start: Utc::now(),
+        }
+    }
+}
+
+impl OptimizerConfig for Statement<'_> {
+    fn query_execution_start_time(&self) -> Option<DateTime<Utc>> {
+        Some(self.start)
+    }
+    fn alias_generator(&self) -> &Arc<AliasGenerator> {
+        self.session.alias_generator()
+    }
+    fn options(&self) -> Arc<ConfigOptions> {
+        OptimizerConfig::options(self.session)
+    }
+    fn function_registry(&self) -> Option<&dyn FunctionRegistry> {
+        Some(self.session)
+    }
+}
+
 impl OptimizerConfig for MiniSession {
     fn query_execution_start_time(&self) -> Option<DateTime<Utc>> {
         Some(self.query_start)
@@ -1283,7 +1345,9 @@ impl Session for MiniSession {
                 self.config.options().as_ref(),
                 |_, _| {},
             )?;
-            let optimized = self.optimizer.optimize(analyzed, self, |_, _| {})?;
+            let optimized = self
+                .optimizer
+                .optimize(analyzed, &Statement::now(self), |_, _| {})?;
             return super::narrow::narrow(optimized);
         };
         // As the umbrella crate's `SessionState::optimize`: without this, EXPLAIN shows only the
@@ -1300,12 +1364,14 @@ impl Session for MiniSession {
             },
         )?;
         stringified_plans.push(analyzed.to_stringified(PlanType::FinalAnalyzedLogicalPlan));
-        let optimized = self.optimizer.optimize(analyzed, self, |p, rule| {
-            let plan_type = PlanType::OptimizedLogicalPlan {
-                optimizer_name: rule.name().into(),
-            };
-            stringified_plans.push(p.to_stringified(plan_type));
-        })?;
+        let optimized = self
+            .optimizer
+            .optimize(analyzed, &Statement::now(self), |p, rule| {
+                let plan_type = PlanType::OptimizedLogicalPlan {
+                    optimizer_name: rule.name().into(),
+                };
+                stringified_plans.push(p.to_stringified(plan_type));
+            })?;
         let optimized = super::narrow::narrow(optimized)?;
         stringified_plans.push(optimized.to_stringified(PlanType::OptimizedLogicalPlan {
             optimizer_name: "narrow_joins".into(),
