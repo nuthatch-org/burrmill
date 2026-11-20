@@ -142,7 +142,7 @@ pub struct MiniSession {
     tables: HashMap<String, Arc<dyn TableSource>>,
     /// By table, the columns the host writes as addresses; the `Addresses` rule reads it.
     addresses: super::addresses::Noted,
-    known: std::sync::Mutex<Option<super::dialect::Known>>,
+    known: std::sync::Mutex<Option<Arc<super::dialect::Known>>>,
     /// Each statement's optimized plan by its text, under the settings it was planned with. Every
     /// registration clears it.
     plans: Mutex<HashMap<String, (Stamp, LogicalPlan)>>,
@@ -1013,6 +1013,7 @@ impl MiniSession {
         let Some(known) = self.known.get_mut().expect("known names") else {
             return;
         };
+        let known = Arc::make_mut(known);
         let columns = |t: &Arc<dyn TableSource>| -> Vec<String> {
             t.schema()
                 .fields()
@@ -1030,11 +1031,11 @@ impl MiniSession {
 
     /// Every table and column name, for resolving identifiers as DuckDB does: built once, again
     /// only after a table or view is registered, and cheap to clone.
-    pub fn known_names(&self) -> super::dialect::Known {
+    pub fn known_names(&self) -> Arc<super::dialect::Known> {
         let mut cached = self.known.lock().expect("known names");
-        cached
-            .get_or_insert_with(|| {
-                super::dialect::Known::of_tables(self.tables.iter().map(|(name, t)| {
+        let known = cached.get_or_insert_with(|| {
+            Arc::new(super::dialect::Known::of_tables(self.tables.iter().map(
+                |(name, t)| {
                     (
                         name.as_str(),
                         t.schema()
@@ -1043,9 +1044,10 @@ impl MiniSession {
                             .map(|f| f.name().clone())
                             .collect(),
                     )
-                }))
-            })
-            .clone()
+                },
+            )))
+        });
+        Arc::clone(known)
     }
 
     pub fn function_names(&self) -> Vec<String> {

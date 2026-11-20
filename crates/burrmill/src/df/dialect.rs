@@ -178,9 +178,31 @@ fn refuse_asof(
 }
 
 /// Parse with DuckDB's dialect and rewrite into what DataFusion plans. The result columns' DuckDB
-/// names come back too, taken from the statement as written, before any rewrite.
-pub fn parse(sql: &str, known: &Known) -> Result<(DfStatement, Vec<Option<String>>)> {
+/// names come back too, taken from the statement as written, before any rewrite. `served` first
+/// refuses what the SQL surface does not serve, as [`crate::inspect::unserved`]
+/// would, from the statements as written and this one parse.
+pub fn parse(sql: &str, known: &Known, served: bool) -> Result<(DfStatement, Vec<Option<String>>)> {
     let mut stmts = parse_statements(sql)?;
+    if served {
+        fn written<'a>(s: &'a DfStatement, out: &mut Vec<&'a sq::Statement>) {
+            match s {
+                DfStatement::Statement(s) => out.push(s.as_ref()),
+                DfStatement::Explain(e) => written(e.statement.as_ref(), out),
+                _ => {}
+            }
+        }
+        let mut all = Vec::new();
+        stmts.iter().for_each(|s| written(s, &mut all));
+        let query = match stmts.as_slice() {
+            [DfStatement::Statement(q)] if matches!(q.as_ref(), sq::Statement::Query(_)) => {
+                Some(q.as_ref())
+            }
+            _ => None,
+        };
+        if let Some(e) = crate::inspect::unserved_parsed(all, query) {
+            return Err(e);
+        }
+    }
     if stmts.len() > 1 {
         return Err(BurrmillError::NotAllowed(format!(
             "{} statements where one is allowed",
@@ -4058,7 +4080,7 @@ mod tests {
             let rewritten = (1..=3).any(|n| {
                 let args = ["a", "b", "c"][..n].join(", ");
                 let sql = format!("SELECT {name}({args}) FROM t");
-                let (stmt, _) = super::parse(&sql, &Known::default()).unwrap();
+                let (stmt, _) = super::parse(&sql, &Known::default(), false).unwrap();
                 !stmt
                     .to_string()
                     .to_ascii_lowercase()
