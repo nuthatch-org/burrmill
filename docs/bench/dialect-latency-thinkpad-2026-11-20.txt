@@ -41,3 +41,21 @@ b 3 fresh  LATENCY	statements=321	at_or_under=5	skipped=49	geomean_ratio=1.95	du
 b 3 reused LATENCY	statements=321	at_or_under=253	skipped=49	geomean_ratio=0.79	duck_sum_us=418417	burr_sum_us=337075	threads=8	repeats=31	fresh=false
 determinism on b, CASES=10000: 10000 cases over 18 engines: 9444 byte-identical, 556 refused everywhere, 0 differ
 nuthatch serve::tests on b, --features graph,counter,crash-points: 212 passed; 0 failed; 1 ignored
+
+# Round three, EnsureRequirements without its distribution pass where a plan is one partition throughout: a = 0ad79fd,
+# b = the branch head. Same cores, rounds and repeats.
+parity b: DIALECT	cases=370	differing=0
+a 1 fresh  LATENCY	statements=321	at_or_under=6	skipped=49	geomean_ratio=1.92	duck_sum_us=512701	burr_sum_us=916028	threads=8	repeats=31	fresh=true
+a 1 reused LATENCY	statements=321	at_or_under=254	skipped=49	geomean_ratio=0.79	duck_sum_us=411997	burr_sum_us=330373	threads=8	repeats=31	fresh=false
+b 1 fresh  LATENCY	statements=321	at_or_under=7	skipped=49	geomean_ratio=1.85	duck_sum_us=492912	burr_sum_us=856979	threads=8	repeats=31	fresh=true
+b 1 reused LATENCY	statements=321	at_or_under=277	skipped=49	geomean_ratio=0.72	duck_sum_us=413582	burr_sum_us=313087	threads=8	repeats=31	fresh=false
+a 2 fresh  LATENCY	statements=321	at_or_under=8	skipped=49	geomean_ratio=1.92	duck_sum_us=504096	burr_sum_us=903570	threads=8	repeats=31	fresh=true
+a 2 reused LATENCY	statements=321	at_or_under=249	skipped=49	geomean_ratio=0.79	duck_sum_us=414580	burr_sum_us=339310	threads=8	repeats=31	fresh=false
+b 2 fresh  LATENCY	statements=321	at_or_under=8	skipped=49	geomean_ratio=1.87	duck_sum_us=493701	burr_sum_us=865212	threads=8	repeats=31	fresh=true
+b 2 reused LATENCY	statements=321	at_or_under=280	skipped=49	geomean_ratio=0.71	duck_sum_us=410961	burr_sum_us=309482	threads=8	repeats=31	fresh=false
+a 3 fresh  LATENCY	statements=321	at_or_under=6	skipped=49	geomean_ratio=1.95	duck_sum_us=504694	burr_sum_us=929483	threads=8	repeats=31	fresh=true
+a 3 reused LATENCY	statements=321	at_or_under=248	skipped=49	geomean_ratio=0.80	duck_sum_us=410244	burr_sum_us=329572	threads=8	repeats=31	fresh=false
+b 3 fresh  LATENCY	statements=321	at_or_under=5	skipped=49	geomean_ratio=1.88	duck_sum_us=485791	burr_sum_us=861122	threads=8	repeats=31	fresh=true
+b 3 reused LATENCY	statements=321	at_or_under=279	skipped=49	geomean_ratio=0.70	duck_sum_us=411677	burr_sum_us=307676	threads=8	repeats=31	fresh=false
+10000 cases over 18 engines: 9444 byte-identical, 556 refused everywhere, 0 differ
+test result: ok. 212 passed; 0 failed; 1 ignored; 0 measured; 2551 filtered out; finished in 77.62s

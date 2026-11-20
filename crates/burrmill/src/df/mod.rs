@@ -76,6 +76,7 @@ mod ordered_agg;
 mod printf;
 mod rangebounds;
 mod rangejoin;
+mod requirements;
 mod rule;
 mod sequential;
 mod session;

@@ -681,7 +681,15 @@ impl MiniSession {
                 Arc::new(super::addresses::TextAddressFilters)
                     as Arc<dyn PhysicalOptimizerRule + Send + Sync>,
             )
-            .chain(PhysicalOptimizer::new().rules)
+            .chain(
+                PhysicalOptimizer::new()
+                    .rules
+                    .into_iter()
+                    .map(|r| match r.name() {
+                        "EnsureRequirements" => Arc::new(super::requirements::Requirements),
+                        _ => r,
+                    }),
+            )
             // Straight after DataFusion's own choice of sides, which without statistics is none.
             .flat_map(|r| {
                 let after_selection = r.name() == "join_selection";
