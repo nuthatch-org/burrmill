@@ -991,7 +991,7 @@ impl Engine {
                     .optimize(&logical)
                     .map_err(|e| planning_err(token, e))?;
                 if params.is_empty() {
-                    self.session.keep_plan(sql, stamp, &optimized);
+                    self.session.keep_plan(sql, stamp, &logical, &optimized);
                 }
                 optimized
             }

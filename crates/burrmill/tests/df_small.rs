@@ -70,3 +70,15 @@ fn a_shared_subquery_runs_afresh_each_time() {
         assert_eq!(answer(&e, sql), want);
     }
 }
+
+/// `now()` is the statement's: it was the moment the engine opened, and a kept plan held it too.
+#[test]
+fn now_is_each_statements_own() {
+    let e = Engine::open_empty().unwrap();
+    let opened = answer(&e, "SELECT CAST(now() AS VARCHAR) AS t");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let again = answer(&e, "SELECT CAST(now() AS VARCHAR) AS t");
+    let other = answer(&e, "SELECT CAST(now() AS VARCHAR) AS u");
+    assert!(again > opened, "{opened} then {again}");
+    assert!(other[7..] > opened[7..], "{opened} then {other}");
+}
