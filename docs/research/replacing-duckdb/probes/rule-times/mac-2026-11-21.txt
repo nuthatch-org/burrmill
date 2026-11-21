@@ -1,0 +1,423 @@
+LAT	duck_us=126	burr_us=412	ratio=3.27	rows=1	SELECT printf('%d-x', 42) AS a, printf('%5d|%-5d|%05d|%+d|% d', 42, 42, 42, 42, 42) AS b, printf('%x %X %o %#x %#o', 255, 255, 8, 255, 8) AS c, printf('%c%%', 65) AS d
+LAT	duck_us=85	burr_us=255	ratio=3.00	rows=1	SELECT printf('%s and %s', 'a', 'b') AS a, printf('%10s|%-10s|%.2s', 'abc', 'abc', 'abc') AS b, printf('%d', -7) AS d
+LAT	duck_us=65	burr_us=154	ratio=2.37	rows=1	SELECT printf('%s', true) AS a
+LAT	duck_us=67	burr_us=144	ratio=2.15	rows=1	SELECT printf('%d', true) AS a
+LAT	duck_us=70	burr_us=136	ratio=1.94	rows=1	SELECT printf('%x', -1) AS a
+LAT	duck_us=482	burr_us=643	ratio=1.33	rows=6	SELECT printf('%d', CAST(value AS HUGEINT)) AS a FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=106	burr_us=352	ratio=3.32	rows=1	SELECT printf('%f|%.2f|%10.3f|%-10.1f|%+.1f', 3.14159::DOUBLE, 2.675::DOUBLE, -1.5::DOUBLE, 0.05::DOUBLE, 1::DOUBLE) AS a, printf('%e|%.2E|%g|%g|%g|%#g|%G', 12345.678::DOUBLE, 0.000123::DOUBLE, 100000::DOUBLE, 1000000::DOUBLE, 0.0001::DOUBLE, 1.5::DOUBLE, 1e-10::DOUBLE) AS b
+LAT	duck_us=439	burr_us=616	ratio=1.40	rows=6	SELECT printf('%d|%s', block_number, "from") AS a, printf('%.4f', CAST(value AS DOUBLE) / 1e18) AS b, printf('%s', NULL) AS d FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=445	burr_us=638	ratio=1.43	rows=6	SELECT format('{}', 42) AS a, format('{}', -7) AS b, format('{:s}', 'x') AS c, format('{}', CAST(value AS HUGEINT)) AS d FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=88	burr_us=291	ratio=3.31	rows=1	SELECT format('{} and {}', 'a', 42) AS a, format('{1} {0}', 'x', 'y') AS b, format('{:>6}|{:<6}|{:^6}|{:*^7}', 'ab', 'ab', 'ab', 'ab') AS c, format('{:.2f}|{:08.3f}|{:+d}|{:x}|{:#x}|{:05d}', 3.14159::DOUBLE, -2.5::DOUBLE, 5, 255, 255, 42) AS d
+LAT	duck_us=483	burr_us=940	ratio=1.95	rows=1	SELECT format('{}', 0.1::DOUBLE) AS a, format('{}', 1e20::DOUBLE) AS b, format('{}', 1e-7::DOUBLE) AS c, format('{}', 123456.789::DOUBLE) AS d, format('{}', 1e15::DOUBLE) AS e, format('{}', 1e16::DOUBLE) AS f, format('{}', 2.0::DOUBLE) AS g, format('{}', true) AS h, format('{{}} {}', block_number) AS i FROM transfer ORDER BY block_number LIMIT 1
+LAT	duck_us=646	burr_us=839	ratio=1.30	rows=6	SELECT to_json(struct_pack("a" := block_number, b := "from", c := enabled)) AS j FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=902	burr_us=1140	ratio=1.26	rows=1	SELECT to_json(list(s)) AS j FROM (SELECT struct_pack(k := log_index, v := value) AS s FROM transfer ORDER BY block_number DESC, log_index LIMIT 5) t
+LAT	duck_us=1935	burr_us=3750	ratio=1.94	rows=6	SELECT b.block_number, coalesce((SELECT to_json(list(t.s)) FROM (SELECT struct_pack("id" := c."to", "n" := c.log_index) AS s FROM transfer c WHERE c."from" = b."from" ORDER BY c.block_number DESC, c.log_index LIMIT 3) t), '[]') AS j FROM transfer b ORDER BY b.block_number, b.log_index
+LAT	duck_us=434	burr_us=918	ratio=2.12	rows=1	SELECT coalesce((SELECT to_json(list(t.s)) FROM (SELECT struct_pack("id" := c."to") AS s FROM transfer c WHERE c.block_number < 0) t), '[]') AS j
+LAT	duck_us=106	burr_us=322	ratio=3.04	rows=1	SELECT to_json('a"b\c/' || chr(10) || chr(9) || chr(1) || chr(31) || chr(127) || 'é€😀') AS j
+LAT	duck_us=680	burr_us=733	ratio=1.08	rows=3	SELECT to_json(CAST(value AS HUGEINT)) AS a, to_json(block_number) AS b, to_json("from") AS c FROM transfer ORDER BY block_number, log_index LIMIT 3
+LAT	duck_us=83	burr_us=288	ratio=3.47	rows=1	SELECT to_json(NULL) AS a, to_json(struct_pack(x := NULL, y := 1)) AS b, to_json([1, NULL, 3]) AS c, to_json(true) AS d, to_json(struct_pack("we""ird" := 'v')) AS e
+LAT	duck_us=80	burr_us=229	ratio=2.86	rows=1	SELECT to_json(list(x)) AS j FROM (SELECT 1 AS x WHERE false) t
+LAT	duck_us=1414	burr_us=2069	ratio=1.46	rows=6	SELECT b.block_number, b.log_index, (SELECT string_agg(t.v, ',') FROM (SELECT c.value AS v FROM transfer c WHERE b."from" = c."from" AND c.log_index >= 0 ORDER BY c.value DESC, c.log_index LIMIT 2 OFFSET 1) t) AS j FROM transfer b ORDER BY 1, 2
+LAT	duck_us=1339	burr_us=1978	ratio=1.48	rows=6	SELECT b.block_number, (SELECT to_json(list(t.s)) FROM (SELECT struct_pack("id" := c."to") AS s FROM transfer c WHERE c."from" = b."from" ORDER BY c.block_number LIMIT 0) t) AS j FROM transfer b ORDER BY b.block_number, b.log_index
+LAT	duck_us=223	burr_us=371	ratio=1.66	rows=1	SELECT count(*) FROM transfer
+LAT	duck_us=311	burr_us=487	ratio=1.57	rows=1	SELECT sum(value_dec) FROM transfer
+LAT	duck_us=242	burr_us=344	ratio=1.42	rows=1	SELECT sum(value_dec) FROM wide
+LAT	duck_us=297	burr_us=398	ratio=1.34	rows=1	SELECT sum(block_number) FROM transfer
+LAT	duck_us=289	burr_us=401	ratio=1.39	rows=1	SELECT avg(block_number) FROM transfer
+LAT	duck_us=379	burr_us=757	ratio=2.00	rows=1	SELECT avg(block_number - log_index) AS a, avg(CAST(value AS HUGEINT)) AS b, avg(CAST("tokensRewards" AS DECIMAL(10,2))) AS c, avg(greatest(18, log_index)) AS d FROM transfer
+LAT	duck_us=427	burr_us=487	ratio=1.14	rows=5	SELECT "from", avg(block_number) AS a FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=409	burr_us=569	ratio=1.39	rows=6	SELECT block_number, avg(log_index) OVER (ORDER BY block_number, log_index) AS a FROM transfer ORDER BY 1, 2
+LAT	duck_us=289	burr_us=385	ratio=1.33	rows=6	SELECT block_number / 100 AS q FROM transfer ORDER BY 1
+LAT	duck_us=427	burr_us=528	ratio=1.24	rows=3	SELECT block_number // 100 AS b, count(*) AS n FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=302	burr_us=434	ratio=1.44	rows=6	SELECT CAST(value AS HUGEINT) * 2 AS v FROM transfer ORDER BY 1
+LAT	duck_us=275	burr_us=385	ratio=1.40	rows=6	SELECT -CAST(value AS HUGEINT) AS v FROM transfer ORDER BY 1
+LAT	duck_us=425	burr_us=527	ratio=1.24	rows=5	SELECT "from", sum(CAST(value AS HUGEINT)) AS s FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=87	burr_us=337	ratio=3.87	rows=1	SELECT 7 / 2 AS a, 7 // 2 AS b, -7 // 2 AS c, 7 % -2 AS d, 1 / 0 AS e, 1 // 0 AS f, 0.5 / 2 AS g
+LAT	duck_us=301	burr_us=423	ratio=1.41	rows=2	SELECT to_timestamp(block_timestamp) AS t FROM transfer ORDER BY 1 LIMIT 2
+LAT	duck_us=644	burr_us=865	ratio=1.34	rows=4	SELECT date_trunc('day', to_timestamp(block_timestamp)) AS d, count(*) AS n FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=352	burr_us=524	ratio=1.49	rows=1	SELECT extract(year FROM to_timestamp(block_timestamp)) AS y FROM transfer LIMIT 1
+LAT	duck_us=332	burr_us=495	ratio=1.49	rows=6	SELECT round(CAST(value AS DOUBLE) / 1e18, 4) AS r FROM transfer ORDER BY 1
+LAT	duck_us=287	burr_us=361	ratio=1.26	rows=6	SELECT lower("to") AS t FROM transfer ORDER BY 1
+LAT	duck_us=299	burr_us=525	ratio=1.76	rows=1	SELECT count(*) AS n FROM transfer WHERE enabled = 'true'
+LAT	duck_us=309	burr_us=541	ratio=1.75	rows=1	SELECT count(*) AS n FROM transfer WHERE "tokensRewards" = 10
+LAT	duck_us=292	burr_us=467	ratio=1.60	rows=1	SELECT count(*) AS n FROM transfer WHERE "tokensRewards" IN (5, 7, 10)
+LAT	duck_us=295	burr_us=453	ratio=1.54	rows=1	SELECT count(*) AS n FROM transfer WHERE CAST("tokensRewards" AS INTEGER) > 9
+LAT	duck_us=293	burr_us=429	ratio=1.46	rows=1	SELECT count(*) AS n FROM transfer WHERE enabled = true
+LAT	duck_us=294	burr_us=433	ratio=1.47	rows=1	SELECT count(*) AS n FROM transfer WHERE enabled AND true
+LAT	duck_us=281	burr_us=425	ratio=1.51	rows=1	SELECT count(*) AS n FROM transfer WHERE NOT enabled
+LAT	duck_us=315	burr_us=387	ratio=1.23	rows=6	SELECT "tokensRewards" <> 5 AS ne FROM transfer ORDER BY 1
+LAT	duck_us=344	burr_us=560	ratio=1.63	rows=6	SELECT CAST(value AS HUGEINT), block_number // 2, NOT (block_number > 2) FROM transfer ORDER BY 2
+LAT	duck_us=398	burr_us=684	ratio=1.72	rows=6	SELECT "Value", VALUE, "TOKENSREWARDS", t."FROM", "Value" || 'x', sum(Block_Number) OVER () FROM Transfer t ORDER BY 1
+LAT	duck_us=300	burr_us=553	ratio=1.84	rows=1	SELECT count(*) FROM TRANSFER T WHERE t.ENABLED = 'true'
+LAT	duck_us=214	burr_us=195	ratio=0.91	rows=3	SELECT table_name FROM information_schema.tables WHERE NOT starts_with(table_name, '__hot_') ORDER BY table_name
+LAT	duck_us=441	burr_us=261	ratio=0.59	rows=12	SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'transfer' ORDER BY ordinal_position
+LAT	duck_us=222	burr_us=152	ratio=0.68	rows=3	SELECT table_catalog, table_schema, table_name, table_type FROM information_schema.tables ORDER BY 3
+LAT	duck_us=419	burr_us=230	ratio=0.55	rows=2	SELECT column_name, ordinal_position, is_nullable FROM information_schema.columns WHERE table_name = 'label' ORDER BY 2
+LAT	duck_us=494	burr_us=661	ratio=1.34	rows=6	SELECT *, value_dec, "from" FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=348	burr_us=389	ratio=1.12	rows=6	SELECT 1 AS a, 2 AS a, block_number AS a FROM transfer ORDER BY 3
+LAT	duck_us=393	burr_us=680	ratio=1.73	rows=6	SELECT block_number - 1 AS a, COALESCE(block_number - log_index, 0) AS b, CASE WHEN log_index = 0 THEN 0 ELSE block_number END AS c, block_number * 2 + 1 AS d FROM transfer ORDER BY 1
+LAT	duck_us=337	burr_us=523	ratio=1.55	rows=6	SELECT t."from", CAST(t.block_number / 10 AS BIGINT) AS block_number FROM transfer t ORDER BY t.block_number DESC
+LAT	duck_us=96	burr_us=468	ratio=4.88	rows=1	SELECT CAST(0.5::DOUBLE AS BIGINT) a, CAST(1.5::DOUBLE AS BIGINT) b, CAST(2.5::DOUBLE AS BIGINT) c, CAST(-0.5::DOUBLE AS BIGINT) d, CAST(-1.5::DOUBLE AS BIGINT) e, CAST(0.6::DOUBLE AS BIGINT) f, CAST(2.5::DECIMAL(3,1) AS BIGINT) l, CAST(-2.5::DECIMAL(3,1) AS BIGINT) m, CAST(2.4::DECIMAL(3,1) AS BIGINT) n
+LAT	duck_us=353	burr_us=687	ratio=1.95	rows=4	SELECT CAST(CAST(value AS DOUBLE) / 3 AS BIGINT) AS q, CAST(block_number / 4 AS INTEGER) AS r FROM transfer WHERE block_number < 100 ORDER BY 1, 2
+LAT	duck_us=602	burr_us=956	ratio=1.59	rows=3	SELECT k FROM (SELECT block_number * 100000 + log_index AS k FROM transfer UNION ALL SELECT block_number * 100000 + log_index FROM transfer) ORDER BY 1 LIMIT 3
+LAT	duck_us=62	burr_us=204	ratio=3.29	rows=1	SELECT CAST('0x1F' AS BIGINT) a, CAST(' 0x1f' AS BIGINT) b, CAST('0b101' AS BIGINT) c, CAST('0x1_f' AS INTEGER) d, CAST('0x7fffffffffffffff' AS BIGINT) e, CAST('42' AS BIGINT) f
+LAT	duck_us=64	burr_us=188	ratio=2.94	rows=1	SELECT decode(from_hex('68c3a96c6c6f')) a, decode(from_hex('')) b, from_hex('abc') c, from_hex('4142') d
+LAT	duck_us=68	burr_us=205	ratio=3.01	rows=1	SELECT decode(unhex('68c3a96c6c6f')) a, unhex('4142') b, TRY(unhex('zz')) IS NULL c
+LAT	duck_us=86	burr_us=319	ratio=3.71	rows=1	SELECT typeof(CAST(1 AS INTEGER)) a, typeof('x') b, typeof(1.5) c, typeof(TRUE) d, typeof(CAST(1 AS BIGINT)) e, typeof(DATE '2024-01-01') f, typeof(NULL) g, typeof(CAST(1 AS DOUBLE)) h, typeof(CAST(1 AS DECIMAL(38,0))) i
+LAT	duck_us=173	burr_us=275	ratio=1.59	rows=1	SELECT typeof(v) AS t, count(*) AS n FROM (VALUES (CAST(1 AS BIGINT)), (2)) x(v) GROUP BY 1
+LAT	duck_us=510	burr_us=698	ratio=1.37	rows=1	SELECT typeof(block_number) a, typeof("value") b, typeof(to_timestamp(block_timestamp)) c, typeof(count(*)) d FROM transfer GROUP BY ALL ORDER BY ALL LIMIT 1
+LAT	duck_us=39	burr_us=103	ratio=2.64	rows=1	SELECT typeof(1) AS a
+LAT	duck_us=422	burr_us=455	ratio=1.08	rows=2	SELECT k, count(DISTINCT (a, b)) AS n, count(DISTINCT a) AS m FROM (VALUES (1, 1, 'x'), (1, 1, 'x'), (1, 1, NULL), (1, NULL, NULL), (1, NULL, ''), (2, 2, 'y'), (2, 3, 'y')) t(k, a, b) GROUP BY k ORDER BY k
+LAT	duck_us=91	burr_us=281	ratio=3.09	rows=5	SELECT DATE '1970-01-01' + CAST(d AS INTEGER) AS day FROM range(106750, 106755) t(d) ORDER BY 1
+LAT	duck_us=74	burr_us=360	ratio=4.86	rows=1	SELECT DATE '2024-03-01' - 1 AS a, 5 + DATE '2024-02-27' AS b, DATE '1970-01-01' + 115739 AS c, DATE '2024-03-01' + CAST(-366 AS INTEGER) AS d
+LAT	duck_us=125	burr_us=336	ratio=2.69	rows=5	SELECT h, TRY(CAST(decode(unhex(substr(h, 3))) AS VARCHAR)) AS s FROM (VALUES ('0x6162'), ('0xzz'), ('0xff'), ('0x'), (NULL)) t(h) ORDER BY h
+LAT	duck_us=168	burr_us=405	ratio=2.41	rows=3	SELECT h, count(TRY(CAST(decode(unhex(substr(h, 1))) AS VARCHAR))) OVER () AS n FROM (VALUES ('6162'), ('zz'), ('ff')) t(h) ORDER BY h
+LAT	duck_us=132	burr_us=538	ratio=4.08	rows=1	SELECT sum(length(TRY(CAST(decode(unhex(substr(h, 3))) AS VARCHAR)))) AS s, count(*) AS n FROM (VALUES ('0x6162'), ('0xzz'), ('0xff')) t(h)
+LAT	duck_us=315	burr_us=722	ratio=2.29	rows=1	SELECT count(*) n, min(day) lo, max(day) hi FROM (SELECT DATE '1970-01-01' + CAST(d AS INTEGER) AS day FROM range(11575, 115740) t(d)) x
+LAT	duck_us=54	burr_us=175	ratio=3.24	rows=1	SELECT CAST(('0x' || substr('000000000000000000000000000000000000000000000000000000000000002a', 49, 16)) AS BIGINT) AS n
+LAT	duck_us=310	burr_us=399	ratio=1.29	rows=1	SELECT max("from") AS m FROM transfer
+LAT	duck_us=396	burr_us=491	ratio=1.24	rows=6	SELECT (block_number, log_index) > (2, 0) AS gt FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=291	burr_us=427	ratio=1.47	rows=1	SELECT CAST(block_number AS UBIGINT) AS b FROM transfer ORDER BY 1 LIMIT 1
+LAT	duck_us=290	burr_us=347	ratio=1.20	rows=6	SELECT "tokensRewards" AS r FROM transfer ORDER BY 1
+LAT	duck_us=509	burr_us=636	ratio=1.25	rows=6	SELECT t."to", l.name FROM transfer t LEFT JOIN label l ON l.addr = t."to" ORDER BY 1, 2
+LAT	duck_us=363	burr_us=419	ratio=1.15	rows=1	SELECT count(DISTINCT "from") AS n FROM transfer
+LAT	duck_us=312	burr_us=413	ratio=1.32	rows=6	SELECT "from" || ':' || CAST(block_number AS VARCHAR) AS k FROM transfer ORDER BY 1
+LAT	duck_us=67	burr_us=215	ratio=3.21	rows=1	SELECT 1 = true AS a, 2 = true AS b, 0 = false AS c, 1 < true AS d, 2 > false AS e, 1.5 = true AS f
+LAT	duck_us=349	burr_us=502	ratio=1.44	rows=2	SELECT block_number FROM transfer WHERE (block_number = 1) = true OR log_index = true ORDER BY 1
+LAT	duck_us=63	burr_us=158	ratio=2.51	rows=1	SELECT true IN (1, 2) AS a, 1 IN (true, false) AS b, 2 IN (true) AS c
+LAT	duck_us=52	burr_us=132	ratio=2.54	rows=1	SELECT 1 IS DISTINCT FROM 2 AND 3 IS DISTINCT FROM 3 OR 4 IS NOT DISTINCT FROM 4 AS v
+LAT	duck_us=419	burr_us=603	ratio=1.44	rows=4	SELECT block_number FROM transfer WHERE "from" IS DISTINCT FROM '0xa' AND log_index = 0 OR "to" IS NOT DISTINCT FROM '0xe' ORDER BY 1
+LAT	duck_us=69	burr_us=221	ratio=3.20	rows=1	SELECT CAST(2.5::DOUBLE AS HUGEINT) AS a, CAST(-3.5::DOUBLE AS HUGEINT) AS b, CAST(2.5::DOUBLE AS DECIMAL(38,0)) AS c
+LAT	duck_us=286	burr_us=409	ratio=1.43	rows=2	SELECT value, TRY_CAST(value AS HUGEINT) IS NULL AS a, TRY_CAST(value AS HUGEINT) IS NOT NULL AS b, TRY_CAST(value AS DECIMAL(38,0)) AS c FROM wide ORDER BY 1
+LAT	duck_us=482	burr_us=745	ratio=1.55	rows=1	SELECT sum(TRY_CAST(value AS HUGEINT)) AS s, (SELECT sum(d) FROM (SELECT TRY_CAST(value AS HUGEINT) AS d FROM wide) t) AS t FROM wide
+LAT	duck_us=79	burr_us=446	ratio=5.65	rows=1	SELECT TRY_CAST(1e38::DOUBLE AS HUGEINT) AS a, TRY_CAST(1.7014118346046923e38::DOUBLE AS HUGEINT) AS b, TRY_CAST(-1.7014118346046923e38::DOUBLE AS HUGEINT) AS c, TRY_CAST('nan'::DOUBLE AS HUGEINT) AS d, TRY_CAST(2.5::DOUBLE AS HUGEINT) AS e, TRY_CAST(-2.5::FLOAT AS HUGEINT) AS f
+LAT	duck_us=301	burr_us=630	ratio=2.09	rows=2	SELECT value, TRY_CAST(CAST(value AS DOUBLE) * 1.5 AS HUGEINT) IS NULL AS a, TRY_CAST(CAST(value AS FLOAT) * 1.5 AS HUGEINT) IS NOT NULL AS b, TRY_CAST(CAST(value AS DOUBLE) * 2 AS HUGEINT) IS NULL AS c FROM wide ORDER BY 1
+LAT	duck_us=514	burr_us=1012	ratio=1.97	rows=1	SELECT sum(TRY_CAST(CAST(value AS DOUBLE) * 1.5 AS HUGEINT)) AS s, (SELECT sum(d) FROM (SELECT TRY_CAST(CAST(value AS FLOAT) * 1.5 AS HUGEINT) AS d FROM wide) t) AS t FROM wide
+LAT	duck_us=90	burr_us=330	ratio=3.67	rows=1	SELECT sum(TRY_CAST(x AS HUGEINT)) AS s FROM (VALUES (1.5e38::DOUBLE), (-1.5e38::DOUBLE), (2.5::DOUBLE), (1.7014118346046923e38::DOUBLE), ('nan'::DOUBLE)) t(x)
+LAT	duck_us=84	burr_us=259	ratio=3.08	rows=1	SELECT TRY_CAST(CAST('99999999999999999999999999999999999999' AS DECIMAL(38,0)) AS HUGEINT) AS a, TRY_CAST(CAST('-9999999999999999999999999999999999999.5' AS DECIMAL(38,1)) AS HUGEINT) AS b, TRY_CAST(2.5::DECIMAL(10,1) AS HUGEINT) AS c, TRY_CAST(-2.5::DECIMAL(10,1) AS HUGEINT) AS d
+LAT	duck_us=59	burr_us=164	ratio=2.78	rows=1	SELECT CAST(CAST('47582028310819253533' AS HUGEINT) AS DOUBLE) AS a, CAST(CAST('9791626625542365.709860864' AS DECIMAL(38,9)) AS DOUBLE) AS b
+LAT	duck_us=371	burr_us=444	ratio=1.20	rows=6	SELECT CAST(value AS HUGEINT)::DOUBLE / 3 AS d FROM transfer ORDER BY 1
+LAT	duck_us=75	burr_us=358	ratio=4.77	rows=1	SELECT 1.5 AS a, 1.5 + 1 AS b, 1.5 * 2.25 AS c, 0.5 AS d, -2.50 AS e, 100.0 / 3 AS f, 1e3 AS g, 1.5e2 AS h, 0.001 AS i
+LAT	duck_us=414	burr_us=620	ratio=1.50	rows=6	SELECT 1.5 - 0.25 AS a, 10.5 % 3 AS b, block_number * 1.5 AS c, block_number + 0.25 AS d FROM transfer ORDER BY 1, 3
+LAT	duck_us=68	burr_us=214	ratio=3.15	rows=1	SELECT round(2.345, 2) AS a, CAST(1.25 AS DOUBLE) AS b, 1.10 = 1.1 AS c, 12345678901234567890.5 AS d
+LAT	duck_us=77	burr_us=486	ratio=6.31	rows=1	SELECT round(9.995, 2) AS a, round(-2.345, 2) AS b, round(2.345) AS c, round(2.345, 5) AS d, round(1234.5, -2) AS e, round(2.5) AS f, round(-2.5) AS g
+LAT	duck_us=323	burr_us=511	ratio=1.58	rows=6	SELECT round(CAST(value AS HUGEINT) / 7, 3) AS r FROM transfer ORDER BY 1
+LAT	duck_us=337	burr_us=386	ratio=1.15	rows=6	SELECT * FROM (SELECT block_number, block_number FROM transfer) ORDER BY 1
+LAT	duck_us=553	burr_us=830	ratio=1.50	rows=1	SELECT count(*) AS n FROM (SELECT t."to", l.addr AS "to" FROM transfer t JOIN label l ON l.addr = t."to")
+LAT	duck_us=584	burr_us=760	ratio=1.30	rows=3	SELECT * FROM (SELECT t."from", l.* FROM transfer t JOIN label l ON l.addr = t."from") ORDER BY 1, 2, 3
+LAT	duck_us=355	burr_us=464	ratio=1.31	rows=6	WITH x AS (SELECT block_number, block_number + 0 FROM transfer) SELECT * FROM x ORDER BY 1
+LAT	duck_us=257	burr_us=261	ratio=1.02	rows=2	SELECT * FROM (SELECT l.addr, l.* FROM label l) ORDER BY 1
+LAT	duck_us=309	burr_us=365	ratio=1.18	rows=6	SELECT block_number FROM (SELECT block_number, block_number FROM transfer) ORDER BY 1
+LAT	duck_us=474	burr_us=588	ratio=1.24	rows=2	SELECT * FROM (SELECT * FROM label a JOIN label b ON a.addr = b.addr) ORDER BY 1
+LAT	duck_us=64	burr_us=244	ratio=3.81	rows=1	SELECT TRY_CAST('0xa' AS BIGINT) a, TRY_CAST('0XA' AS BIGINT) b, TRY_CAST('0xzz' AS BIGINT) c, TRY_CAST(' 12 ' AS BIGINT) d, TRY_CAST('abc' AS BIGINT) e, TRY_CAST('0xffffffffffffffff' AS BIGINT) f, TRY_CAST('1.5' AS BIGINT) g, TRY_CAST('' AS BIGINT) h
+LAT	duck_us=59	burr_us=177	ratio=3.00	rows=1	SELECT CAST(' 12 ' AS BIGINT) d, CAST('1.5' AS BIGINT) g, CAST('-2.5' AS BIGINT) i, CAST('1e2' AS BIGINT) j, CAST('+7' AS BIGINT) k
+LAT	duck_us=352	burr_us=458	ratio=1.30	rows=6	SELECT TRY_CAST("from" AS BIGINT) AS f, TRY_CAST(value AS INTEGER) AS v FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=463	burr_us=619	ratio=1.34	rows=4	SELECT f, sum(v) AS s, count(*) AS n FROM (SELECT "to" AS f, TRY_CAST(lower("from") AS BIGINT) AS v FROM transfer) GROUP BY f ORDER BY 1
+LAT	duck_us=335	burr_us=562	ratio=1.68	rows=1	SELECT sum(TRY_CAST("from" AS BIGINT)) AS a, sum(TRY_CAST(value AS HUGEINT)) AS b, sum(TRY_CAST(enabled AS BIGINT)) AS c FROM transfer
+LAT	duck_us=424	burr_us=625	ratio=1.47	rows=6	SELECT block_number // 2 AS a, block_number // log_index AS b, greatest(block_number, 82) AS c, least(log_index, 1) AS d FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=567	burr_us=722	ratio=1.27	rows=1	SELECT block_number AS x FROM transfer INTERSECT SELECT 3 ORDER BY 1
+LAT	duck_us=828	burr_us=936	ratio=1.13	rows=5	SELECT CAST(block_number AS BIGINT) - 10 AS x FROM transfer EXCEPT SELECT log_index FROM transfer ORDER BY 1
+LAT	duck_us=798	burr_us=976	ratio=1.22	rows=4	SELECT block_number AS x FROM transfer EXCEPT ALL SELECT log_index FROM transfer ORDER BY 1
+LAT	duck_us=524	burr_us=548	ratio=1.05	rows=6	SELECT block_number AS x FROM transfer UNION SELECT -1 ORDER BY 1
+LAT	duck_us=748	burr_us=969	ratio=1.30	rows=4	SELECT "to" AS x FROM transfer INTERSECT ALL SELECT "from" FROM transfer ORDER BY 1
+LAT	duck_us=845	burr_us=1289	ratio=1.53	rows=2	SELECT "to" AS x, log_index AS y FROM transfer EXCEPT ALL SELECT "from", 0 FROM transfer ORDER BY 1, 2
+LAT	duck_us=349	burr_us=677	ratio=1.94	rows=3	SELECT n AS x FROM (VALUES (1), (1), (1), (NULL), (NULL), (2)) t(n) INTERSECT ALL SELECT n FROM (VALUES (1), (1), (NULL), (3)) u(n) ORDER BY 1
+LAT	duck_us=340	burr_us=636	ratio=1.87	rows=4	SELECT n AS x FROM (VALUES (1), (1), (1), (NULL), (NULL), (2)) t(n) EXCEPT ALL SELECT n FROM (VALUES (1), (NULL), (3)) u(n) ORDER BY 1
+LAT	duck_us=789	burr_us=892	ratio=1.13	rows=1	SELECT DISTINCT "to" AS x FROM transfer EXCEPT ALL SELECT "from" FROM transfer ORDER BY 1
+LAT	duck_us=745	burr_us=1130	ratio=1.52	rows=6	SELECT 32 AS x FROM transfer EXCEPT ALL SELECT CAST(log_index AS BIGINT) * block_number FROM transfer ORDER BY 1
+LAT	duck_us=747	burr_us=945	ratio=1.27	rows=1	SELECT log_index AS x FROM transfer EXCEPT SELECT greatest(log_index, CAST(block_number AS BIGINT)) FROM transfer ORDER BY 1
+LAT	duck_us=409	burr_us=718	ratio=1.76	rows=0	SELECT log_index AS x FROM transfer INTERSECT SELECT 1.5 ORDER BY 1
+LAT	duck_us=279	burr_us=396	ratio=1.42	rows=3	SELECT "to" AS t FROM transfer ORDER BY 1 DESC LIMIT 3
+LAT	duck_us=79	burr_us=182	ratio=2.30	rows=3	SELECT n FROM (VALUES (1), (NULL), (2)) t(n) ORDER BY n DESC
+LAT	duck_us=122	burr_us=253	ratio=2.07	rows=1	SELECT string_agg(n::VARCHAR, ',' ORDER BY n DESC) AS a FROM (VALUES (1), (NULL), (2)) t(n)
+LAT	duck_us=341	burr_us=531	ratio=1.56	rows=6	SELECT CAST(to_timestamp(block_timestamp) AS VARCHAR) AS a, to_timestamp(block_timestamp) || '|' AS b FROM transfer ORDER BY 1
+LAT	duck_us=424	burr_us=746	ratio=1.76	rows=6	SELECT year(to_timestamp(block_timestamp)) AS y, month(to_timestamp(block_timestamp)) AS m, dayofweek(to_timestamp(block_timestamp)) AS w, epoch(to_timestamp(block_timestamp)) AS e, hour(to_timestamp(block_timestamp)) AS h FROM transfer ORDER BY 1, 2, 3, 4
+LAT	duck_us=397	burr_us=606	ratio=1.53	rows=6	SELECT strftime(to_timestamp(block_timestamp), '%Y-%m-%d %H:%M|%b %a %j') AS s, date_diff('day', to_timestamp(1700000000), to_timestamp(block_timestamp)) AS d, datediff('month', to_timestamp(1700000000), to_timestamp(block_timestamp)) AS m FROM transfer ORDER BY 1
+LAT	duck_us=454	burr_us=796	ratio=1.75	rows=6	SELECT regexp_extract(value, '[0-9]{2}') AS a, regexp_matches("from", '(?i)0XA') AS b, regexp_replace(value, '0', 'z', 'g') AS c, regexp_replace(value, '(1)', '\1\1') AS d, regexp_replace(value, '^1', '\2') AS e FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=419	burr_us=611	ratio=1.46	rows=6	SELECT sign(CAST(block_number AS BIGINT) - 3) AS a, sign(-2.5) AS b, NULLIF(block_number, 2) AS c FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=79	burr_us=239	ratio=3.03	rows=1	SELECT CAST(3 AS BIGINT) - CAST(5 AS UBIGINT) AS d, CAST(3 AS UBIGINT) * CAST(-5 AS BIGINT) AS m, CAST(3 AS INTEGER) + CAST(5 AS UINTEGER) AS e
+LAT	duck_us=342	burr_us=473	ratio=1.38	rows=6	SELECT CAST(log_index AS BIGINT) - block_number AS d FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=101	burr_us=412	ratio=4.08	rows=1	SELECT avg(CAST(x AS UBIGINT) * 2982776736) AS a, sum(CAST(x AS UBIGINT) * 2982776736) AS s FROM range(1000000000, 1000000063) t(x)
+LAT	duck_us=96	burr_us=397	ratio=4.14	rows=1	SELECT max(CAST(x AS UBIGINT)), max(CAST(x AS BIGINT)), max(x), max(x) + 1 AS d FROM range(1, 6) t(x)
+LAT	duck_us=224	burr_us=577	ratio=2.58	rows=2	SELECT x % 2 AS k, sum(CAST(x AS UBIGINT)) AS a FROM range(1, 6) t(x) GROUP BY 1 HAVING sum(CAST(x AS BIGINT)) > 4 ORDER BY sum(x) DESC
+LAT	duck_us=96	burr_us=396	ratio=4.12	rows=1	SELECT avg(CAST(x AS UBIGINT) * 2982776736) AS a, avg(CAST(x AS BIGINT) * 2982776736) AS b FROM range(1000000000, 1000000063) t(x)
+LAT	duck_us=82	burr_us=431	ratio=5.26	rows=1	SELECT epoch(to_timestamp(ts)) = COALESCE(ts, w) AS eq, 1.5::DOUBLE < CAST(2 AS HUGEINT) AS lt FROM (VALUES (CAST(1700000000 AS UBIGINT), CAST(3 AS BIGINT))) t(ts, w)
+LAT	duck_us=354	burr_us=826	ratio=2.33	rows=3	SELECT extract(minute FROM to_timestamp(ts)) AS x FROM (VALUES (CAST(1700000040 AS UBIGINT)), (CAST(1700000100 AS UBIGINT)), (CAST(1700000160 AS UBIGINT))) t(ts) EXCEPT ALL SELECT abs(a) FROM (VALUES (CAST(1 AS BIGINT)), (CAST(-2 AS BIGINT))) u(a) ORDER BY 1
+LAT	duck_us=296	burr_us=1060	ratio=3.58	rows=1	SELECT CASE WHEN true THEN extract(minute FROM to_timestamp(ts)) ELSE (w - ts) END AS x FROM (VALUES (CAST(1700000040 AS UBIGINT), CAST(3 AS BIGINT))) t(ts, w) EXCEPT ALL SELECT abs(a) FROM (VALUES (CAST(1 AS BIGINT))) u(a) ORDER BY 1
+LAT	duck_us=737	burr_us=1304	ratio=1.77	rows=5	SELECT "from", arg_max(block_number, block_timestamp * 10 + log_index) AS a, arg_min("to", block_timestamp * 10 + log_index) AS b, max_by(value, block_timestamp * 10 + log_index) AS c, min_by(value, block_timestamp * 10 + log_index) FILTER (WHERE value <> '4') AS d FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=102	burr_us=363	ratio=3.56	rows=1	SELECT arg_max(x, y) AS a, arg_min(x, y) AS b FROM (VALUES (1, 5), (NULL, 9), (3, NULL), (4, 6)) t(x, y)
+LAT	duck_us=575	burr_us=682	ratio=1.19	rows=5	SELECT "from", last(value ORDER BY block_number, log_index) AS a, first(value ORDER BY block_number, log_index) AS b, last("to" ORDER BY block_number, log_index) FILTER (WHERE value <> '4') AS c FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=132	burr_us=347	ratio=2.63	rows=1	SELECT last(x ORDER BY y) AS a, first(x ORDER BY y) AS b, last(x ORDER BY y) FILTER (WHERE x IS NOT NULL) AS c FROM (VALUES (1, 5), (NULL, 9), (3, 2), (4, 6)) t(x, y)
+LAT	duck_us=477	burr_us=683	ratio=1.43	rows=6	SELECT CAST(sum(CAST(value AS BIGNUM)) AS VARCHAR) AS s, CAST(CAST(0 AS BIGNUM) - CAST(value AS BIGNUM) AS VARCHAR) AS neg FROM transfer GROUP BY value ORDER BY value
+LAT	duck_us=488	burr_us=794	ratio=1.63	rows=6	SELECT hex(10) AS a, hex(255) AS b, hex(0) AS c, lpad(hex(block_number & 255), 2, '0') AS d, regexp_full_match("from", '0x[0-9a-f]+') AS e, regexp_full_match("from", '0x') AS f FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=345	burr_us=1211	ratio=3.51	rows=3	WITH RECURSIVE f(a, b, c, d) AS (SELECT DISTINCT 1, CAST(0 AS BIGNUM), CAST(0 AS BIGNUM), 0 UNION ALL SELECT a + 1, b, c, d FROM f WHERE a < 3) SELECT a, CAST(b AS VARCHAR) AS b, d FROM f ORDER BY a
+LAT	duck_us=630	burr_us=1110	ratio=1.76	rows=5	WITH c(id, b) AS (VALUES (1, 10), (1, 10), (1, 30), (2, 10), (3, 50)), d(id, b, v) AS (VALUES (1, 5, 'early'), (1, 20, 'mid'), (1, 40, 'late'), (2, 15, 'two'), (3, 40, 'before')) SELECT c.id, c.b, (SELECT d.v FROM d WHERE d.id = c.id AND d.b > c.b ORDER BY d.b DESC LIMIT 1) AS v FROM c ORDER BY c.id, c.b
+LAT	duck_us=608	burr_us=1076	ratio=1.77	rows=5	WITH c(id, b) AS (VALUES (1, 10), (1, 10), (1, 30), (2, 10), (3, 50)), d(id, b, v) AS (VALUES (1, 5, 'early'), (1, 20, 'mid'), (1, 40, 'late'), (2, 15, 'two'), (3, 40, 'before')) SELECT c.id, c.b, x.v FROM c LEFT JOIN LATERAL (SELECT d.v FROM d WHERE d.id = c.id AND d.b > c.b ORDER BY d.b ASC LIMIT 1) x ON true ORDER BY c.id, c.b
+LAT	duck_us=652	burr_us=1248	ratio=1.91	rows=6	WITH c(id, b) AS (VALUES (1, 10), (1, 10), (1, 30), (2, 10), (3, 50)), d(id, b, v) AS (VALUES (1, 5, 'early'), (1, 20, 'mid'), (1, 40, 'late'), (2, 15, 'two'), (3, 40, 'before')) SELECT c.id, c.b, x.v FROM c CROSS JOIN LATERAL (SELECT d.v, d.b FROM d WHERE d.id = c.id AND d.b > c.b ORDER BY d.b DESC LIMIT 2) x ORDER BY c.id, c.b, x.b
+LAT	duck_us=345	burr_us=528	ratio=1.53	rows=5	WITH c(id, b) AS (VALUES (1, 10), (1, 10), (1, 30), (2, 10), (3, 50)) SELECT c.id, c.b, r.x, r.y FROM c CROSS JOIN LATERAL (SELECT CASE WHEN c.b > 20 THEN c.b * 2 ELSE 0 END AS x, c.id + 100 AS y) r ORDER BY c.id, c.b
+LAT	duck_us=161	burr_us=374	ratio=2.32	rows=1	WITH s AS (SELECT true AS p WHERE false) SELECT coalesce((SELECT p FROM s), false) AS x, (SELECT p FROM s) IS NULL AS y
+LAT	duck_us=357	burr_us=569	ratio=1.59	rows=6	SELECT log_index >> 8 AS a, log_index >> 64 AS b, (log_index >> 1) & 255 AS d, log_index << 3 AS e FROM transfer ORDER BY 1
+LAT	duck_us=76	burr_us=212	ratio=2.79	rows=1	SELECT CAST(-1000 AS BIGINT) >> 70 AS a, CAST(-1000 AS BIGINT) >> 3 AS b, CAST(1000 AS INTEGER) >> 40 AS c, CAST(1 AS UBIGINT) << 63 AS d
+LAT	duck_us=223	burr_us=921	ratio=4.13	rows=3	WITH pool(id, liquidity) AS (VALUES ('0xaaa', 5), ('0xbbb', 6), ('0xbbb', 8)), swap(id, pool) AS (VALUES ('s1', '0xaaa'), ('s2', '0xaaa'), ('s5', '0xccc')) SELECT c.id, (SELECT p.liquidity FROM pool p WHERE p.id = c.pool) AS l FROM swap c ORDER BY 1
+LAT	duck_us=1016	burr_us=2459	ratio=2.42	rows=2	WITH pool(id, liquidity) AS (VALUES ('0xaaa', 5), ('0xbbb', 6)), swap(id, pool) AS (VALUES ('s1', '0xaaa'), ('s2', '0xaaa'), ('s3', '0xaaa'), ('s4', '0xbbb')) SELECT b.id, (SELECT to_json(list(t.s)) FROM (SELECT struct_pack("id" := c.id, "pool" := (SELECT struct_pack("id" := p.id, "liquidity" := p.liquidity) FROM pool p WHERE p.id = c.pool)) AS s FROM swap c WHERE c.pool = b.id ORDER BY c.id LIMIT 2 OFFSET 1) t) AS l FROM pool b ORDER BY 1
+LAT	duck_us=597	burr_us=812	ratio=1.36	rows=2	SELECT "from", coalesce((SELECT true FROM label WHERE addr = 'nobody'), false) AS x FROM transfer ORDER BY 1 LIMIT 2
+LAT	duck_us=279	burr_us=1017	ratio=3.65	rows=4	WITH RECURSIVE t(n, s) AS MATERIALIZED (SELECT 1, CAST('1' AS BIGNUM) UNION ALL SELECT n + 1, s + CAST('1000000000000000000' AS BIGNUM) FROM t WHERE n < 4) SELECT n, CAST(s AS VARCHAR) AS s FROM t ORDER BY n
+LAT	duck_us=70	burr_us=204	ratio=2.91	rows=1	SELECT json_extract_string('{"a": {"b": 7}, "c": [1, 2]}', '$.a.b') AS a, json_extract('{"a": {"b": 7}}', '$.a') AS b, json_extract_string('{"c": [1, 2]}', '$.c[1]') AS c, json_extract_string('{"a": 1}', '$.zz') AS d
+LAT	duck_us=62	burr_us=160	ratio=2.58	rows=1	SELECT '{"a": 1, "b": "x"}'->>'b' AS a, '{"a": {"k": 2}}'->'a' AS b, '{"a": {"k": 2}}'->>'$.a.k' AS c
+LAT	duck_us=66	burr_us=212	ratio=3.21	rows=1	SELECT json_type('{"a": 1}') AS a, json_type('[1]') AS b, json_type('1.5') AS c, json_type('"x"') AS d, json_type('1') AS e, json_type('-1') AS f, json_type('0') AS g
+LAT	duck_us=120	burr_us=413	ratio=3.44	rows=1	SELECT json_extract('{"a": [1, {"b": null}], "c": "x", "d": 1.50, "e": 12345678901234567890}', '$.a[1]') a, json_extract_string('{"a": {"b": null}}', '$.a.b') b, json_extract_string('{"c": "x"}', 'c') c, json_extract('[10, 20]', 1) d, json_extract_string('{"d": 1.50}', '$.d') e, json_extract('{"e": 12345678901234567890}', '$.e') f, json_type('{"e": 12345678901234567890}', '$.e') g, json_type('{"x": -1}', '$.x') h, json_type('null') i, json_type('true') j, json_extract('{"a b": 1}', '$."a b"') k, json_extract('[1,2,3]', '$[#-1]') l, json_extract('{"a":1}', '$.z') m
+LAT	duck_us=63	burr_us=178	ratio=2.83	rows=1	SELECT '[1,2]'->1 AS v, '{"a": {"b": 3}}'->'a'->>'b' AS w, json_extract_string(NULL, '$.a') AS x
+LAT	duck_us=56	burr_us=132	ratio=2.36	rows=1	SELECT from_json('{"a": 1, "b": "x"}', '{"a": "INTEGER", "b": "VARCHAR"}').b AS b
+LAT	duck_us=97	burr_us=356	ratio=3.67	rows=1	SELECT s.a, s.b, s.c, s.d, s.e FROM (SELECT from_json('{"a": "5", "b": 7, "c": 2.5, "d": true}', '{"a": "INTEGER", "b": "VARCHAR", "c": "DOUBLE", "d": "BOOLEAN", "e": "VARCHAR"}') AS s)
+LAT	duck_us=104	burr_us=300	ratio=2.88	rows=1	SELECT from_json('{"a": "x"}', '{"a": "INTEGER"}').a AS a, from_json('{"A": 1}', '{"a": "INTEGER"}').a AS c, from_json('{"n": {"k": "v"}}', '{"n": {"k": "VARCHAR"}}').n.k AS k, len(from_json('{"a": [1, 2]}', '{"a": ["BIGINT"]}').a) AS n
+LAT	duck_us=80	burr_us=178	ratio=2.23	rows=1	SELECT TRY(CAST('x' AS INTEGER)) AS a, TRY(1 // 0) AS b, TRY(CAST('7' AS INTEGER)) AS c
+LAT	duck_us=127	burr_us=274	ratio=2.16	rows=4	SELECT j, TRY(json_extract_string(j, '$.a')) AS a FROM (VALUES ('{"a": 1}'), ('bad'), (NULL), ('{"a": "x"}')) t(j) ORDER BY 1
+LAT	duck_us=110	burr_us=257	ratio=2.34	rows=3	SELECT TRY(from_hex(h)) IS NULL AS failed FROM (VALUES ('4142'), ('zz'), ('00')) t(h) ORDER BY h
+LAT	duck_us=594	burr_us=706	ratio=1.19	rows=5	SELECT "from", block_number FROM transfer QUALIFY row_number() OVER (PARTITION BY "from" ORDER BY block_number DESC, log_index DESC) = 1 ORDER BY 1
+LAT	duck_us=435	burr_us=566	ratio=1.30	rows=6	SELECT block_number, sum(log_index) OVER w AS s FROM transfer WINDOW w AS (ORDER BY block_number, log_index) ORDER BY 1, 2
+LAT	duck_us=567	burr_us=680	ratio=1.20	rows=6	SELECT "from", block_number, log_index, last_value(CASE WHEN log_index % 3 = 0 THEN block_number END IGNORE NULLS) OVER (PARTITION BY "from" ORDER BY block_number, log_index ROWS UNBOUNDED PRECEDING) AS l FROM transfer ORDER BY 1, 2, 3
+LAT	duck_us=588	burr_us=781	ratio=1.33	rows=12	SELECT block_number, log_index, log_index FROM transfer UNION ALL SELECT block_number, block_number, log_index FROM transfer ORDER BY 1, 2, 3
+LAT	duck_us=639	burr_us=962	ratio=1.51	rows=1	SELECT count(*), count(DISTINCT b) FROM (SELECT block_number AS a, log_index AS b FROM transfer UNION ALL SELECT block_number, block_number FROM transfer) s
+LAT	duck_us=552	burr_us=676	ratio=1.22	rows=6	SELECT "from", block_number, log_index, first_value(CASE WHEN log_index % 3 = 1 THEN log_index END IGNORE NULLS) OVER (PARTITION BY "from" ORDER BY block_number, log_index) AS f FROM transfer ORDER BY 1, 2, 3
+LAT	duck_us=71	burr_us=152	ratio=2.14	rows=3	SELECT range AS r FROM range(3) ORDER BY 1
+LAT	duck_us=69	burr_us=114	ratio=1.65	rows=3	SELECT * FROM range(2, 11, 4) ORDER BY 1
+LAT	duck_us=61	burr_us=117	ratio=1.92	rows=3	SELECT * FROM generate_series(5, 1, -2) ORDER BY 1 DESC
+LAT	duck_us=72	burr_us=165	ratio=2.29	rows=1	SELECT count(*) AS n FROM range(0)
+LAT	duck_us=423	burr_us=680	ratio=1.61	rows=3	SELECT r.x, t.block_number FROM range(1, 3) r(x) JOIN transfer t ON t.block_number = r.x ORDER BY 1, 2
+LAT	duck_us=68	burr_us=160	ratio=2.35	rows=3	SELECT * FROM generate_series(1, 3) t(x) ORDER BY 1
+LAT	duck_us=47	burr_us=200	ratio=4.26	rows=3	SELECT unnest([1, 2, 3]) AS u
+LAT	duck_us=191	burr_us=1430	ratio=7.49	rows=1	SELECT x FROM (VALUES (1), (2), (3)) t(x) WHERE x = 3 OR x NOT IN (SELECT y FROM (VALUES (1), (NULL)) s(y)) ORDER BY 1
+LAT	duck_us=189	burr_us=2678	ratio=14.17	rows=1	SELECT x FROM (VALUES (1), (2), (3)) t(x) WHERE CASE WHEN x NOT IN (SELECT y FROM (VALUES (1), (NULL)) s(y)) THEN true ELSE x = 3 END ORDER BY 1
+LAT	duck_us=170	burr_us=1471	ratio=8.65	rows=2	SELECT x FROM (VALUES (1), (2), (3)) t(x) WHERE x = 3 OR x IN (SELECT y FROM (VALUES (1), (NULL)) s(y)) ORDER BY 1
+LAT	duck_us=153	burr_us=353	ratio=2.31	rows=0	SELECT x FROM (VALUES (1), (2), (3)) t(x) WHERE x NOT IN (SELECT y FROM (VALUES (1), (NULL)) s(y)) ORDER BY 1
+LAT	duck_us=1057	burr_us=1300	ratio=1.23	rows=1	SELECT (SELECT count(DISTINCT addr) FROM label) AS n_all, (SELECT count(DISTINCT addr) FROM label WHERE addr NOT IN (SELECT "to" AS addr FROM transfer WHERE log_index > 0)) AS n_active
+LAT	duck_us=1010	burr_us=5171	ratio=5.12	rows=6	SELECT "from", "from" IN (SELECT "to" FROM transfer) AS bare_outer, t."from" IN (SELECT "to" FROM transfer) AS qualified FROM transfer t ORDER BY block_number, log_index
+LAT	duck_us=438	burr_us=782	ratio=1.79	rows=6	SELECT 7.5::DOUBLE // 2 AS a, -7.5::DOUBLE // 2 AS b, 7::DOUBLE // 0 AS c, CAST(7 AS BIGINT) // 2.0::DOUBLE AS f, 1.5 // 1 AS g, block_number // 2.5 AS h FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=498	burr_us=733	ratio=1.47	rows=5	SELECT "from", bool_and(enabled = 'true') AS a, count(value = '10') AS b, bool_or('10' = value) AS c, bool_or("from" = "to") AS d FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=572	burr_us=767	ratio=1.34	rows=5	SELECT "from", count(DISTINCT CASE WHEN "to" <> "from" THEN "to" ELSE '0xz' END) AS d, count(*) AS n FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=517	burr_us=686	ratio=1.33	rows=4	SELECT k, count(*) AS n FROM (SELECT CASE WHEN "to" <> "from" THEN "to" ELSE '0xz' END AS k FROM transfer GROUP BY 1) GROUP BY 1 ORDER BY 1
+LAT	duck_us=70	burr_us=292	ratio=4.17	rows=1	SELECT to_timestamp(64814395658) AS a, to_timestamp(1.5) AS b, to_timestamp(-1.5) AS c, CAST(to_timestamp(64814395658) AS VARCHAR) AS d
+LAT	duck_us=410	burr_us=7295	ratio=17.79	rows=3	SELECT x, x IN (SELECT y FROM (VALUES (1), (NULL)) s(y)) AS a, x NOT IN (SELECT y FROM (VALUES (1), (NULL)) s(y)) AS b, x IN (SELECT y FROM (VALUES (1)) s(y)) AS c, x IN (SELECT y FROM (VALUES (1)) s(y) WHERE false) AS d FROM (VALUES (1), (2), (NULL)) t(x) ORDER BY x
+LAT	duck_us=1476	burr_us=3993	ratio=2.71	rows=6	SELECT block_number, "to" IN (SELECT addr FROM label) AS labelled, EXISTS (SELECT 1 FROM label l WHERE l.addr = t."from") AS known, NOT EXISTS (SELECT 1 FROM label l WHERE l.addr = t."to" AND l.name = 'carol') AS not_carol FROM transfer t ORDER BY block_number, log_index
+LAT	duck_us=790	burr_us=3083	ratio=3.90	rows=5	SELECT "from", count(*) FILTER (WHERE true) AS n, bool_or("to" IN (SELECT addr FROM label WHERE name <> 'alice')) AS any_label FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=921	burr_us=1369	ratio=1.49	rows=6	SELECT CASE WHEN EXISTS (SELECT 1 FROM label l WHERE lower(l.addr) = lower(t."from")) THEN 'known' ELSE 'unknown' END AS k FROM transfer t ORDER BY block_number, log_index
+LAT	duck_us=1458	burr_us=1980	ratio=1.36	rows=6	SELECT block_number, log_index, (SELECT sum(length(name)) FROM label l WHERE lower(l.addr) = lower(t."from") AND l.name <> 'x') AS n, (SELECT max(l.name) FROM label l WHERE upper(l.addr) = upper(t."to")) AS m FROM transfer t ORDER BY 1, 2
+LAT	duck_us=1023	burr_us=1268	ratio=1.24	rows=2	SELECT "from" FROM transfer t WHERE (SELECT count(*) FROM label l WHERE lower(l.addr) = lower(t."from")) = 0 ORDER BY 1
+LAT	duck_us=1167	burr_us=3148	ratio=2.70	rows=3	SELECT t."from", bool_or(EXISTS (SELECT 1 FROM label x WHERE x.addr = t."to")) AS a, sum(CASE WHEN t."to" IN (SELECT addr FROM label) THEN 1 ELSE 0 END) AS s, count(*) AS n FROM transfer t JOIN label l ON lower(l.addr) = lower(t."from") GROUP BY 1 ORDER BY 1
+LAT	duck_us=1253	burr_us=6451	ratio=5.15	rows=6	SELECT t.block_number, t.log_index, "to" IN (SELECT "to" FROM transfer x WHERE x.log_index > 0) AS a, "to" NOT IN (SELECT "to" FROM transfer x WHERE x.block_number > 2) AS b FROM transfer t LEFT JOIN label l ON l.addr = t."from" ORDER BY 1, 2
+LAT	duck_us=1079	burr_us=1877	ratio=1.74	rows=9	SELECT block_number AS x FROM transfer t WHERE EXISTS (SELECT 1 FROM label l WHERE l.addr = t."from") UNION ALL SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM label l WHERE l.addr = t."to") THEN 1 ELSE 0 END FROM transfer t ORDER BY 1
+LAT	duck_us=1181	burr_us=4976	ratio=4.21	rows=5	SELECT "from", sum(CASE WHEN "to" IN (SELECT addr FROM label) THEN 1 ELSE 0 END) AS to_labelled, count(*) FILTER (WHERE EXISTS (SELECT 1 FROM label l WHERE l.addr = transfer."from")) AS from_labelled FROM transfer GROUP BY 1 HAVING bool_or("to" NOT IN (SELECT addr FROM label)) IS NOT NULL ORDER BY 1
+LAT	duck_us=427	burr_us=790	ratio=1.85	rows=6	SELECT date_trunc('day', CAST(to_timestamp(block_timestamp) AS DATE)) AS a, CAST(to_timestamp(block_timestamp) AS DATE) + INTERVAL 33 HOUR AS b, CAST(to_timestamp(block_timestamp) AS DATE) + 3 AS c FROM transfer ORDER BY 1, 2
+LAT	duck_us=408	burr_us=707	ratio=1.73	rows=6	SELECT CASE WHEN log_index = 0 THEN CAST(value AS DECIMAL(20,2)) ELSE 2.5::DOUBLE END AS a, COALESCE(TRY_CAST(value AS HUGEINT), 0.5::DOUBLE) AS b FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=282	burr_us=472	ratio=1.67	rows=2	SELECT log_index FROM transfer WHERE block_number - 95 > 0
+LAT	duck_us=374	burr_us=534	ratio=1.43	rows=6	SELECT length('héllo') AS a, char_length('ab') AS b, length("from") AS c FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=707	burr_us=1292	ratio=1.83	rows=1	SELECT count(*) AS n FROM (SELECT * FROM transfer x JOIN transfer y ON x.block_number = y.block_number)
+LAT	duck_us=490	burr_us=635	ratio=1.30	rows=2	WITH j AS (SELECT * FROM label a JOIN label b ON a.addr = b.addr) SELECT addr_1, name_1 FROM j ORDER BY 1
+LAT	duck_us=374	burr_us=500	ratio=1.34	rows=3	SELECT block_number FROM transfer WHERE block_number > 1.5 AND block_number < 150.0 ORDER BY 1
+LAT	duck_us=339	burr_us=573	ratio=1.69	rows=1	SELECT sum(block_number * 0.5) AS s, avg(block_number) + 0.5 AS a FROM transfer
+LAT	duck_us=82	burr_us=363	ratio=4.43	rows=1	SELECT list_reduce([1, 2, 3], lambda a, x: a * 10 + x) AS a, list_reduce([1.5, 2.25], lambda a, x: a + x) AS b
+LAT	duck_us=670	burr_us=670	ratio=1.00	rows=5	SELECT "from", list_reduce(list(block_number ORDER BY block_number, log_index), lambda a, x: a * 1000 + x) AS r FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=525	burr_us=685	ratio=1.30	rows=6	SELECT block_number, block_number - 95 > 0 AS a, 200 - block_number < 100 AS b, block_number * 2 = 300 AS c, block_number * 2 = 301 AS d, block_number * 2 <> 301 AS e, block_number + 5 = 3 AS f, block_number * -2 < -4 AS g FROM transfer ORDER BY 1, 2
+LAT	duck_us=605	burr_us=807	ratio=1.33	rows=6	SELECT block_number, log_index, (log_index - 87) BETWEEN 10 AND 49 AS a, (block_number - 2) NOT BETWEEN 0 AND 100 AS b, (200 - block_number) BETWEEN 50 AND 199 AS c, block_number BETWEEN 2 AND 3 AS d, log_index BETWEEN -1 AND 1 AS e FROM transfer WHERE (log_index - 1) NOT BETWEEN 5 AND 9 ORDER BY 1, 2
+LAT	duck_us=391	burr_us=683	ratio=1.75	rows=1	SELECT count(*) FILTER (WHERE block_number + 1 - 2 > 0) AS a, count(*) FILTER (WHERE 0 < block_number - 2) AS b, count(*) FILTER (WHERE block_number - NULL > 0) AS c, count(*) FILTER (WHERE 3 - block_number >= 1) AS d FROM transfer
+LAT	duck_us=524	burr_us=791	ratio=1.51	rows=5	SELECT "from", avg(CASE WHEN log_index > 0 THEN -8 ELSE 2.5 END) AS a, avg(round(block_number / 7, 1) - 28) AS b FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=585	burr_us=923	ratio=1.58	rows=12	SELECT epoch(date_trunc('month', to_timestamp(block_timestamp))) AS x FROM transfer UNION ALL SELECT CAST(block_number AS HUGEINT) FROM transfer ORDER BY 1
+LAT	duck_us=729	burr_us=762	ratio=1.05	rows=6	SELECT CAST(log_index AS DOUBLE) AS x FROM transfer UNION SELECT CAST(block_number AS DECIMAL(10,2)) FROM transfer ORDER BY 1
+LAT	duck_us=849	burr_us=1027	ratio=1.21	rows=5	SELECT epoch(to_timestamp(block_timestamp)) AS x FROM transfer EXCEPT SELECT CAST(block_number AS HUGEINT) * 2 FROM transfer ORDER BY 1
+LAT	duck_us=837	burr_us=1124	ratio=1.34	rows=2	SELECT greatest(log_index, 1) AS x FROM transfer EXCEPT SELECT CASE WHEN log_index = 1 THEN 18 ELSE CASE WHEN block_number > 2 THEN block_number ELSE -CAST(log_index AS BIGINT) END END FROM transfer ORDER BY 1
+LAT	duck_us=309	burr_us=501	ratio=1.62	rows=6	SELECT CAST(to_timestamp(block_timestamp) AS DATE) + 1 AS d FROM transfer ORDER BY 1
+LAT	duck_us=735	burr_us=2628	ratio=3.58	rows=4	SELECT "from", count(*) AS n FROM transfer t GROUP BY 1 HAVING count(*) FILTER (WHERE t."to" IN (SELECT addr FROM label)) > 0 ORDER BY 1
+LAT	duck_us=1856	burr_us=2985	ratio=1.61	rows=6	SELECT block_number, log_index, (SELECT count(*) FROM label x WHERE x.addr = t."to" AND length(x.name) > t.log_index) AS s, (SELECT max(length(x.name)) + 1 FROM label x WHERE length(x.name) > t.log_index + 2) AS m FROM transfer t ORDER BY 1, 2
+LAT	duck_us=1152	burr_us=1684	ratio=1.46	rows=6	SELECT block_number, log_index, (SELECT count(*) FROM label x WHERE length(x.name) < t.block_number) + 1 AS c FROM transfer t ORDER BY 1, 2
+LAT	duck_us=931	burr_us=1772	ratio=1.90	rows=1	SELECT count(*) AS n FROM transfer t WHERE (SELECT count(*) FROM label x WHERE length(x.name) > t.log_index + 3) = 0
+LAT	duck_us=1405	burr_us=2811	ratio=2.00	rows=6	SELECT t.block_number, (SELECT sum(length(x.name)) FROM label x WHERE x.addr <> t."from") AS s FROM transfer t JOIN transfer u ON u.block_number = t.block_number AND u.log_index = t.log_index ORDER BY 1, 2
+LAT	duck_us=2665	burr_us=3571	ratio=1.34	rows=6	SELECT t.block_number, t.log_index, (SELECT avg(length(x.name)) FROM label x WHERE x.addr > t."from") AS a, (SELECT string_agg(x.name, ',' ORDER BY x.name) FROM label x WHERE x.addr < t."to") AS g, (SELECT bool_or(x.name > 'b') FROM label x WHERE x.addr < t."to") AS b FROM transfer t ORDER BY 1, 2
+LAT	duck_us=452	burr_us=606	ratio=1.34	rows=4	SELECT lower("from") AS f, count(*) AS n FROM transfer GROUP BY ALL ORDER BY ALL
+LAT	duck_us=828	burr_us=862	ratio=1.04	rows=10	SELECT lower("to") AS f, log_index FROM transfer UNION SELECT "from", 7 FROM transfer ORDER BY ALL DESC NULLS FIRST
+LAT	duck_us=948	burr_us=839	ratio=0.89	rows=5	SELECT "from", array_length(list(block_number ORDER BY block_number, log_index)) AS n, list(log_index ORDER BY block_number, log_index)[1] AS f, list_sort(list(block_number))[-1] AS l FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=127	burr_us=513	ratio=4.04	rows=10	SELECT x, round(x / 7, 1) - CAST(1 AS HUGEINT) AS a, (x / 7) - CAST(1 AS HUGEINT) AS d FROM range(-5, 5) t(x) ORDER BY x
+LAT	duck_us=450	burr_us=554	ratio=1.23	rows=6	SELECT TRY_CAST("value" AS BIGINT) AS k, "value" AS v, count(*) AS n FROM transfer GROUP BY 1, 2 ORDER BY 2
+LAT	duck_us=416	burr_us=584	ratio=1.40	rows=6	SELECT substr("value", -3, 2) AS a, substr("value", 0, 2) AS b, substr("value", -2) AS c, substr("value", 2, -2) AS d FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=72	burr_us=203	ratio=2.82	rows=1	SELECT substr('naïve', -2, 2) AS a, substr('abcdef', -10) AS b, substr('abcdef', 5, -3) AS c, substr('ééé', 0, 2) AS d
+LAT	duck_us=99	burr_us=367	ratio=3.71	rows=1	SELECT string_split('a,b,c', ',')[1] AS a, string_split('a,,c', ',')[2] AS b, string_split('abc', '')[2] AS c, string_split('ab', NULL)[1] AS d, string_split('', '')[1] AS e, str_split('a::b', '::')[-1] AS f
+LAT	duck_us=383	burr_us=628	ratio=1.64	rows=6	SELECT "from", string_split(COALESCE(substr("value", -4), ''), '')[1] AS c FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=383	burr_us=568	ratio=1.48	rows=6	SELECT xor(block_number, 7) AS a, xor(log_index, 3) AS b, xor(CAST(block_number AS BIGINT), log_index) AS c FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=400	burr_us=593	ratio=1.48	rows=6	SELECT xor(1, 2) AS a, xor(-1, 1) AS b, least(block_number, 2) AS c, power(2, log_index) AS d FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=447	burr_us=724	ratio=1.62	rows=6	SELECT [1, 2, 3][1] AS a, [1, 2, 3][-1] AS b, list_reduce([1, 2, block_number], lambda a, x: a + x) AS r FROM transfer ORDER BY block_number
+LAT	duck_us=437	burr_us=914	ratio=2.09	rows=6	SELECT [5, block_number, 4][1] AS a, [5, block_number, 4][2] AS b, [5, block_number, 4][-1] AS c, [-1, block_number][1] AS n FROM transfer ORDER BY block_number
+LAT	duck_us=559	burr_us=640	ratio=1.14	rows=6	SELECT t.block_number, l.name FROM transfer t FULL JOIN label l ON l.addr = t."to" ORDER BY 1, 2
+LAT	duck_us=451	burr_us=753	ratio=1.67	rows=5	SELECT t.block_number, v.n FROM transfer t JOIN (VALUES (0), (1), (NULL)) v(n) ON t.log_index = v.n ORDER BY 1, 2
+LAT	duck_us=45	burr_us=204	ratio=4.53	rows=3	SELECT unnest(string_split('a,b,c', ',')) AS c
+LAT	duck_us=334	burr_us=605	ratio=1.81	rows=1	SELECT decode(from_hex('6162')) AS t, from_hex('abc') AS b, (block_number::VARCHAR) AS s, (5::HUGEINT) AS h FROM transfer ORDER BY block_number LIMIT 1
+LAT	duck_us=134	burr_us=783	ratio=5.84	rows=1	SELECT [x * 2 FOR x IN [1, 2, 3]][1] AS a, [x * 2 FOR x IN [1, 2, 3]][-1] AS b, [x * 2 FOR x IN [1, 2, 3] IF x > 1][1] AS c
+LAT	duck_us=90	burr_us=644	ratio=7.16	rows=1	SELECT list_reduce([CAST(strpos('0123456789abcdef', c) - 1 AS HUGEINT) FOR c IN string_split(substr('00ab10ff', -4), '')], lambda acc, d: acc * 16 + d) AS h
+LAT	duck_us=421	burr_us=744	ratio=1.77	rows=6	SELECT [c FOR c IN string_split("value", '') IF c <> '0'][1] AS c FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=468	burr_us=672	ratio=1.44	rows=4	SELECT lower("to") AS p, CAST(SUM(CAST("value" AS HUGEINT)) AS VARCHAR) AS value FROM transfer GROUP BY 1 ORDER BY SUM(CAST("value" AS HUGEINT)) DESC
+LAT	duck_us=379	burr_us=498	ratio=1.31	rows=6	SELECT value_dec // 1000000000000000000 AS a FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=421	burr_us=797	ratio=1.89	rows=1	SELECT sum(value_dec) // 3 AS a, 1::DECIMAL(38,0) // 3 AS b, CAST(7 AS HUGEINT) // 2 AS c, CAST(7 AS DECIMAL(10,0)) // 2 AS d, CAST(7 AS BIGNUM) // 2 AS e, sum(block_number) // 2 AS f FROM transfer
+LAT	duck_us=228	burr_us=349	ratio=1.53	rows=2	SELECT value_dec // 3 AS a, value_dec // 0 AS b FROM wide
+LAT	duck_us=80	burr_us=379	ratio=4.74	rows=1	SELECT COALESCE(CAST(7 AS HUGEINT), 0) // CAST(2 AS HUGEINT) AS a, COALESCE(CAST(7 AS HUGEINT), 0) // 2 AS b, IFNULL(CAST(7 AS HUGEINT), 0) // 2 AS c
+LAT	duck_us=74	burr_us=285	ratio=3.85	rows=1	SELECT CASE WHEN true THEN CAST(7 AS HUGEINT) ELSE 0 END // 2 AS a, CASE WHEN true THEN CAST(7 AS HUGEINT) ELSE -CAST(7 AS HUGEINT) END // 2 AS b
+LAT	duck_us=71	burr_us=252	ratio=3.55	rows=1	SELECT CAST(7 AS HUGEINT) // CAST(2 AS HUGEINT) AS a, CAST(7 AS DECIMAL(10,0)) // 2 AS b, CAST(CAST(7 AS HUGEINT) AS DECIMAL(38,0)) // 2 AS c
+LAT	duck_us=325	burr_us=588	ratio=1.81	rows=1	SELECT sum(CAST(value AS HUGEINT)) // 3 AS a, COALESCE(sum(CAST(value AS HUGEINT)), 0) // 3 AS b FROM transfer
+LAT	duck_us=88	burr_us=349	ratio=3.97	rows=1	SELECT greatest(CAST(7 AS HUGEINT), 0) // 2 AS a, least(CAST(7 AS HUGEINT), 9) // 2 AS b, NULLIF(CAST(7 AS HUGEINT), 0) // 2 AS c
+LAT	duck_us=430	burr_us=841	ratio=1.96	rows=6	SELECT COALESCE(value_dec, 0) // 2 AS a, COALESCE(CAST(7 AS HUGEINT), CAST(0 AS DECIMAL(38,0))) // 2 AS b, CASE WHEN true THEN CAST(7 AS HUGEINT) ELSE CAST(0 AS DECIMAL(10,0)) END // 2 AS c FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=456	burr_us=879	ratio=1.93	rows=6	SELECT COALESCE(CAST(value AS HUGEINT), block_number) // 2 AS a, CAST(7 AS HUGEINT) * (1000000 - COALESCE(CAST(3 AS HUGEINT), 0)) // 1000000 AS b FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=373	burr_us=711	ratio=1.91	rows=6	SELECT d // 2 AS a, x // 4 AS b FROM (SELECT COALESCE(CAST(value AS HUGEINT), 0) AS d, CASE WHEN log_index > 0 THEN CAST(value AS HUGEINT) ELSE 0 END AS x FROM transfer) t ORDER BY 1, 2
+LAT	duck_us=70	burr_us=305	ratio=4.36	rows=1	SELECT COALESCE(CAST(7 AS UBIGINT), CAST(7 AS HUGEINT)) // 2 AS a, COALESCE(CAST(7 AS INTEGER), CAST(7 AS DECIMAL(10,0))) // 2 AS b
+LAT	duck_us=398	burr_us=754	ratio=1.89	rows=6	SELECT IFNULL(CAST(value AS HUGEINT), 0) AS a, IFNULL(value_dec, 0) AS c, IFNULL(block_number, 0) AS d, IFNULL(NULL, 'x') AS e FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=351	burr_us=543	ratio=1.55	rows=6	SELECT IFNULL(block_number, 0), ifnull("from", 'z') FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=502	burr_us=560	ratio=1.12	rows=5	SELECT "from" AS who, sum(value_dec) AS s FROM transfer GROUP BY who ORDER BY -s
+LAT	duck_us=467	burr_us=561	ratio=1.20	rows=5	SELECT "from" AS who, sum(value_dec) AS s FROM transfer GROUP BY who ORDER BY s::DOUBLE DESC, who
+LAT	duck_us=476	burr_us=540	ratio=1.13	rows=5	SELECT "from" AS who, sum(value_dec) AS s FROM transfer GROUP BY who ORDER BY CAST(s AS VARCHAR), who
+LAT	duck_us=486	burr_us=874	ratio=1.80	rows=6	SELECT block_number % 0 AS a, log_index % 0 AS b, 7 % 0 AS c, 7.5::DOUBLE % 0 AS d, 7.5 % 0 AS e, value_dec % 0 AS f, block_number % log_index AS g FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=63	burr_us=217	ratio=3.44	rows=1	SELECT CAST(-9223372036854775807 AS BIGINT) % -1 AS a, CAST(-7 AS BIGINT) % -2 AS b, CAST(-2147483647 AS INTEGER) % -1 AS c
+LAT	duck_us=65	burr_us=310	ratio=4.77	rows=1	SELECT CAST('-9223372036854775808' AS HUGEINT) % -1 AS a, CAST('-99999999999999999999999999999999999999' AS HUGEINT) % CAST(-1 AS HUGEINT) AS b, CAST('-7' AS HUGEINT) % -2 AS c
+LAT	duck_us=268	burr_us=430	ratio=1.60	rows=1	SELECT string_agg(x, ',' ORDER BY x DESC) AS s, to_json(array_agg(x)) AS l, to_json(list(x)) AS m FROM (VALUES ('a'), ('c'), ('b'), (NULL)) t(x)
+LAT	duck_us=698	burr_us=628	ratio=0.90	rows=5	SELECT "from", string_agg(value, ',' ORDER BY block_number DESC, log_index DESC) AS s, to_json(list(value)) AS m FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=78	burr_us=245	ratio=3.14	rows=1	SELECT 'ab' LIKE 'a\b' AS a, 'a\b' LIKE 'a\\b' AS b, 'a%' LIKE 'a$%' ESCAPE '$' AS d, 'a$' LIKE 'a$$' ESCAPE '$' AS f, 'a_c' LIKE 'a\_c' ESCAPE '\' AS g, 'A%' ILIKE 'a#%' ESCAPE '#' AS h, 'a' LIKE 'a' ESCAPE '' AS i
+LAT	duck_us=406	burr_us=564	ratio=1.39	rows=6	SELECT "from" LIKE '0x_' AS a, "value" LIKE '25%' AS b, "from" || '\' LIKE '%\' AS c FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=71	burr_us=238	ratio=3.35	rows=4	SELECT s LIKE p AS m FROM (VALUES ('a\b', 'a\b'), ('ab', 'a\b'), ('a\b', 'a\\b'), ('x', NULL)) t(s, p)
+LAT	duck_us=83	burr_us=346	ratio=4.17	rows=1	SELECT TRY_CAST('1e3' AS DECIMAL(38,0)) a, TRY_CAST('1.5e18' AS HUGEINT) b, TRY_CAST('1_000' AS HUGEINT) c, TRY_CAST(' 12 ' AS HUGEINT) d, TRY_CAST('+7' AS DECIMAL(38,0)) e, TRY_CAST('1.5' AS DECIMAL(38,0)) f, TRY_CAST('-2.5' AS HUGEINT) g, TRY_CAST('0x10' AS HUGEINT) h, TRY_CAST('abc' AS HUGEINT) i, TRY_CAST('' AS DECIMAL(38,0)) j
+LAT	duck_us=102	burr_us=360	ratio=3.53	rows=1	SELECT TRY_CAST('1e38' AS DECIMAL(38,0)) a, TRY_CAST('99999999999999999999999999999999999999.5' AS DECIMAL(38,0)) c, TRY_CAST('123' AS DECIMAL(2,0)) d, TRY_CAST('1e2' AS DECIMAL(3,0)) e, TRY_CAST('1e-1' AS DECIMAL(38,0)) h, TRY_CAST('5e-1' AS HUGEINT) i, TRY_CAST('1E3' AS DECIMAL(38,0)) j, TRY_CAST('1__0' AS HUGEINT) k, TRY_CAST('1__0' AS BIGINT) l, TRY_CAST('1_0e1_0' AS HUGEINT) m, TRY_CAST('1_0.5_5' AS DECIMAL(38,0)) n
+LAT	duck_us=59	burr_us=178	ratio=3.02	rows=1	SELECT CAST('1e3' AS DECIMAL(38,0)) a, CAST('1_000' AS HUGEINT) b, CAST(' 7 ' AS HUGEINT) c, CAST('1.5' AS DECIMAL(38,0)) d
+LAT	duck_us=36	burr_us=116	ratio=3.22	rows=1	SELECT CAST('99999999999999999999999999999999999999' AS HUGEINT) AS a
+LAT	duck_us=377	burr_us=539	ratio=1.43	rows=6	SELECT TRY_CAST("value" || 'e1' AS HUGEINT) AS a, TRY_CAST("value" || '.5' AS DECIMAL(38,0)) AS b FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=139	burr_us=527	ratio=3.79	rows=1	SELECT to_json(1.5::DOUBLE) a, to_json(0.1::DOUBLE) b, to_json(1e20::DOUBLE) c, to_json(1e-7::DOUBLE) d, to_json(2.0::DOUBLE) e, to_json(-0.0::DOUBLE) f, to_json(1e21::DOUBLE) g, to_json(1e-6::DOUBLE) h, to_json(123456789012345678901234.0::DOUBLE) i, to_json('nan'::DOUBLE) j, to_json('-inf'::DOUBLE) k, to_json(0.1::FLOAT) l, to_json(1/3) m
+LAT	duck_us=107	burr_us=479	ratio=4.48	rows=1	SELECT to_json(1.50) a, to_json(100.00) b, to_json(-0.05) c, to_json(CAST(12345678901234567890.123 AS DECIMAL(38,3))) d, to_json(0.0) e, to_json(struct_pack(x := 1.5::DOUBLE, y := 2.25)) f, to_json([1.5::DOUBLE, NULL]) g, to_json(CAST(-12.340 AS DECIMAL(10,3))) h
+LAT	duck_us=489	burr_us=609	ratio=1.25	rows=1	SELECT to_json(list(s)) AS j FROM (SELECT struct_pack(k := log_index, r := CAST(value AS DOUBLE) / 1e18) AS s FROM transfer ORDER BY block_number, log_index) t
+LAT	duck_us=104	burr_us=382	ratio=3.67	rows=1	SELECT printf('%.2f', 1.5) a, printf('%f', 2.25) b, printf('%5.1f', 1.25) c, printf('%g', 1.5) d, printf('%e', 1.5) e, format('{}', 1.5) f, format('{}', 100.00) g, format('{:.3f}', 2.5) h, format('{}', CAST(12345678901234567890.123 AS DECIMAL(38,3))) i
+LAT	duck_us=92	burr_us=354	ratio=3.85	rows=1	SELECT printf('%,d', 1234567) a, printf('%,d', -1234) b, printf('%,d', 12) c, printf('%,5d|%-,8d|%,x', 1234, 1234, 255) d, printf('%,f', 1234.5::DOUBLE) e, printf('%,.0f', 999.5::DOUBLE) f, printf('%,.2f', 1234567.891) g, printf('%,X|%#,x|%,s', 4096, 4096, 'ab') h
+LAT	duck_us=402	burr_us=570	ratio=1.42	rows=6	SELECT printf('%,d', CAST(value AS HUGEINT)) a, hex(CAST(value AS HUGEINT)) b FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=64	burr_us=230	ratio=3.59	rows=1	SELECT hex(CAST(255 AS HUGEINT)) a, hex(CAST(-1 AS HUGEINT)) b, hex(CAST(0 AS HUGEINT)) c, hex(CAST(-256 AS HUGEINT)) d
+LAT	duck_us=79	burr_us=309	ratio=3.91	rows=1	SELECT if(1 < 2, 'a', 'b') a, if(NULL, 1, 2) b, if(false, 1, 2.5) c, 'abc' ^@ 'ab' d, 'abc' ^@ 'b' e, NULL ^@ 'a' f, 'ab' || 'c' ^@ 'abc' g
+LAT	duck_us=361	burr_us=512	ratio=1.42	rows=6	SELECT if(log_index > 0, 'big', NULL) AS a, "from" ^@ '0xa' AS b FROM transfer ORDER BY block_number, log_index
+LAT	duck_us=223	burr_us=400	ratio=1.79	rows=1	SELECT list_reverse_sort([3, NULL, 1, 2])[1] a, list_reverse_sort([3, NULL, 1, 2])[4] b, list_reverse_sort(['b', 'a', NULL])[2] c, list_reverse_sort(NULL) d
+LAT	duck_us=104	burr_us=226	ratio=2.17	rows=1	SELECT split_part('a,b,c', ',', 0) a, split_part('a,b,c', ',', -1) b, split_part('a,b,c', ',', 5) c
+LAT	duck_us=81	burr_us=249	ratio=3.07	rows=4	SELECT split_part(s, ',', n) AS p FROM (VALUES ('a,b', 0), (NULL, 0), ('a,b', NULL), ('a,b', 2)) t(s, n)
+LAT	duck_us=55	burr_us=165	ratio=3.00	rows=1	SELECT TIMESTAMP '2024-01-02 03:04' = TIMESTAMP '2024-01-02 03:04:00' AS a, CAST(TIMESTAMP '2024-01-02T03:04' AS VARCHAR) AS b
+LAT	duck_us=359	burr_us=590	ratio=1.64	rows=1	SELECT count(*) AS n FROM transfer WHERE block_number < '150' AND '2' <= block_number
+LAT	duck_us=83	burr_us=287	ratio=3.46	rows=1	SELECT count(*) AS n FROM (SELECT CAST(x AS BIGINT) AS u FROM range(5) t(x)) s WHERE u < '2.5'
+LAT	duck_us=275	burr_us=454	ratio=1.65	rows=1	FROM transfer SELECT block_number WHERE log_index = 1
+LAT	duck_us=176	burr_us=124	ratio=0.70	rows=2	FROM label
+LAT	duck_us=294	burr_us=385	ratio=1.31	rows=2	SELECT block_number FROM transfer ORDER BY 1 LIMIT 1.5
+LAT	duck_us=197	burr_us=235	ratio=1.19	rows=0	SELECT block_number FROM transfer ORDER BY 1 LIMIT 0.4
+LAT	duck_us=124	burr_us=511	ratio=4.12	rows=1	SELECT list_sum([1, 2, 3]) AS a, list_sum([1.5, 2.25]) AS b, list_sum([1.5::DOUBLE, 2]) AS c, list_sum([]) AS d, list_sum(NULL) AS e, list_sum([NULL, 1]) AS f, list_sum([NULL::INT]) AS g
+LAT	duck_us=486	burr_us=647	ratio=1.33	rows=5	SELECT "from", list_sum(list(block_number)) AS s, list_sum(list(CAST(value AS HUGEINT))) AS v FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=77	burr_us=305	ratio=3.96	rows=1	SELECT list_sum([1, 2]) * 2 AS a, list_sum([7, 2]) // 2 AS b
+LAT	duck_us=95	burr_us=345	ratio=3.63	rows=1	SELECT list_min([3, 1, NULL, 2]) AS a, list_max([3, 1, 2]) AS b, list_min([]) AS c, list_min(['b', 'a']) AS d, list_min(NULL) AS e
+LAT	duck_us=478	burr_us=580	ratio=1.21	rows=5	SELECT "from", list_min(list(block_number)) AS lo, list_max(list(log_index)) AS hi FROM transfer GROUP BY 1 ORDER BY 1
+LAT	duck_us=373	burr_us=426	ratio=1.14	rows=1	SELECT COUNT(DISTINCT block_number) AS n FROM transfer
+LAT	duck_us=115	burr_us=429	ratio=3.73	rows=1	SELECT (SELECT sum(v) FROM (SELECT unnest([1, 2, 3]) AS v)) AS a
+LAT	duck_us=34	burr_us=127	ratio=3.74	rows=1	SELECT * EXCLUDE (b) FROM (SELECT 1 AS a, 2 AS b) t
+LAT	duck_us=36	burr_us=121	ratio=3.36	rows=1	SELECT 'abc' LIKE 'a_c%' AS a
+LAT	duck_us=61	burr_us=183	ratio=3.00	rows=2	SELECT s LIKE p ESCAPE '\' AS m FROM (VALUES ('a%', 'a\%'), ('ab', 'a\%')) t(s, p)
+LAT	duck_us=74	burr_us=248	ratio=3.35	rows=1	SELECT sum(a) FILTER (WHERE k = 'x') AS x FROM (SELECT 1 AS a, 'x' AS k) t
+LAT	duck_us=132	burr_us=385	ratio=2.92	rows=2	SELECT 'a' AS k, a AS v FROM (SELECT 1 AS a, 2 AS b) t UNION ALL SELECT 'b', b FROM (SELECT 1 AS a, 2 AS b) t ORDER BY 1
+LAT	duck_us=46	burr_us=105	ratio=2.28	rows=1	SELECT CAST('2024-01-02 03:04:05' AS TIMESTAMP) AS a
+LAT	duck_us=60	burr_us=166	ratio=2.77	rows=1	SELECT CAST('2024-01-02 03:04:05.123456789' AS TIMESTAMP) AS a, TRY_CAST('2024-01-02 03:04:05.1234567' AS TIMESTAMP) AS b, TRY_CAST('x' AS TIMESTAMP) AS c, '2024-01-02T03:04:05'::TIMESTAMP AS d, CAST('2024-01-02' AS DATETIME) AS e
+LAT	duck_us=86	burr_us=262	ratio=3.05	rows=1	SELECT CAST(CAST('2024-01-02 03:04:05.5' AS TIMESTAMP) AS VARCHAR) AS a, date_trunc('hour', CAST('2024-01-02 03:04:05' AS TIMESTAMP)) AS b, CAST('2024-01-02 03:04:05' AS TIMESTAMP) + INTERVAL 1 DAY AS c, CAST('2024-01-02' AS TIMESTAMP) < TIMESTAMP '2024-01-03' AS d
+LAT	duck_us=356	burr_us=595	ratio=1.67	rows=2	SELECT CAST(to_timestamp(block_timestamp) AS TIMESTAMP) AS t, CAST(CAST(to_timestamp(block_timestamp) AS VARCHAR) AS TIMESTAMP) AS u FROM transfer ORDER BY 1 LIMIT 2
+LAT	duck_us=1181	burr_us=2047	ratio=1.73	rows=6	SELECT b."from", b.block_number, b.log_index, p.n, COUNT(*) OVER () AS total, COUNT(*) FILTER (WHERE b.log_index > 0) OVER () AS active FROM transfer b CROSS JOIN (SELECT f, n FROM (SELECT "from" AS f, count(*) AS n FROM transfer GROUP BY 1) g WHERE f = (SELECT min("from") FROM transfer)) p ORDER BY 2 DESC, 3, 1 LIMIT 25
+RULES	total_ms=3002
+RULE	0 stage	analyzer	ms=717.8	share=23.9%	calls=3561	changed=0	changed_ms=0.0	us_per_call=201.6	nodes_per_call=5.9
+RULE	0 stage	optimizer	ms=604.7	share=20.1%	calls=3558	changed=2864	changed_ms=222.4	us_per_call=169.9	nodes_per_call=6.4
+RULE	0 stage	sql_to_rel	ms=199.6	share=6.6%	calls=3568	changed=0	changed_ms=0.0	us_per_call=56.0	nodes_per_call=0.0
+RULE	1 analyzer	type_coercion	ms=195.9	share=6.5%	calls=7122	changed=1746	changed_ms=71.9	us_per_call=27.5	nodes_per_call=5.6
+RULE	0 stage	parse	ms=139.6	share=4.6%	calls=3572	changed=0	changed_ms=0.0	us_per_call=39.1	nodes_per_call=0.0
+RULE	3 physical	EnsureRequirements	ms=109.6	share=3.7%	calls=3558	changed=2048	changed_ms=101.3	us_per_call=30.8	nodes_per_call=0.0
+RULE	2 optimizer	simplify_expressions	ms=92.6	share=3.1%	calls=42600	changed=3159	changed_ms=42.2	us_per_call=2.2	nodes_per_call=5.0
+RULE	2 optimizer	optimize_projections	ms=80.5	share=2.7%	calls=4329	changed=4318	changed_ms=80.5	us_per_call=18.6	nodes_per_call=9.2
+RULE	2 optimizer	common_sub_expression_eliminate	ms=60.6	share=2.0%	calls=4329	changed=2084	changed_ms=51.8	us_per_call=14.0	nodes_per_call=8.6
+RULE	1 analyzer	bound_values	ms=56.2	share=1.9%	calls=3561	changed=2871	changed_ms=55.2	us_per_call=15.8	nodes_per_call=5.9
+RULE	3 physical	ProjectionPushdown	ms=55.2	share=1.8%	calls=7116	changed=1610	changed_ms=49.5	us_per_call=7.8	nodes_per_call=0.0
+RULE	1 analyzer	fast_text_casts	ms=44.5	share=1.5%	calls=3561	changed=2167	changed_ms=40.9	us_per_call=12.5	nodes_per_call=5.7
+RULE	1 analyzer	duck_comparisons	ms=44.1	share=1.5%	calls=3561	changed=1015	changed_ms=23.4	us_per_call=12.4	nodes_per_call=5.5
+RULE	1 analyzer	checked_arithmetic	ms=43.1	share=1.4%	calls=3561	changed=874	changed_ms=19.8	us_per_call=12.1	nodes_per_call=5.6
+RULE	1 analyzer	duck_semantics	ms=42.3	share=1.4%	calls=3561	changed=842	changed_ms=15.1	us_per_call=11.9	nodes_per_call=5.6
+RULE	1 analyzer	addresses	ms=34.5	share=1.1%	calls=3566	changed=0	changed_ms=0.0	us_per_call=9.7	nodes_per_call=5.5
+RULE	2 optimizer	scalar_subquery_to_join	ms=26.6	share=0.9%	calls=44643	changed=199	changed_ms=24.6	us_per_call=0.6	nodes_per_call=5.2
+RULE	3 physical	CombinePartialFinalAggregate	ms=26.5	share=0.9%	calls=3558	changed=1180	changed_ms=25.6	us_per_call=7.4	nodes_per_call=0.0
+RULE	1 analyzer	duck_doubles	ms=24.3	share=0.8%	calls=3561	changed=398	changed_ms=2.1	us_per_call=6.8	nodes_per_call=5.7
+RULE	3 physical	join_selection	ms=21.7	share=0.7%	calls=3558	changed=562	changed_ms=18.4	us_per_call=6.1	nodes_per_call=0.0
+RULE	3 physical	FilterPushdown(Post)	ms=20.0	share=0.7%	calls=3558	changed=506	changed_ms=12.5	us_per_call=5.6	nodes_per_call=0.0
+RULE	2 optimizer	eliminate_join	ms=19.4	share=0.6%	calls=4329	changed=0	changed_ms=0.0	us_per_call=4.5	nodes_per_call=7.6
+RULE	2 optimizer	extract_leaf_expressions	ms=19.2	share=0.6%	calls=4329	changed=0	changed_ms=0.0	us_per_call=4.4	nodes_per_call=9.2
+RULE	2 optimizer	rewrite_set_comparison	ms=18.5	share=0.6%	calls=4332	changed=0	changed_ms=0.0	us_per_call=4.3	nodes_per_call=7.6
+RULE	3 physical	FilterPushdown	ms=17.6	share=0.6%	calls=3558	changed=0	changed_ms=0.0	us_per_call=4.9	nodes_per_call=0.0
+RULE	1 analyzer	share_repeats	ms=16.5	share=0.6%	calls=3561	changed=0	changed_ms=0.0	us_per_call=4.6	nodes_per_call=5.7
+RULE	1 analyzer	nullable_subqueries	ms=12.9	share=0.4%	calls=3566	changed=243	changed_ms=4.2	us_per_call=3.6	nodes_per_call=5.5
+RULE	3 physical	build_on_smaller	ms=12.6	share=0.4%	calls=3558	changed=220	changed_ms=10.6	us_per_call=3.5	nodes_per_call=0.0
+RULE	2 optimizer	eliminate_duplicated_expr	ms=12.3	share=0.4%	calls=44643	changed=22	changed_ms=0.0	us_per_call=0.3	nodes_per_call=5.5
+RULE	1 analyzer	non_equi_correlation	ms=11.6	share=0.4%	calls=3561	changed=55	changed_ms=5.3	us_per_call=3.3	nodes_per_call=5.7
+RULE	2 optimizer	bound_values	ms=10.0	share=0.3%	calls=4329	changed=0	changed_ms=0.0	us_per_call=2.3	nodes_per_call=8.1
+RULE	1 analyzer	move_constants	ms=10.0	share=0.3%	calls=3561	changed=44	changed_ms=0.8	us_per_call=2.8	nodes_per_call=5.6
+RULE	1 analyzer	checked_shifts	ms=9.9	share=0.3%	calls=3561	changed=26	changed_ms=0.3	us_per_call=2.8	nodes_per_call=5.6
+RULE	1 analyzer	outermost_order	ms=9.5	share=0.3%	calls=3566	changed=11	changed_ms=0.0	us_per_call=2.7	nodes_per_call=5.5
+RULE	1 analyzer	single_row_subqueries	ms=8.8	share=0.3%	calls=3561	changed=23	changed_ms=0.5	us_per_call=2.5	nodes_per_call=5.7
+RULE	3 physical	OutputRequirements	ms=8.5	share=0.3%	calls=7116	changed=7116	changed_ms=8.5	us_per_call=1.2	nodes_per_call=0.0
+RULE	1 analyzer	fold_substitution	ms=8.2	share=0.3%	calls=3561	changed=0	changed_ms=0.0	us_per_call=2.3	nodes_per_call=5.6
+RULE	1 analyzer	top_per_group	ms=8.2	share=0.3%	calls=3561	changed=0	changed_ms=0.0	us_per_call=2.3	nodes_per_call=5.6
+RULE	3 physical	SanityCheckPlan	ms=8.1	share=0.3%	calls=3558	changed=0	changed_ms=0.0	us_per_call=2.3	nodes_per_call=0.0
+RULE	1 analyzer	distinct_rows	ms=8.0	share=0.3%	calls=3561	changed=11	changed_ms=0.1	us_per_call=2.2	nodes_per_call=5.6
+RULE	2 optimizer	push_down_filter	ms=8.0	share=0.3%	calls=44918	changed=2113	changed_ms=5.1	us_per_call=0.2	nodes_per_call=5.4
+RULE	1 analyzer	distinct_split	ms=7.9	share=0.3%	calls=3561	changed=22	changed_ms=0.4	us_per_call=2.2	nodes_per_call=5.6
+RULE	2 optimizer	eliminate_cross_join	ms=7.8	share=0.3%	calls=4329	changed=231	changed_ms=2.5	us_per_call=1.8	nodes_per_call=8.6
+RULE	1 analyzer	partition_extreme	ms=7.7	share=0.3%	calls=3561	changed=0	changed_ms=0.0	us_per_call=2.2	nodes_per_call=5.6
+RULE	1 analyzer	latest_correlation	ms=7.6	share=0.3%	calls=3561	changed=44	changed_ms=1.1	us_per_call=2.1	nodes_per_call=5.8
+RULE	3 physical	cancellable	ms=6.2	share=0.2%	calls=3558	changed=980	changed_ms=5.3	us_per_call=1.8	nodes_per_call=0.0
+RULE	1 analyzer	keyed_correlation	ms=6.1	share=0.2%	calls=3561	changed=33	changed_ms=0.4	us_per_call=1.7	nodes_per_call=5.7
+RULE	1 analyzer	subqueries_below_aggregates	ms=5.7	share=0.2%	calls=3561	changed=11	changed_ms=0.4	us_per_call=1.6	nodes_per_call=5.7
+RULE	2 optimizer	decorrelate_predicate_subquery	ms=5.7	share=0.2%	calls=44467	changed=55	changed_ms=1.3	us_per_call=0.1	nodes_per_call=5.0
+RULE	3 physical	OptimizeAggregateOrder	ms=5.5	share=0.2%	calls=3558	changed=1213	changed_ms=4.7	us_per_call=1.6	nodes_per_call=0.0
+RULE	3 physical	aggregate_statistics	ms=4.9	share=0.2%	calls=3558	changed=55	changed_ms=1.3	us_per_call=1.4	nodes_per_call=0.0
+RULE	3 physical	computed_key_filters	ms=4.2	share=0.1%	calls=3558	changed=99	changed_ms=1.6	us_per_call=1.2	nodes_per_call=0.0
+RULE	1 analyzer	resolve_grouping_function	ms=3.7	share=0.1%	calls=3566	changed=0	changed_ms=0.0	us_per_call=1.0	nodes_per_call=5.5
+RULE	2 optimizer	push_down_leaf_projections	ms=3.4	share=0.1%	calls=47079	changed=11	changed_ms=0.4	us_per_call=0.1	nodes_per_call=5.7
+RULE	3 physical	held_input	ms=3.1	share=0.1%	calls=3558	changed=1916	changed_ms=2.6	us_per_call=0.9	nodes_per_call=0.0
+RULE	3 physical	LimitPushdown	ms=2.7	share=0.1%	calls=3558	changed=154	changed_ms=0.9	us_per_call=0.8	nodes_per_call=0.0
+RULE	2 optimizer	propagate_empty_relation	ms=2.7	share=0.1%	calls=44357	changed=154	changed_ms=0.0	us_per_call=0.1	nodes_per_call=5.5
+RULE	3 physical	LimitPushPastWindows	ms=2.6	share=0.1%	calls=3558	changed=0	changed_ms=0.0	us_per_call=0.7	nodes_per_call=0.0
+RULE	3 physical	text_address_filters	ms=2.4	share=0.1%	calls=3558	changed=0	changed_ms=0.0	us_per_call=0.7	nodes_per_call=0.0
+RULE	3 physical	LimitedDistinctAggregation	ms=2.2	share=0.1%	calls=3558	changed=11	changed_ms=0.1	us_per_call=0.6	nodes_per_call=0.0
+RULE	3 physical	LimitAggregation	ms=2.2	share=0.1%	calls=3558	changed=99	changed_ms=0.6	us_per_call=0.6	nodes_per_call=0.0
+RULE	3 physical	EnsureCooperative	ms=2.2	share=0.1%	calls=3558	changed=0	changed_ms=0.0	us_per_call=0.6	nodes_per_call=0.0
+RULE	1 analyzer	asof_joins	ms=2.1	share=0.1%	calls=3566	changed=0	changed_ms=0.0	us_per_call=0.6	nodes_per_call=5.5
+RULE	3 physical	PushdownSort	ms=2.0	share=0.1%	calls=3558	changed=0	changed_ms=0.0	us_per_call=0.6	nodes_per_call=0.0
+RULE	3 physical	topk_filters	ms=1.7	share=0.1%	calls=3558	changed=0	changed_ms=0.0	us_per_call=0.5	nodes_per_call=0.0
+RULE	2 optimizer	extract_equijoin_predicate	ms=1.7	share=0.1%	calls=44643	changed=749	changed_ms=0.7	us_per_call=0.0	nodes_per_call=5.5
+RULE	3 physical	range_bounds	ms=1.6	share=0.1%	calls=3558	changed=0	changed_ms=0.0	us_per_call=0.4	nodes_per_call=0.0
+RULE	2 optimizer	eliminate_outer_join	ms=1.6	share=0.1%	calls=44203	changed=0	changed_ms=0.0	us_per_call=0.0	nodes_per_call=5.5
+RULE	3 physical	topk_merge_order	ms=1.6	share=0.1%	calls=3558	changed=0	changed_ms=0.0	us_per_call=0.4	nodes_per_call=0.0
+RULE	3 physical	small_inputs	ms=1.5	share=0.1%	calls=3558	changed=0	changed_ms=0.0	us_per_call=0.4	nodes_per_call=0.0
+RULE	2 optimizer	optimize_unions	ms=1.5	share=0.1%	calls=42603	changed=143	changed_ms=0.7	us_per_call=0.0	nodes_per_call=5.0
+RULE	3 physical	range_join	ms=1.5	share=0.0%	calls=3558	changed=0	changed_ms=0.0	us_per_call=0.4	nodes_per_call=0.0
+RULE	3 physical	TopKRepartition	ms=1.5	share=0.0%	calls=3558	changed=0	changed_ms=0.0	us_per_call=0.4	nodes_per_call=0.0
+RULE	2 optimizer	single_distinct_aggregation_to_group_by	ms=1.3	share=0.0%	calls=45006	changed=44	changed_ms=0.3	us_per_call=0.0	nodes_per_call=5.4
+RULE	2 optimizer	replace_distinct_aggregate	ms=1.1	share=0.0%	calls=44269	changed=121	changed_ms=0.3	us_per_call=0.0	nodes_per_call=5.0
+RULE	3 physical	publish_shared	ms=1.1	share=0.0%	calls=3558	changed=0	changed_ms=0.0	us_per_call=0.3	nodes_per_call=0.0
+RULE	2 optimizer	filter_null_join_keys	ms=1.0	share=0.0%	calls=44203	changed=0	changed_ms=0.0	us_per_call=0.0	nodes_per_call=5.5
+RULE	2 optimizer	decorrelate_lateral_join	ms=0.8	share=0.0%	calls=44643	changed=0	changed_ms=0.0	us_per_call=0.0	nodes_per_call=5.5
+RULE	2 optimizer	push_down_limit	ms=0.8	share=0.0%	calls=44181	changed=253	changed_ms=0.0	us_per_call=0.0	nodes_per_call=5.5
+RULE	2 optimizer	eliminate_limit	ms=0.8	share=0.0%	calls=44412	changed=11	changed_ms=0.0	us_per_call=0.0	nodes_per_call=5.5
+RULE	2 optimizer	eliminate_filter	ms=0.8	share=0.0%	calls=44412	changed=121	changed_ms=0.0	us_per_call=0.0	nodes_per_call=5.5
+RULE	0 stage	rename	ms=0.8	share=0.0%	calls=3568	changed=0	changed_ms=0.0	us_per_call=0.2	nodes_per_call=0.0
+RULE	2 optimizer	prune_shared	ms=0.2	share=0.0%	calls=4329	changed=0	changed_ms=0.0	us_per_call=0.0	nodes_per_call=8.1
+RULE	2 optimizer	unions_to_filter	ms=0.2	share=0.0%	calls=4332	changed=0	changed_ms=0.0	us_per_call=0.0	nodes_per_call=7.6
+RULE	1 analyzer	strict_written	ms=0.1	share=0.0%	calls=3566	changed=0	changed_ms=0.0	us_per_call=0.0	nodes_per_call=5.5
+RULE	1 analyzer	strict_decimals	ms=0.1	share=0.0%	calls=3561	changed=0	changed_ms=0.0	us_per_call=0.0	nodes_per_call=5.6
+RULE	1 analyzer	strict_decimals_late	ms=0.1	share=0.0%	calls=3561	changed=0	changed_ms=0.0	us_per_call=0.0	nodes_per_call=5.9
+RULE	1 analyzer	deterministic	ms=0.1	share=0.0%	calls=3561	changed=0	changed_ms=0.0	us_per_call=0.0	nodes_per_call=5.9
+RULE	3 physical	WindowTopN	ms=0.1	share=0.0%	calls=3558	changed=0	changed_ms=0.0	us_per_call=0.0	nodes_per_call=0.0
+RULE	3 physical	HashJoinBuffering	ms=0.1	share=0.0%	calls=3558	changed=0	changed_ms=0.0	us_per_call=0.0	nodes_per_call=0.0
+WORST	ratio=17.79	duck_us=410	burr_us=7295	SELECT x, x IN (SELECT y FROM (VALUES (1), (NULL)) s(y)) AS a, x NOT IN (SELECT y FROM (VALUES (1), (NULL)) s(y)) AS b, x IN (SELECT y FROM (VALUES (1)) s(y)) AS c, x IN (SELECT y FROM (VALUES (1)) s(y) WHERE false) AS d FROM (VALUES (1), (2), (NULL)) t(x) ORDER BY x
+WORST	ratio=14.17	duck_us=189	burr_us=2678	SELECT x FROM (VALUES (1), (2), (3)) t(x) WHERE CASE WHEN x NOT IN (SELECT y FROM (VALUES (1), (NULL)) s(y)) THEN true ELSE x = 3 END ORDER BY 1
+WORST	ratio=8.65	duck_us=170	burr_us=1471	SELECT x FROM (VALUES (1), (2), (3)) t(x) WHERE x = 3 OR x IN (SELECT y FROM (VALUES (1), (NULL)) s(y)) ORDER BY 1
+WORST	ratio=7.49	duck_us=191	burr_us=1430	SELECT x FROM (VALUES (1), (2), (3)) t(x) WHERE x = 3 OR x NOT IN (SELECT y FROM (VALUES (1), (NULL)) s(y)) ORDER BY 1
+WORST	ratio=7.16	duck_us=90	burr_us=644	SELECT list_reduce([CAST(strpos('0123456789abcdef', c) - 1 AS HUGEINT) FOR c IN string_split(substr('00ab10ff', -4), '')], lambda acc, d: acc * 16 + d) AS h
+WORST	ratio=6.31	duck_us=77	burr_us=486	SELECT round(9.995, 2) AS a, round(-2.345, 2) AS b, round(2.345) AS c, round(2.345, 5) AS d, round(1234.5, -2) AS e, round(2.5) AS f, round(-2.5) AS g
+WORST	ratio=5.84	duck_us=134	burr_us=783	SELECT [x * 2 FOR x IN [1, 2, 3]][1] AS a, [x * 2 FOR x IN [1, 2, 3]][-1] AS b, [x * 2 FOR x IN [1, 2, 3] IF x > 1][1] AS c
+WORST	ratio=5.65	duck_us=79	burr_us=446	SELECT TRY_CAST(1e38::DOUBLE AS HUGEINT) AS a, TRY_CAST(1.7014118346046923e38::DOUBLE AS HUGEINT) AS b, TRY_CAST(-1.7014118346046923e38::DOUBLE AS HUGEINT) AS c, TRY_CAST('nan'::DOUBLE AS HUGEINT) AS d, TRY_CAST(2.5::DOUBLE AS HUGEINT) AS e, TRY_CAST(-2.5::FLOAT AS HUGEINT) AS f
+WORST	ratio=5.26	duck_us=82	burr_us=431	SELECT epoch(to_timestamp(ts)) = COALESCE(ts, w) AS eq, 1.5::DOUBLE < CAST(2 AS HUGEINT) AS lt FROM (VALUES (CAST(1700000000 AS UBIGINT), CAST(3 AS BIGINT))) t(ts, w)
+WORST	ratio=5.15	duck_us=1253	burr_us=6451	SELECT t.block_number, t.log_index, "to" IN (SELECT "to" FROM transfer x WHERE x.log_index > 0) AS a, "to" NOT IN (SELECT "to" FROM transfer x WHERE x.block_number > 2) AS b FROM transfer t LEFT JOIN label l ON l.addr = t."from" ORDER BY 1, 2
+LATENCY	statements=321	at_or_under=8	skipped=49	geomean_ratio=2.01	duck_sum_us=119486	burr_sum_us=225679	threads=8	repeats=9	fresh=true

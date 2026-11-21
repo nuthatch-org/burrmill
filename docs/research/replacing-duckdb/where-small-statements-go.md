@@ -39,3 +39,38 @@ What was looked at and left:
 The rest is not one fix. The two large blocks are DataFusion's naming of expressions on every schema
 derivation and `SqlToRel` itself; either wants an upstream change, or a planning path of Burrmill's own
 for statements simple enough not to need DataFusion's.
+
+## Per rule, 2026-11-21
+
+The question was whether to fuse the analyzer's 29 rules into fewer walks. Timed per rule over the
+same corpus (`probes/rule-times/`, an M5 Pro, fresh text, 3,561 statements planned):
+
+| stage | rules | time | of it, on calls that changed nothing |
+|---|---:|---:|---:|
+| analyzer | 29 | 630 ms | 388 ms |
+| optimizer | 26 | 379 ms | 169 ms |
+| physical | 30 | 331 ms | 87 ms |
+
+So the analyzer spends about 109 µs a statement changing nothing, against a gap to DuckDB of about
+330 µs. The plans average six nodes, so that is not the walk: an unchanged `addresses` call costs
+9.7 µs, some 2 µs a node, which is expression work and schema derivation inside the rule. Fusing
+the walks would keep all of it. Not worth doing.
+
+The cost is concentrated. Six rules carry 252 ms of the analyzer's unchanged time, about 71 µs a
+statement:
+
+| rule | unchanged time | each |
+|---|---:|---:|
+| `type_coercion` | 124 ms | 23 µs |
+| `addresses` | 35 ms | 10 µs, and never changed a plan here |
+| `duck_semantics` | 27 ms | 10 µs |
+| `checked_arithmetic` | 23 ms | 9 µs |
+| `duck_doubles` | 22 ms | 7 µs |
+| `duck_comparisons` | 21 ms | 8 µs |
+
+Each wants what #371 gave `fast_text_casts` and `move_constants`: a read-only look that returns the
+plan untouched when there is nothing to rewrite. `type_coercion` is DataFusion's, run inside
+`coercion::First`; the rest are Burrmill's. On DataFusion's side `eliminate_join`,
+`extract_leaf_expressions` and `rewrite_set_comparison` never changed a plan and cost 57 ms
+between them, 16 µs a statement. Together that is some 87 µs of a fresh statement's 703, which is
+another cheap win, not the structural part.
