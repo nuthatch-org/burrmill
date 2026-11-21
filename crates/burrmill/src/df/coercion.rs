@@ -40,6 +40,12 @@ thread_local! {
     static COERCED: std::cell::RefCell<Option<LogicalPlan>> = const { std::cell::RefCell::new(None) };
 }
 
+/// Drops what the first coercion remembered on this thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn forget() {
+    COERCED.with(|c| c.borrow_mut().take());
+}
+
 /// The first coercion, remembering what it made.
 #[derive(Debug)]
 pub struct First(pub Arc<dyn AnalyzerRule + Send + Sync>);

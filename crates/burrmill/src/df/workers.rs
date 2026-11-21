@@ -118,6 +118,8 @@ fn work(tx: mpsc::Sender<Job>, rx: mpsc::Receiver<Job>) {
         if job() {
             return;
         }
+        // A statement that failed between the two coercions left its plan, and its tables, here.
+        super::coercion::forget();
         let mut parked = lock(&PARKED);
         if parked.len() >= IDLE {
             return;
