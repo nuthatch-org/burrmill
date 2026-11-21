@@ -71,6 +71,8 @@ mod host;
 mod joinfilters;
 mod lastnonnull;
 mod lists;
+#[cfg(unix)]
+mod localfs;
 mod names;
 mod ordered_agg;
 mod printf;
