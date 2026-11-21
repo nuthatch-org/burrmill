@@ -1,0 +1,215 @@
+diff --git a/crates/burrmill-bench/src/dialect_parity.rs b/crates/burrmill-bench/src/dialect_parity.rs
+index 0d35169..7924686 100644
+--- a/crates/burrmill-bench/src/dialect_parity.rs
++++ b/crates/burrmill-bench/src/dialect_parity.rs
+@@ -734,6 +734,7 @@ pub fn latency() -> anyhow::Result<()> {
+             println!("LAT\tduck_us={d}\tburr_us={b}\tratio={ratio:.2}\trows={n}\t{sql}");
+             timed.push((ratio, d, b, sql));
+         }
++        print!("{}", burrmill::df::rule_profile::report());
+         anyhow::ensure!(!timed.is_empty(), "no statement answered by both engines");
+         let at_or_under = timed.iter().filter(|r| r.2 <= r.1).count();
+         let geomean = (timed.iter().map(|r| r.0.ln()).sum::<f64>() / timed.len() as f64).exp();
+diff --git a/crates/burrmill/src/df/cancel.rs b/crates/burrmill/src/df/cancel.rs
+index 44e7fcd..7c79cb3 100644
+--- a/crates/burrmill/src/df/cancel.rs
++++ b/crates/burrmill/src/df/cancel.rs
+@@ -472,7 +472,16 @@ impl datafusion_optimizer::AnalyzerRule for Stoppable<Analyzing> {
+         config: &ConfigOptions,
+     ) -> Result<datafusion_expr::LogicalPlan> {
+         planning_goes_on()?;
+-        self.0.analyze(plan, config)
++        if !*profile::ON {
++            return self.0.analyze(plan, config);
++        }
++        let before = plan.clone();
++        let nodes = profile::nodes(&before);
++        let t = std::time::Instant::now();
++        let out = self.0.analyze(plan, config)?;
++        let ns = t.elapsed().as_nanos();
++        profile::record("1 analyzer", self.0.name(), ns, out != before, nodes);
++        Ok(out)
+     }
+     fn name(&self) -> &str {
+         self.0.name()
+@@ -492,7 +501,15 @@ impl datafusion_optimizer::OptimizerRule for Stoppable<Optimizing> {
+         config: &dyn datafusion_optimizer::OptimizerConfig,
+     ) -> Result<Transformed<datafusion_expr::LogicalPlan>> {
+         planning_goes_on()?;
+-        self.0.rewrite(plan, config)
++        if !*profile::ON {
++            return self.0.rewrite(plan, config);
++        }
++        let nodes = profile::nodes(&plan);
++        let t = std::time::Instant::now();
++        let out = self.0.rewrite(plan, config)?;
++        let ns = t.elapsed().as_nanos();
++        profile::record("2 optimizer", self.0.name(), ns, out.transformed, nodes);
++        Ok(out)
+     }
+ }
+ 
+@@ -511,7 +528,15 @@ impl PhysicalOptimizerRule for Stoppable<Physical> {
+         context: &dyn datafusion_session::PhysicalOptimizerContext,
+     ) -> Result<Arc<dyn ExecutionPlan>> {
+         planning_goes_on()?;
+-        self.0.optimize_with_context(plan, context)
++        if !*profile::ON {
++            return self.0.optimize_with_context(plan, context);
++        }
++        let before = Arc::clone(&plan);
++        let t = std::time::Instant::now();
++        let out = self.0.optimize_with_context(plan, context)?;
++        let ns = t.elapsed().as_nanos();
++        profile::record("3 physical", self.0.name(), ns, !Arc::ptr_eq(&out, &before), 0);
++        Ok(out)
+     }
+     fn name(&self) -> &str {
+         self.0.name()
+@@ -520,3 +545,70 @@ impl PhysicalOptimizerRule for Stoppable<Physical> {
+         self.0.schema_check()
+     }
+ }
++
++pub mod profile {
++    use std::collections::BTreeMap;
++    use std::sync::{LazyLock, Mutex};
++
++    pub(crate) static ON: LazyLock<bool> =
++        LazyLock::new(|| std::env::var_os("BURRMILL_RULE_PROFILE").is_some());
++
++    #[derive(Default)]
++    struct Stat {
++        calls: u64,
++        ns: u128,
++        changed: u64,
++        changed_ns: u128,
++        nodes: u64,
++    }
++
++    static STATS: LazyLock<Mutex<BTreeMap<(&'static str, String), Stat>>> =
++        LazyLock::new(Default::default);
++
++    pub(crate) fn nodes(p: &datafusion_expr::LogicalPlan) -> u64 {
++        use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
++        let mut n = 0;
++        let _ = p.apply(|_| {
++            n += 1;
++            Ok(TreeNodeRecursion::Continue)
++        });
++        n
++    }
++
++    pub(crate) fn record(stage: &'static str, rule: &str, ns: u128, changed: bool, nodes: u64) {
++        let mut m = STATS.lock().unwrap();
++        let s = m.entry((stage, rule.to_string())).or_default();
++        s.calls += 1;
++        s.ns += ns;
++        s.nodes += nodes;
++        if changed {
++            s.changed += 1;
++            s.changed_ns += ns;
++        }
++    }
++
++    pub fn reset() {
++        STATS.lock().unwrap().clear();
++    }
++
++    pub fn report() -> String {
++        let m = STATS.lock().unwrap();
++        let total: u128 = m.values().map(|s| s.ns).sum();
++        let mut rows: Vec<_> = m.iter().collect();
++        rows.sort_by(|a, b| b.1.ns.cmp(&a.1.ns));
++        let mut out = format!("RULES\ttotal_ms={}\n", total / 1_000_000);
++        for ((stage, rule), s) in rows {
++            out += &format!(
++                "RULE\t{stage}\t{rule}\tms={:.1}\tshare={:.1}%\tcalls={}\tchanged={}\tchanged_ms={:.1}\tus_per_call={:.1}\tnodes_per_call={:.1}\n",
++                s.ns as f64 / 1e6,
++                100.0 * s.ns as f64 / total.max(1) as f64,
++                s.calls,
++                s.changed,
++                s.changed_ns as f64 / 1e6,
++                s.ns as f64 / 1e3 / s.calls.max(1) as f64,
++                s.nodes as f64 / s.calls.max(1) as f64,
++            );
++        }
++        out
++    }
++}
+diff --git a/crates/burrmill/src/df/mod.rs b/crates/burrmill/src/df/mod.rs
+index 718bc9f..e54b5d4 100644
+--- a/crates/burrmill/src/df/mod.rs
++++ b/crates/burrmill/src/df/mod.rs
+@@ -18,6 +18,8 @@ mod addresses;
+ mod asof;
+ mod bound;
+ mod cancel;
++#[doc(hidden)]
++pub use cancel::profile as rule_profile;
+ mod catalog;
+ mod checked;
+ mod compactviews;
+@@ -1318,19 +1320,23 @@ fn plan_on_stack(
+         std::thread::current().name(),
+         Some("burrmill-plan" | "burrmill-statement")
+     ));
++    let t0 = std::time::Instant::now();
+     let (stmt, names) = dialect::parse(sql, &session.known_names(), served)?;
++    if *cancel::profile::ON { cancel::profile::record("0 stage", "parse", t0.elapsed().as_nanos(), false, 0); }
+     refuse_df_statement(&stmt)?;
+     refuse_wide_literals(&stmt)?;
+     if cancel.is_cancelled() {
+         return Err(BurrmillError::Cancelled);
+     }
++    let t0 = std::time::Instant::now();
+     let plan = SqlToRel::new(session)
+         .statement_to_plan(stmt)
+         .map_err(plan_err)?;
+-    if cancel.is_cancelled() {
+-        return Err(BurrmillError::Cancelled);
+-    }
+-    rename(plan, &names)
++    if *cancel::profile::ON { cancel::profile::record("0 stage", "sql_to_rel", t0.elapsed().as_nanos(), false, 0); }
++    let t0 = std::time::Instant::now();
++    let plan = rename(plan, &names);
++    if *cancel::profile::ON { cancel::profile::record("0 stage", "rename", t0.elapsed().as_nanos(), false, 0); }
++    plan
+ }
+ 
+ /// DuckDB's default names on the unaliased columns, by position, and the private suffixes of
+diff --git a/crates/burrmill/src/df/session.rs b/crates/burrmill/src/df/session.rs
+index e149346..6c75523 100644
+--- a/crates/burrmill/src/df/session.rs
++++ b/crates/burrmill/src/df/session.rs
+@@ -1399,13 +1399,18 @@ impl Session for MiniSession {
+     fn optimize(&self, plan: &LogicalPlan) -> DFResult<LogicalPlan> {
+         let _planning = super::bound::Planning::enter();
+         let LogicalPlan::Explain(e) = plan else {
++            use super::cancel::profile as pf;
++            let t0 = std::time::Instant::now();
+             let analyzed = self.analyzer.execute_and_check(
+                 plan.clone(),
+                 self.config.options().as_ref(),
+                 |_, _| {},
+             )?;
++            if *pf::ON { pf::record("0 stage", "analyzer", t0.elapsed().as_nanos(), false, pf::nodes(&analyzed)); }
++            let t0 = std::time::Instant::now();
+             let passes = self.passes(&analyzed);
+             let optimized = self.optimizer.optimize(analyzed, &passes, |_, _| {})?;
++            if *pf::ON { pf::record("0 stage", "optimizer", t0.elapsed().as_nanos(), passes.one, pf::nodes(&optimized)); }
+             return super::narrow::narrow(optimized);
+         };
+         // As the umbrella crate's `SessionState::optimize`: without this, EXPLAIN shows only the
+@@ -1451,7 +1456,10 @@ impl Session for MiniSession {
+         logical_plan: &LogicalPlan,
+     ) -> DFResult<Arc<dyn ExecutionPlan>> {
+         let logical_plan = self.optimize(logical_plan)?;
+-        self.physical_plan(&logical_plan).await
++        let t0 = std::time::Instant::now();
++        let p = self.physical_plan(&logical_plan).await;
++        if *super::cancel::profile::ON { super::cancel::profile::record("0 stage", "physical (initial+rules)", t0.elapsed().as_nanos(), false, 0); }
++        p
+     }
+     fn create_physical_expr(
+         &self,
