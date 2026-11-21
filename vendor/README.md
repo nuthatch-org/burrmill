@@ -34,3 +34,25 @@ shows only the last file's value, and `scan_efficiency_ratio` adds the partition
 `bytes_scanned` for every file, so it overstates. These are display only; no budget reads them.
 The `filename` label now reads `(every file)`, and the baseline metrics' `end_time` is the
 partition's, not the last file's.
+
+## datafusion-expr 55.2.0
+
+DataFusion's `datafusion-expr` 55.2.0 from crates.io, unchanged except for `src/expr_schema.rs`.
+Every DataFusion crate depends on it, so it cannot be renamed like the parquet source and is taken
+by a `[patch.crates-io]` in the workspace manifest instead. That reaches this workspace only: nuthatch
+and crates.io consumers get upstream's crate unless they carry the same patch. The bench's stock DataFusion arm
+gets the change too. Drop this copy when
+upstream has the change, or re-apply it to the new release on a DataFusion bump.
+
+Upstream, `Expr::to_field` formats the expression's schema name, then recurses into each
+subexpression through `to_field`, which formats that one's name too, only for the caller to rename
+the field. `get_type`, `nullable` and `metadata` on a function call go through `to_field` as well,
+so type coercion pays for every argument's name. The change moves the walk into a private
+`Expr::unnamed_field`, which recurses through itself and names nothing, and `to_field` names the
+outermost field once. Window functions still get their name, through `WindowUDFFieldArgs`.
+
+What a function sees that differs: argument fields reach `return_field` and `return_field_from_args`
+with an empty name, where before each carried its own schema name. No function in DataFusion 55.2
+keeps an argument's logical name past the outer rename. With it, fresh statements under 1,000 rows
+plan about 11% faster on the dialect corpus (geomean 1.78x DuckDB's p50 to 1.62x, Mac, three
+interleaved pairs), and dialect parity is unchanged at 370 cases.
