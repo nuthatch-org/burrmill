@@ -8,8 +8,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 /// More idle than this and a finished thread exits; each keeps the stack it touched.
 const IDLE: usize = 4;
 
-/// A job, saying whether it panicked; a thread that saw a panic is not kept.
-type Job = Box<dyn FnOnce() -> bool + Send + 'static>;
+/// A job, handed what parks its thread; it says whether it panicked, since a thread that saw a
+/// panic is not kept, and parks before it reports, so the statement after it finds the thread.
+type Body<'a> = Box<dyn FnOnce(&dyn Fn(bool)) + Send + 'a>;
+type Job = Body<'static>;
 
 static PARKED: Mutex<Vec<mpsc::Sender<Job>>> = Mutex::new(Vec::new());
 
@@ -79,13 +81,12 @@ impl<'env> Scope<'env> {
         let handle = Handle(Arc::clone(&out));
         let running = Arc::clone(&self.running);
         running.set(|n| *n += 1);
-        let job: Box<dyn FnOnce() -> bool + Send + 'env> = Box::new(move || {
+        let job: Body<'env> = Box::new(move |park| {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-            let panicked = r.is_err();
+            park(r.is_err());
             out.set(|o| *o = Some(r));
             drop(out);
             running.set(|n| *n -= 1);
-            panicked
         });
         // SAFETY: `scope` neither returns nor unwinds past its frame until the count is zero, and
         // a job lets go of everything it borrowed before it takes itself off the count.
@@ -114,16 +115,84 @@ impl<'env> Scope<'env> {
 }
 
 fn work(tx: mpsc::Sender<Job>, rx: mpsc::Receiver<Job>) {
-    while let Ok(job) = rx.recv() {
-        if job() {
-            return;
-        }
+    let kept = std::cell::Cell::new(true);
+    let park = |panicked: bool| {
         // A statement that failed between the two coercions left its plan, and its tables, here.
         super::coercion::forget();
         let mut parked = lock(&PARKED);
-        if parked.len() >= IDLE {
+        kept.set(!panicked && parked.len() < IDLE);
+        if kept.get() {
+            parked.push(tx.clone());
+        }
+    };
+    while let Ok(job) = rx.recv() {
+        job(&park);
+        if !kept.get() {
             return;
         }
-        parked.push(tx.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_job_borrows_and_the_thread_is_kept() {
+        let words = ["a".to_string(), "b".to_string()];
+        let first = scope(|s| {
+            s.spawn(|| (words.join(""), std::thread::current().id()))
+                .unwrap()
+                .join()
+                .unwrap()
+        });
+        assert_eq!(first.0, "ab");
+        // Another test may take the parked thread first, so only some later job need land on it.
+        let again = (0..64).any(|_| {
+            scope(|s| {
+                s.spawn(|| std::thread::current().id())
+                    .unwrap()
+                    .join()
+                    .unwrap()
+            }) == first.1
+        });
+        assert!(again);
+    }
+
+    #[test]
+    fn a_panic_comes_back_and_its_thread_is_not_kept() {
+        let id = std::sync::Mutex::new(None);
+        let r = scope(|s| {
+            s.spawn(|| {
+                *id.lock().unwrap() = Some(std::thread::current().id());
+                panic!("boom")
+            })
+            .unwrap()
+            .join()
+        });
+        assert!(r.is_err());
+        let id = id.into_inner().unwrap();
+        for _ in 0..64 {
+            let other = scope(|s| {
+                s.spawn(|| std::thread::current().id())
+                    .unwrap()
+                    .join()
+                    .unwrap()
+            });
+            assert_ne!(Some(other), id);
+        }
+    }
+
+    #[test]
+    fn the_scope_waits_for_an_unjoined_job() {
+        let done = std::sync::atomic::AtomicBool::new(false);
+        scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                done.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+            .unwrap();
+        });
+        assert!(done.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
