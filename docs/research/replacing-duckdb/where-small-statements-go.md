@@ -120,3 +120,20 @@ three interleaved pairs of `FRESH=1 burrmill-bench dialect-latency`:
 
 About 11% off a fresh statement, twice `format!`'s 5.3% share; where the rest comes from is not yet
 profiled. Dialect parity is unchanged at 370 cases. Upstream main has the same code.
+
+## On the ThinkPad after #379, 2026-11-21
+
+`c2a96a0` (before #378 and #379) against `5a78fc2`, four alternating rounds of
+`FRESH=1 burrmill-bench dialect-latency` on cores 16-23, each started only once the load
+average was under 4. A busy box flatters Burrmill, because contention slows DuckDB's eight
+threads more, so rounds taken at load 10-40 earlier the same day are left out.
+
+| round | before | after | Burrmill sum, ms | DuckDB sum, ms |
+|---|---:|---:|---|---|
+| 1 | 1.94 | 1.81 | 760, 697 | 428, 427 |
+| 2 | 1.97 | 1.80 | 752, 690 | 420, 422 |
+| 3 | 1.93 | 1.78 | 738, 685 | 420, 424 |
+| 4 | 1.96 | 1.79 | 751, 706 | 425, 433 |
+
+About 8% here against the Mac's 14%; the ThinkPad's bench runs on jemalloc, so the allocations
+naming did cost less to begin with. Fresh text is 1.8x DuckDB's p50 on this box.
