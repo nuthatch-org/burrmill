@@ -15,7 +15,7 @@ use arrow::array::{ArrayRef, AsArray, Float64Array};
 use arrow::datatypes::{DataType, Decimal128Type};
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_common::{DFSchema, Result, ScalarValue, plan_err};
+use datafusion_common::{Result, ScalarValue, plan_err};
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{
     Cast, ColumnarValue, Expr, ExprSchemable, LogicalPlan, ScalarFunctionArgs, ScalarUDF,
@@ -133,38 +133,34 @@ impl AnalyzerRule for DuckDoubles {
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
         plan.transform_up_with_subqueries(|p| {
-            let mut schema = DFSchema::empty();
-            for i in p.inputs() {
-                schema.merge(i.schema());
-            }
+            let schema = super::dag::input_schema(&p);
             let names_matter = matches!(
                 p,
                 LogicalPlan::Projection(_) | LogicalPlan::Aggregate(_) | LogicalPlan::Window(_)
             );
             p.map_expressions(|e| {
-                let name = e.schema_name().to_string();
-                let t = e.transform_up(|e| {
-                    let inner = match &e {
-                        Expr::Cast(Cast { expr, field })
-                        | Expr::TryCast(TryCast { expr, field })
-                            if field.data_type() == &DataType::Float64 =>
-                        {
-                            expr
+                super::dag::keeping_name(e, names_matter, |e| {
+                    e.transform_up(|e| {
+                        let inner = match &e {
+                            Expr::Cast(Cast { expr, field })
+                            | Expr::TryCast(TryCast { expr, field })
+                                if field.data_type() == &DataType::Float64 =>
+                            {
+                                expr
+                            }
+                            _ => return Ok(Transformed::no(e)),
+                        };
+                        if !matches!(inner.get_type(&schema)?, DataType::Decimal128(..)) {
+                            return Ok(Transformed::no(e));
                         }
-                        _ => return Ok(Transformed::no(e)),
-                    };
-                    if !matches!(inner.get_type(&schema)?, DataType::Decimal128(..)) {
-                        return Ok(Transformed::no(e));
-                    }
-                    Ok(Transformed::yes(Expr::ScalarFunction(
-                        ScalarFunction::new_udf(Arc::clone(&self.f), vec![inner.as_ref().clone()]),
-                    )))
-                })?;
-                if t.transformed && names_matter && t.data.schema_name().to_string() != name {
-                    Ok(Transformed::yes(t.data.alias(name)))
-                } else {
-                    Ok(t)
-                }
+                        Ok(Transformed::yes(Expr::ScalarFunction(
+                            ScalarFunction::new_udf(
+                                Arc::clone(&self.f),
+                                vec![inner.as_ref().clone()],
+                            ),
+                        )))
+                    })
+                })
             })
         })
         .map(|t| t.data)

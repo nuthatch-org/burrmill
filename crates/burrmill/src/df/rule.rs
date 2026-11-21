@@ -327,15 +327,11 @@ impl CheckedArithmetic {
             LogicalPlan::Projection(_) | LogicalPlan::Aggregate(_) | LogicalPlan::Window(_)
         );
         let t = p.map_expressions(|e| {
-            let name = names_matter.then(|| e.schema_name().to_string());
-            let t = e.transform_up(|e| self.rewrite(e, &schema))?;
-            check_whitelist(&t.data, &schema)?;
-            match name {
-                Some(name) if t.transformed && t.data.schema_name().to_string() != name => {
-                    Ok(Transformed::yes(t.data.alias(name)))
-                }
-                _ => Ok(t),
-            }
+            super::dag::keeping_name(e, names_matter, |e| {
+                let t = e.transform_up(|e| self.rewrite(e, &schema))?;
+                check_whitelist(&t.data, &schema)?;
+                Ok(t)
+            })
         })?;
         if t.transformed {
             Ok(Transformed::yes(t.data.recompute_schema()?))

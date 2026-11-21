@@ -294,6 +294,14 @@ impl Noted {
             .cloned()
             .unwrap_or_default()
     }
+    fn holds(&self, table: &str) -> bool {
+        !self.off.load(Ordering::Relaxed)
+            && self
+                .columns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(table)
+    }
     pub fn is_off(&self) -> bool {
         self.off.load(Ordering::Relaxed)
     }
@@ -536,14 +544,21 @@ impl AnalyzerRule for Addresses {
         // each work table takes the schema its static term will have, so the recursive term reads
         // fixed binary where the static term writes it.
         let mut recursive = false;
+        let mut found = false;
         plan.apply_with_subqueries(|p| {
             recursive = matches!(p, LogicalPlan::RecursiveQuery(_));
+            found = found || self.may_touch(p);
             Ok(match recursive {
                 true => TreeNodeRecursion::Stop,
                 false => TreeNodeRecursion::Continue,
             })
         })?;
         let passes = Passes::default();
+        if !recursive && !found {
+            #[cfg(debug_assertions)]
+            assert_eq!(self.pass(plan.clone(), false, &passes)?, plan);
+            return Ok(plan);
+        }
         if !recursive {
             return self.pass(plan, false, &passes);
         }
@@ -580,6 +595,33 @@ impl Addresses {
     ///
     /// A node's schema is derived again where its expressions or an input's schema changed, and
     /// at every node with `stale`, for a plan whose schemas are already behind its expressions.
+    /// Whether `p` could hold an address for the walk to rewrite: a noted column to decode, or a
+    /// value of the address type already.
+    fn may_touch(&self, p: &LogicalPlan) -> bool {
+        if let LogicalPlan::TableScan(scan) = p
+            && (self.0.holds(scan.table_name.table())
+                || scan
+                    .source
+                    .schema()
+                    .fields()
+                    .iter()
+                    .any(|f| is_address(f.data_type())))
+        {
+            return true;
+        }
+        p.schema()
+            .fields()
+            .iter()
+            .any(|f| is_address(f.data_type()))
+            || super::dag::holds(p, |e| match e {
+                Expr::Literal(ScalarValue::FixedSizeBinary(WIDTH, _), _) => true,
+                Expr::Cast(c) => is_address(c.field.data_type()),
+                Expr::TryCast(c) => is_address(c.field.data_type()),
+                Expr::Placeholder(p) => p.field.as_ref().is_some_and(|f| is_address(f.data_type())),
+                _ => false,
+            })
+    }
+
     fn pass(&self, plan: LogicalPlan, stale: bool, passes: &Passes) -> DFResult<LogicalPlan> {
         let memo = match stale {
             true => &passes.stale,
@@ -610,15 +652,10 @@ impl Addresses {
             );
             let was = p.transformed;
             let mut t = p.data.map_expressions(|e| {
-                let name = names_matter.then(|| e.schema_name().to_string());
-                let e = self.with_subqueries(e, &schema, stale, passes)?;
-                let t = e.transform_up(|e| rewrite(e, &schema))?;
-                match name {
-                    Some(name) if t.transformed && t.data.schema_name().to_string() != name => {
-                        Ok(Transformed::yes(t.data.alias(name)))
-                    }
-                    _ => Ok(t),
-                }
+                super::dag::keeping_name(e, names_matter, |e| {
+                    let e = self.with_subqueries(e, &schema, stale, passes)?;
+                    e.transform_up(|e| rewrite(e, &schema))
+                })
             })?;
             t.transformed |= was;
             // A node keeps the schema it was built with when a child changes under it; with its

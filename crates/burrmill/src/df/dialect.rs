@@ -2383,33 +2383,27 @@ impl AnalyzerRule for DuckSemantics {
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> DFResult<LogicalPlan> {
         super::dag::transform_up(plan, |p, _| {
-            let mut schema = DFSchema::empty();
-            for i in p.inputs() {
-                schema.merge(i.schema());
-            }
+            let schema = super::dag::input_schema(&p);
             let names_matter = matches!(
                 p,
                 LogicalPlan::Projection(_) | LogicalPlan::Aggregate(_) | LogicalPlan::Window(_)
             );
             let t = p.map_expressions(|e| {
-                let name = e.schema_name().to_string();
-                let t = e.transform_up(|e| {
-                    let t = divide_as_double(e, &schema)?;
-                    let t = t.transform_data(|e| modulo_by_zero(e, &schema))?;
-                    let t = t.transform_data(|e| timestamp_as_duckdb(e, &schema))?;
-                    let t = t.transform_data(|e| round_before_int_cast(e, &schema, &self.round))?;
-                    let t = t.transform_data(|e| timestamp_as_text(e, &schema))?;
-                    let t = t.transform_data(|e| dates_as_duckdb(e, &schema))?;
-                    let t = t.transform_data(|e| case_nullability(e, &schema))?;
-                    let t = t.transform_data(try_as_duckdb)?;
-                    let t = t.transform_data(|e| hugeint_rounding(e, &schema, &self.round))?;
-                    t.transform_data(hugeint_null_test)
-                })?;
-                if t.transformed && names_matter && t.data.schema_name().to_string() != name {
-                    Ok(Transformed::yes(t.data.alias(name)))
-                } else {
-                    Ok(t)
-                }
+                super::dag::keeping_name(e, names_matter, |e| {
+                    e.transform_up(|e| {
+                        let t = divide_as_double(e, &schema)?;
+                        let t = t.transform_data(|e| modulo_by_zero(e, &schema))?;
+                        let t = t.transform_data(|e| timestamp_as_duckdb(e, &schema))?;
+                        let t =
+                            t.transform_data(|e| round_before_int_cast(e, &schema, &self.round))?;
+                        let t = t.transform_data(|e| timestamp_as_text(e, &schema))?;
+                        let t = t.transform_data(|e| dates_as_duckdb(e, &schema))?;
+                        let t = t.transform_data(|e| case_nullability(e, &schema))?;
+                        let t = t.transform_data(try_as_duckdb)?;
+                        let t = t.transform_data(|e| hugeint_rounding(e, &schema, &self.round))?;
+                        t.transform_data(hugeint_null_test)
+                    })
+                })
             })?;
             if t.transformed {
                 Ok(Transformed::yes(t.data.recompute_schema()?))
@@ -2791,10 +2785,7 @@ fn comparisons(p: LogicalPlan, below: bool) -> DFResult<Transformed<LogicalPlan>
             Transformed::no(LogicalPlan::Union(u))
         }
     } else {
-        let mut schema = DFSchema::empty();
-        for i in p.inputs() {
-            schema.merge(i.schema());
-        }
+        let schema = super::dag::input_schema(&p);
         let names_matter = matches!(
             p,
             LogicalPlan::Projection(_) | LogicalPlan::Aggregate(_) | LogicalPlan::Window(_)
@@ -2818,17 +2809,12 @@ fn comparisons(p: LogicalPlan, below: bool) -> DFResult<Transformed<LogicalPlan>
         };
         let inputs: Vec<&LogicalPlan> = inputs.iter().collect();
         let t = p.map_expressions(|e| {
-            let name = names_matter.then(|| e.schema_name().to_string());
-            let t = e.transform_up(|e| {
-                compare_as_duckdb(e, &schema)?
-                    .transform_data(|e| decimal_intdiv(e, &schema, &inputs))
-            })?;
-            match name {
-                Some(name) if t.transformed && t.data.schema_name().to_string() != name => {
-                    Ok(Transformed::yes(t.data.alias(name)))
-                }
-                _ => Ok(t),
-            }
+            super::dag::keeping_name(e, names_matter, |e| {
+                e.transform_up(|e| {
+                    compare_as_duckdb(e, &schema)?
+                        .transform_data(|e| decimal_intdiv(e, &schema, &inputs))
+                })
+            })
         })?;
         if t.transformed || below {
             Transformed::yes(t.data.recompute_schema()?)
