@@ -412,6 +412,11 @@ impl MiniSession {
                 }),
         }
         .build_arc()?;
+        #[cfg(unix)]
+        runtime.register_object_store(
+            datafusion_execution::object_store::ObjectStoreUrl::local_filesystem().as_ref(),
+            Arc::new(super::localfs::InlineLocal::new()),
+        );
         let limits = super::bound::Limits::new(budget.map(|_| &runtime.memory_pool));
         let strict = super::strict::Flag::default();
         let deterministic = super::deterministic::Flag::default();
