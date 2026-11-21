@@ -35,6 +35,29 @@ pub(crate) fn holds(p: &LogicalPlan, f: impl Fn(&Expr) -> bool) -> bool {
     found
 }
 
+/// `f` over `e`, aliased back to the name `e` had where the rewrite changed it and the name is
+/// part of the node's schema. The name is formatted only once something changed.
+pub(crate) fn keeping_name(
+    e: Expr,
+    names_matter: bool,
+    f: impl FnOnce(Expr) -> Result<Transformed<Expr>>,
+) -> Result<Transformed<Expr>> {
+    if !names_matter {
+        return f(e);
+    }
+    let was = e.clone();
+    let t = f(e)?;
+    if !t.transformed {
+        return Ok(t);
+    }
+    let name = was.schema_name().to_string();
+    let same = t.data.schema_name().to_string() == name;
+    match same {
+        true => Ok(t),
+        false => Ok(Transformed::yes(t.data.alias(name))),
+    }
+}
+
 /// The schema `p`'s expressions are typed against: its one input's, shared, or its inputs' merged.
 pub(crate) fn input_schema(p: &LogicalPlan) -> DFSchemaRef {
     match p.inputs().as_slice() {
