@@ -104,3 +104,19 @@ rule leaves an aggregate's schema stale and coercion is what repairs it.
 
 What is left wants DataFusion to name an expression once rather than at every schema derivation, or
 a planning path of Burrmill's own.
+
+## Naming once, 2026-11-21
+
+Most of that naming was waste. `Expr::to_field` formats a name for every subexpression on its way
+down and the caller renames the field anyway, and `get_type` and `nullable` on any function call go
+through it, so coercion formats every argument's name to learn its type. `vendor/datafusion-expr`
+carries a change that names only the outermost expression (see `vendor/README.md`). On the Mac,
+three interleaved pairs of `FRESH=1 burrmill-bench dialect-latency`:
+
+| | geomean vs DuckDB p50 | Burrmill p50 sum | DuckDB p50 sum |
+|---|---:|---:|---:|
+| upstream | 1.81, 1.79, 1.75 | 219, 215, 193 ms | 127, 126, 116 ms |
+| naming once | 1.65, 1.61, 1.60 | 203, 178, 177 ms | 127, 116, 116 ms |
+
+About 11% off a fresh statement, twice `format!`'s 5.3% share; where the rest comes from is not yet
+profiled. Dialect parity is unchanged at 370 cases. Upstream main has the same code.
