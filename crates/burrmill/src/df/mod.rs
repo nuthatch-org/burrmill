@@ -86,6 +86,8 @@ mod sharing;
 mod smallinputs;
 mod strict;
 mod tables;
+#[cfg(not(target_arch = "wasm32"))]
+mod workers;
 pub use tables::duckdb_type;
 mod subqueries;
 mod textfn;
@@ -782,14 +784,12 @@ impl Engine {
         // planning and execution ran on the caller's stack, which a 1 MiB thread could not hold
         // in debug (#168).
         let held = metrics.as_deref_mut();
-        let r = std::thread::scope(|s| {
+        let r = workers::scope(|s| {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             let (done, waited) = std::sync::mpsc::sync_channel(1);
             let admitted = &admitted;
-            let run = std::thread::Builder::new()
-                .name("burrmill-statement".into())
-                .stack_size(PLAN_STACK_BYTES)
-                .spawn_scoped(s, move || {
+            let run = s
+                .spawn(move || {
                     let planned = match cached {
                         Some(p) => Planned::Optimized(p),
                         None => Planned::Fresh(self.plan_fresh(sql, params, token)?),
