@@ -74,3 +74,33 @@ plan untouched when there is nothing to rewrite. `type_coercion` is DataFusion's
 `extract_leaf_expressions` and `rewrite_set_comparison` never changed a plan and cost 57 ms
 between them, 16 µs a statement. Together that is some 87 µs of a fresh statement's 703, which is
 another cheap win, not the structural part.
+
+## After #376, on the ThinkPad
+
+Frame pointers again, `980b0ea`, cores 16-23, 33,337 samples on the statement thread. Fresh text is
+2.03x DuckDB's p50 by geomean on this box.
+
+| stage | share |
+|---|---:|
+| analyzer | 23.0% |
+| `SqlToRel` | 15.7% |
+| optimizer | 15.0% |
+| parse (`DFParser`, 3.2% of it the tokenizer) | 10.9% |
+| physical rules | 9.8% |
+| initial physical plan | 5.1% |
+| execution | 7.3% |
+| the rest, Burrmill's own glue | 12.6% |
+
+The optimizer's work between rules, which the Mac's per-rule timers put at about 65 µs a statement,
+is 2.9% of the thread here: `LogicalPlanSignature::new` 1.0%, `rewrite_with_subqueries` 0.6%,
+`check_invariants` 0.4%. Most of the Mac figure was the timers' own node counts.
+
+Nothing left is one thing. Parse is spread over sqlparser's recursive descent, with no function above
+0.9%. `format!` is 5.3% of the thread, and its largest callers are `projection_schema` naming every
+field again (from coercion's `recompute_schema`, from `SqlToRel` building projections, and from
+`optimize_projections`) and `ScalarUDFImpl::schema_name`. Coercion's recompute cannot simply be left
+out where nothing changed: tried, it changed the answer on 16 corpus statements, because an earlier
+rule leaves an aggregate's schema stale and coercion is what repairs it.
+
+What is left wants DataFusion to name an expression once rather than at every schema derivation, or
+a planning path of Burrmill's own.
