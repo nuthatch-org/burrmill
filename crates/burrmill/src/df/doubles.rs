@@ -133,6 +133,13 @@ impl AnalyzerRule for DuckDoubles {
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
         plan.transform_up_with_subqueries(|p| {
+            // Only a cast to DOUBLE is rewritten, so a node with none is passed over untouched.
+            if !super::dag::holds(&p, |e| {
+                matches!(e, Expr::Cast(Cast { field, .. }) | Expr::TryCast(TryCast { field, .. })
+                    if field.data_type() == &DataType::Float64)
+            }) {
+                return Ok(Transformed::no(p));
+            }
             let schema = super::dag::input_schema(&p);
             let names_matter = matches!(
                 p,

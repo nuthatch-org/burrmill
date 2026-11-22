@@ -672,7 +672,7 @@ impl MiniSession {
                         "eliminate_group_by_constant" => {
                             Arc::new(super::literalkeys::LiteralGroupKeys)
                         }
-                        _ => r,
+                        _ => super::gate::gated(r),
                     })
                     // Last in each pass, so the next pass optimizes what it cut.
                     .chain([
