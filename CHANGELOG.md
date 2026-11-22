@@ -8,6 +8,42 @@ version number promises.
 A release that changes any receipt in `corpus/receipts/receipts.jsonl` says which, and why, in its
 entry: a receipt someone kept stops verifying on that release (`tests/receipt_corpus.rs`).
 
+## 0.2.0 - 2026-11-22
+
+Prebuilt `burrmill` binaries for five targets, as a GitHub Release. What changed since 0.1.0:
+
+A receipt still verifies only on the release that made it. `corpus/receipts` and `demo/receipt.json`
+are regenerated for 0.2.0; every statement, input and answer is unchanged.
+
+Engine (`burrmill`, feature `datafusion`)
+
+- TPC-H Q17 was quadratic in its parts through a constant group key; literal keys are taken out of
+  the aggregate so that group is not ordered. Q2's correlated `min` is the same shape and fell with
+  it. At SF10, Q17 went from 25.6 s to 1.7 s (#399, #381).
+- `now()` is each statement's own, not the moment the engine opened, and a plan that calls a
+  function that is not immutable is not kept (#372).
+- Small statements (scans under 4 MiB) plan in one partition, on the statement's own thread, with
+  the plan kept for the same text (#370); they get one optimizer pass, and analyzer rules skip
+  expressions they cannot rewrite (#371, #376, #403). Finished statement threads are kept for the
+  next statement (#396). Small local file ranges are read on the calling thread (#379).
+  `datafusion-expr` is vendored so an expression is named once (#378).
+- Analyzer rules before sharing walk each shared subtree once (#367).
+- A sort key nesting `abs` or `sqrt` satisfies the order it was sorted by (#368).
+- Every in-memory scan now sees the statement's deadline as it reads, and the relation bound is 96,
+  after the untrusted-SQL sandbox found both holes (#369).
+- The `url` crate is past RUSTSEC-2026-0592 (#398).
+
+Tools and packaging
+
+- A `v*` tag on main builds `burrmill` for five targets (static musl on both Linux architectures,
+  both macOS architectures, and Windows), smokes each binary, writes `SHA256SUMS` and publishes the
+  GitHub Release. A push to `release-dry-run` does the same and publishes nothing (#397, #391,
+  #400, #401).
+- The untrusted-SQL sandbox's threat model and a refused corpus of 106 attempts (#369).
+- TPC-H at SF10: Burrmill's own costs against datafusion-cli measured, no default changed
+  (#402, #384).
+
+
 ## 0.1.0 - 2026-11-19
 
 The first release on crates.io, with `burrmill-parquet-source` 55.2.0. What changed since 0.0.1:
