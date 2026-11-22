@@ -4,6 +4,17 @@ Newest first. One entry per RFC-0044 slice.
 
 ---
 
+## What Burrmill's four candidate costs are worth on TPC-H at SF10 (#384) — 2026-11-22
+
+Switched off one at a time (checked arithmetic, exact sums and averages, DuckDB's semantics rule,
+the 2,048-row batch) with a temporary env, and all four together, over all 22 queries at 8 threads.
+Turning the exact sums off changes Q1 and Q12's answers; the other three keep every answer. The box
+was shared (load 0.6 to 38), so no difference is clean, and none of the four is only needed under
+`--strict` or `--deterministic`: no default changed. Table, method and load in
+`docs/bench/tpch-tax.md`. Refs #384.
+
+---
+
 ## TPC-H Q17 was quadratic in its parts, through a constant group key (#381) — 2026-11-22
 
 **Cause.** Decorrelating Q17's `(SELECT 0.2 * avg(l_quantity) ... WHERE l_partkey = p_partkey)`
