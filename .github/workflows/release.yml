@@ -1,0 +1,187 @@
+name: release
+
+# A release is a tag `vX.Y.Z` on main plus a GitHub Release with prebuilt binaries (#391).
+# Nothing here publishes to crates.io. See docs/releasing.md.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to name the archives with (vX.Y.Z). Builds and checks only; nothing is published."
+        required: true
+        default: "v0.0.0-dryrun"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fails early on a tag that is not a version, before the long builds.
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Tag is vX.Y.Z and has a CHANGELOG entry
+        id: tag
+        env:
+          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::tag '$TAG' is not vX.Y.Z"; exit 1
+          fi
+          .github/scripts/changelog-section.sh "${TAG#v}" > /dev/null
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static, on a native runner of each architecture: zstd-sys is the only C in the graph
+          # and musl-gcc builds it, as in the cli-musl task. No cross toolchain to trust.
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, musl: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, musl: true }
+          # Each on its own architecture, so the smoke test runs the binary it built.
+          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - { target: x86_64-pc-windows-msvc, os: windows-2025, ext: ".zip" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: release-${{ matrix.target }}
+          cache-on-failure: true
+          save-if: false
+      - name: Install musl-tools
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # The profile docs/bench/cli-size.md publishes.
+      - name: Build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.musl }}" = "true" ]; then
+            export "CC_$(printf '%s' "$TARGET" | tr '-' '_')=musl-gcc"
+          fi
+          cargo build --locked --profile cli -p burrmill-cli --target "$TARGET"
+      - name: Smoke test (static, strict deterministic receipt, verify)
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          bin="target/$TARGET/cli/burrmill"
+          if [ "${{ matrix.musl }}" = "true" ]; then
+            crates/burrmill-cli/musl-smoke.sh "$bin"
+          else
+            [ -f "$bin.exe" ] && bin="$bin.exe"
+            data=corpus/receipts/segments
+            out=$(mktemp -d)
+            "$bin" q "SELECT who, div(SUM(CAST(amount AS DECIMAL(38,0))), COUNT(*), 4, 'half_even') AS mean FROM transfer GROUP BY who" \
+              "transfer=$data" --strict --deterministic --receipt "$out/r.json" > "$out/answer.csv"
+            "$bin" verify "$out/r.json" "transfer=$data"
+            echo "ran, $(wc -c < "$bin") bytes"
+          fi
+      - name: Archive
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+          EXT: ${{ matrix.ext }}
+        run: |
+          name="burrmill-$TAG-$TARGET"
+          mkdir -p "dist/$name"
+          bin="target/$TARGET/cli/burrmill"
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          cp "$bin" LICENSE-MIT LICENSE-APACHE README.md "dist/$name/"
+          cd dist
+          if [ "$EXT" = ".zip" ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+            echo "ARCHIVE=$name.zip" >> "$GITHUB_ENV"
+          else
+            tar -czf "$name.tar.gz" "$name"
+            echo "ARCHIVE=$name.tar.gz" >> "$GITHUB_ENV"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: archive-${{ matrix.target }}
+          path: dist/${{ env.ARCHIVE }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # Read-only: also runs on a dry run, so the checksum step is exercised.
+  checksums:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: dist
+      - name: SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum burrmill-*.tar.gz burrmill-*.zip > SHA256SUMS
+          [ "$(wc -l < SHA256SUMS)" -eq 5 ] || { echo "::error::expected 5 archives"; cat SHA256SUMS; exit 1; }
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: SHA256SUMS
+          path: dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  # The only job that can write, and only on a pushed tag.
+  publish:
+    if: github.event_name == 'push'
+    needs: [prepare, checksums]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Tag is on main
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$TAG^{commit}" origin/main \
+            || { echo "::error::$TAG is not on main"; exit 1; }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          merge-multiple: true
+          path: dist
+      - name: Verify the checksums, then create the release
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd dist && sha256sum --check SHA256SUMS)
+          .github/scripts/changelog-section.sh "${TAG#v}" > notes.md
+          flags=""
+          case "$TAG" in *-*) flags="--prerelease" ;; esac
+          # shellcheck disable=SC2086
+          gh release create "$TAG" dist/* --verify-tag --title "$TAG" --notes-file notes.md $flags
