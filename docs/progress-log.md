@@ -4,6 +4,33 @@ Newest first. One entry per RFC-0044 slice.
 
 ---
 
+## Analyzer and optimizer walks that cannot change a small plan are skipped (#348) — 2026-11-22
+
+`DuckSemantics` and `DuckDoubles` now look at a node's expressions first (`semantics_may_rewrite`;
+a cast to DOUBLE) and pass the node over typing nothing when none could match. A new `df/gate.rs`
+wraps DataFusion's `eliminate_join`, `extract_leaf_expressions` and `rewrite_set_comparison`, which
+changed no plan in #348's corpus probe, so each runs only on a plan holding a join, an expression
+that moves towards the leaves, or a set comparison. Not done: `checked_arithmetic` and
+`duck_comparisons` still walk every node. `addresses` already had its early-out.
+
+Measured on the ThinkPad (32 cores, 8 threads each, `taskset -c 16-23`), three rounds interleaved
+base (origin/main `ddeedc6`) then this change, each as `FRESH=1 /tmp/bm/<variant> dialect-latency`
+then without `FRESH`, 321 statements. The box was shared: round 1 started at load 14-39 (the first
+rounds are noisy, and a busy box flatters Burrmill), round 3 at load 1.4-2.4.
+
+| round | fresh before | fresh after | reused before | reused after |
+|---|---:|---:|---:|---:|
+| 1 | 1.50 | 1.46 | 0.47 | 0.45 |
+| 2 | 1.50 | 1.49 | 0.47 | 0.47 |
+| 3 | 1.51 | 1.45 | 0.47 | 0.46 |
+
+Fresh Burrmill p50 sum, round 3 (quietest): 637 ms before, 608 ms after, DuckDB 438 ms. About 3-4%
+off fresh text; reused plans do not move. The bar of #348 (fresh text at or below DuckDB) is not
+met: fresh text is 1.45x. These geomeans are lower than the 1.8x of the 2026-11-21 ThinkPad rounds
+in the research note, which were taken at another commit and load; the difference is not explained here, so compare within this table only.
+
+---
+
 ## What Burrmill's four candidate costs are worth on TPC-H at SF10 (#384) — 2026-11-22
 
 Switched off one at a time (checked arithmetic, exact sums and averages, DuckDB's semantics rule,
