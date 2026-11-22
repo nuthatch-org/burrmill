@@ -5,6 +5,8 @@ name: release
 on:
   push:
     tags: ["v*"]
+    # Dry run: builds, smokes and checksums, publishes nothing. See docs/releasing.md.
+    branches: ["release-dry-run"]
   workflow_dispatch:
     inputs:
       tag:
@@ -32,8 +34,17 @@ jobs:
       - name: Tag is vX.Y.Z and has a CHANGELOG entry
         id: tag
         env:
-          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          # Tag push: the tag. workflow_dispatch: the input. Branch dry-run: replaced below.
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
+          # A push to release-dry-run names archives after the latest CHANGELOG version.
+          if [ "$EVENT_NAME" = "push" ] && [ "${REF#refs/heads/}" != "$REF" ]; then
+            ver=$(awk '/^## [0-9]/{print $2; exit}' CHANGELOG.md)
+            [ -n "$ver" ] || { echo "::error::no version heading in CHANGELOG.md"; exit 1; }
+            TAG="v$ver"
+          fi
           if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
             echo "::error::tag '$TAG' is not vX.Y.Z"; exit 1
           fi
@@ -152,7 +163,7 @@ jobs:
 
   # The only job that can write, and only on a pushed tag.
   publish:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [prepare, checksums]
     runs-on: ubuntu-latest
     timeout-minutes: 10
