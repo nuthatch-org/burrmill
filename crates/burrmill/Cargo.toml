@@ -193,6 +193,11 @@ path = "tests/df_buildside.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_literalkeys"
+path = "tests/df_literalkeys.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_joinbuffers"
 path = "tests/df_joinbuffers.rs"
 required-features = ["datafusion"]

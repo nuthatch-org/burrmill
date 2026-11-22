@@ -662,12 +662,18 @@ impl MiniSession {
             ),
             // Without `eliminate_group_by_constant`: it recomputes a key that is a function of
             // another key in a projection, where a rewritten `TRY_CAST(k AS BIGINT)`, which DataFusion
-            // names `k`, collides with `k` itself and the query was refused.
+            // names `k`, collides with `k` itself and the query was refused. `LiteralGroupKeys`
+            // takes its place for literal keys, which left in made an aggregate ordered (#381).
             optimizer: Optimizer::with_rules(
                 Optimizer::new()
                     .rules
                     .into_iter()
-                    .filter(|r| r.name() != "eliminate_group_by_constant")
+                    .map(|r| match r.name() {
+                        "eliminate_group_by_constant" => {
+                            Arc::new(super::literalkeys::LiteralGroupKeys)
+                        }
+                        _ => r,
+                    })
                     // Last in each pass, so the next pass optimizes what it cut.
                     .chain([
                         Arc::new(super::bound::BoundValues(Arc::clone(&limits)))

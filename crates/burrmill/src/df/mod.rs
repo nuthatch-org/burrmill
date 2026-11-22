@@ -71,6 +71,7 @@ mod host;
 mod joinfilters;
 mod lastnonnull;
 mod lists;
+mod literalkeys;
 #[cfg(unix)]
 mod localfs;
 mod names;

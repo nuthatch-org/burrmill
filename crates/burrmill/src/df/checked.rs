@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayRef, AsArray, BooleanArray, Decimal128Array, Decimal128Builder, Decimal256Builder,
-    FixedSizeBinaryBuilder, StringBuilder, UInt64Array,
+    FixedSizeBinaryArray, FixedSizeBinaryBuilder, StringBuilder, UInt64Array,
 };
 use arrow::compute::kernels::numeric;
 use arrow::compute::{CastOptions, cast_with_options};
@@ -435,16 +435,17 @@ impl<const N: usize> Groups<N> {
     }
 
     fn encode(sums: &[Wide<N>], counts: Vec<u64>) -> Result<Vec<ArrayRef>> {
-        let mut b = FixedSizeBinaryBuilder::with_capacity(sums.len(), Wide::<N>::BYTES as i32);
-        let mut buf = vec![0u8; Wide::<N>::BYTES];
-        for s in sums {
-            s.write_le(&mut buf);
-            b.append_value(&buf)?;
+        let mut bytes = vec![0u8; sums.len() * Wide::<N>::BYTES];
+        for (s, out) in sums.iter().zip(bytes.chunks_exact_mut(Wide::<N>::BYTES)) {
+            s.write_le(out);
         }
-        Ok(vec![
-            Arc::new(b.finish()),
-            Arc::new(UInt64Array::from(counts)),
-        ])
+        Self::state_arrays(bytes, counts)
+    }
+
+    /// The state columns from sums already little-endian, `BYTES` each, none NULL.
+    fn state_arrays(bytes: Vec<u8>, counts: Vec<u64>) -> Result<Vec<ArrayRef>> {
+        let sums = FixedSizeBinaryArray::try_new(Wide::<N>::BYTES as i32, bytes.into(), None)?;
+        Ok(vec![Arc::new(sums), Arc::new(UInt64Array::from(counts))])
     }
 }
 
@@ -494,9 +495,22 @@ impl<const N: usize> GroupsAccumulator for Groups<N> {
         self.grow(total_num_groups);
         let sums = values[0].as_fixed_size_binary();
         let counts = values[1].as_primitive::<UInt64Type>();
-        for (i, &g) in group_indices.iter().enumerate() {
-            if sums.is_valid(i) {
-                self.fold(g, Wide::from_le(sums.value(i)), counts.value(i))?;
+        let rows = group_indices
+            .iter()
+            .zip(sums.value_data().chunks_exact(Wide::<N>::BYTES))
+            .zip(counts.values().iter());
+        match sums.nulls() {
+            None => {
+                for ((&g, s), &c) in rows {
+                    self.fold(g, Wide::from_le(s), c)?;
+                }
+            }
+            Some(valid) => {
+                for (i, ((&g, s), &c)) in rows.enumerate() {
+                    if valid.is_valid(i) {
+                        self.fold(g, Wide::from_le(s), c)?;
+                    }
+                }
             }
         }
         Ok(())
@@ -508,14 +522,16 @@ impl<const N: usize> GroupsAccumulator for Groups<N> {
         opt_filter: Option<&BooleanArray>,
     ) -> Result<Vec<ArrayRef>> {
         let n = values[0].len();
-        let mut sums = vec![Wide::<N>::ZERO; n];
+        let w = Wide::<N>::BYTES;
+        // A row left out is a zero sum over no rows, as before.
+        let mut bytes = vec![0u8; n * w];
         let mut counts = vec![0u64; n];
         self.each(&values[0], opt_filter, |i, v| {
-            sums[i] = v;
+            v.write_le(&mut bytes[i * w..(i + 1) * w]);
             counts[i] = 1;
             Ok(())
         })?;
-        Self::encode(&sums, counts)
+        Self::state_arrays(bytes, counts)
     }
 
     fn size(&self) -> usize {

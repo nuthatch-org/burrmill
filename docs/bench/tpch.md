@@ -22,6 +22,10 @@ the 2,048-row batches a budgeted session runs at.
   before the join narrows it to 204 parts, as all three engines do; the exact `checked_avg` costs
   2.4x datafusion-cli at SF1, but that does not explain the growth.
 - **Q2, 1.9 s at SF10 against 0.16 s,** also growing faster than the data: 65 ms at SF1.
+
+  Since measured: both were a constant group key from decorrelation that made the aggregate
+  ordered, and are fixed (#381; the progress log has the cause and figures). The tables below are
+  from before.
 - **Q21 is refused at SF10:** it needs more than the 1,792 MB of the 2 GiB budget a statement may
   use, which DuckDB and datafusion-cli answer without one. The refusal is the budget working; that
   Q21 needs it is the loss.

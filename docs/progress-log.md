@@ -4,6 +4,59 @@ Newest first. One entry per RFC-0044 slice.
 
 ---
 
+## TPC-H Q17 was quadratic in its parts, through a constant group key (#381) — 2026-11-22
+
+**Cause.** Decorrelating Q17's `(SELECT 0.2 * avg(l_quantity) ... WHERE l_partkey = p_partkey)`
+groups lineitem by `l_partkey, true AS __always_true`. DataFusion's `eliminate_group_by_constant`
+would drop the constant, but the session filters that rule out (`session.rs`, since 76a1059, for a
+`TRY_CAST` key it recomputed and collided). A constant counts as sorted, so both aggregates ran in
+DataFusion 55's ordered mode (`ordering_mode=PartiallySorted([1])`). That mode emits its last
+groups with `EmitTo::First(batch_size)` (`clamp_emit_to` in
+`aggregates/aggregate_hash_table/common_ordered.rs`), and each emit renumbers every group still
+held. At SF10 that is 2M parts emitted 2,048 at a time: `EXPLAIN ANALYZE` put 179.3 s of the partial
+aggregate's 189.6 CPU seconds in `emitting_time`. That is quadratic: ten times the parts, a
+hundred times the emitting. It was not the exact average, the join or a spill: `spill_count=0`
+everywhere, and the two joins' compute was 118 ms. datafusion-cli groups by `l_partkey` alone and
+skips its partial aggregation.
+
+**Fix.** `LiteralGroupKeys` (`df/literalkeys.rs`) takes the upstream rule's place for literal keys
+only. It projects them back above the aggregate under their own names, and leaves alone an aggregate
+keyed by literals alone, grouping sets and every computed key. Q17's aggregates are now keyed by
+`l_partkey`, unordered, and the partial one skips aggregation as datafusion-cli's does. Q2's
+correlated `min` is the same shape and fell with it. Also, `checked_avg`'s state is now written
+straight into one buffer rather than through a builder a row at a time, and merged from it: Q17's
+partial aggregate at SF10 went from 914 to 391 ms CPU. `tests/df_literalkeys.rs` checks the plan
+(no literal key, no `ordering_mode`) and the answer of a Q17-shaped query, a written
+`GROUP BY k, 'x'`, and that a constant-only `GROUP BY` over no rows still answers none. With the
+rule disabled, the first two fail.
+
+**Numbers.** 32-core Linux box shared with other workers, every engine at 8 threads, best of 3 warm,
+answers compared with DuckDB's (21 of 22 the same at SF10, Q21 refused as before; 22 of 22 at SF1).
+`main` (271a4c6) and this change were run back to back at load 8.6 and 9.1:
+
+    tpchgen-cli parquet -s 10 --parts 16 --output-dir sf10   # and -s 1, sf1; tpchgen-cli 4.0.0
+    DIR=sf10 THREADS=8 RUNS=3 DFCLI=$(which datafusion-cli) target/release/burrmill-bench tpch
+
+| | main ms | now ms | datafusion-cli ms, alongside now |
+|---|---:|---:|---:|
+| Q17 SF10 | 25,630 | 1,704 | 1,199 |
+| Q17 SF1 | 366 | 204 | 174 |
+| Q2 SF10 | 1,871 | 295 | 180 |
+| Q2 SF1 | 69 | 56 | 35 |
+
+Q17 at SF10 over four runs of this change with `QUERIES=17`: 1,333 to 1,739 ms against
+datafusion-cli's 1,136 to 1,199, 1.17x to 1.50x. Main took 25.5 to 27.6 s in five runs. No other
+query moved by more than 10% and 20 ms that did not move back on a rerun. Q3, Q4 and Q9 at SF1 and
+Q3 at SF10 rerun twice each, interleaved: 61/63, 56/57, 149/146 and 512/515 ms, main/now.
+
+**What is left.** Q17 now sits at the suite's usual ratio to datafusion-cli rather than 21x off it,
+but not reliably under 1.5x. Most of the rest is cores: unpinned, datafusion-cli at 8 target
+partitions keeps about 8.5 busy and `burrmill q --threads 8` about 7.5 (9.3 to 9.8 s user in 1.19
+to 1.24 s, against 10.6 to 11.0 s in 1.48 to 1.53 s). The ordered aggregate's quadratic emit is
+still upstream's, for any input truly sorted on part of its keys.
+
+---
+
 ## Catch-up, 2026-10-02 to 2026-11-11
 
 Written on 2026-11-11 from the merged PRs; each figure is the PR's own, and the PR has its method.
