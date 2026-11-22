@@ -65,7 +65,7 @@ jobs:
           - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, musl: true }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, musl: true }
           # Each on its own architecture, so the smoke test runs the binary it built.
-          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: aarch64-apple-darwin, os: macos-15 }
           - { target: x86_64-apple-darwin, os: macos-15-intel }
           - { target: x86_64-pc-windows-msvc, os: windows-2025, ext: ".zip" }
     steps:
