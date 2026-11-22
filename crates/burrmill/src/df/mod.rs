@@ -67,6 +67,7 @@ mod fastcast;
 mod files;
 mod floatsum;
 mod fold;
+mod gate;
 mod host;
 mod joinfilters;
 mod lastnonnull;

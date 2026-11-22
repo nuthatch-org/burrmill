@@ -2383,6 +2383,9 @@ impl AnalyzerRule for DuckSemantics {
 
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> DFResult<LogicalPlan> {
         super::dag::transform_up(plan, |p, _| {
+            if !super::dag::holds(&p, semantics_may_rewrite) {
+                return Ok(Transformed::no(p));
+            }
             let schema = super::dag::input_schema(&p);
             let names_matter = matches!(
                 p,
@@ -2412,6 +2415,29 @@ impl AnalyzerRule for DuckSemantics {
             }
         })
         .map(|t| t.data)
+    }
+}
+
+/// Whether any of the rewrites [`DuckSemantics`] applies to an expression could match `e`: the
+/// shapes its functions open with, so a node with none is passed over without typing anything.
+/// Each arm names what a function below matches first; add to it with the function.
+fn semantics_may_rewrite(e: &Expr) -> bool {
+    match e {
+        // `divide_as_double`, `modulo_by_zero` and `dates_as_duckdb`.
+        Expr::BinaryExpr(b) => matches!(
+            b.op,
+            Operator::Divide | Operator::Modulo | Operator::Plus | Operator::Minus
+        ),
+        // `timestamp_as_duckdb`, `dates_as_duckdb`, `try_as_duckdb` and `hugeint_rounding`.
+        Expr::ScalarFunction(f) => matches!(
+            f.func.name(),
+            "to_timestamp" | "date_trunc" | "try" | "burrmill_hugeint"
+        ),
+        // `round_before_int_cast`, `timestamp_as_text`, `case_nullability`, `hugeint_null_test`.
+        Expr::Cast(_) | Expr::TryCast(_) | Expr::Case(_) | Expr::IsNull(_) | Expr::IsNotNull(_) => {
+            true
+        }
+        _ => false,
     }
 }
 
