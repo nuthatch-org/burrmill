@@ -22,6 +22,7 @@
 //! - **`BREAK_PARITY=1`** drops a row from the candidate on purpose. The run must then refuse with no
 //!   RESULT line. A guard nobody has watched refuse is not a guard.
 
+mod csv_ingest;
 mod df_views;
 mod dialect_parity;
 mod encode_parity;
@@ -204,6 +205,7 @@ async fn run() -> anyhow::Result<()> {
         Some("duck-keywords") => dialect_parity::duck_keywords(),
         Some("fuzz") => fuzz::run(),
         Some("tpch") => tpch::run(),
+        Some("csv-ingest") => csv_ingest::run(),
         Some("determinism") => fuzz::determinism(),
         Some("asof") => fuzz::asof(),
         Some("duck-eval") => dialect_parity::duck_eval(

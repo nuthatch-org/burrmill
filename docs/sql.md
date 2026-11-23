@@ -146,8 +146,9 @@ batches of 8,192 rows, with nothing left under a NULL; a batch streamed by `sql_
 
 `Engine::sql_receipt(sql)` answers with a receipt, in deterministic mode only: the statement as the
 parser prints it back, the engine's and DataFusion's versions, the strict-decimals setting, the
-SHA-256 of every input file the statement reads (and of the canonical Arrow IPC of rows a host
-registered), and the SHA-256 of the answer's canonical IPC. `Receipt::to_json` writes it as one
+SHA-256 of every input file the statement reads (`parquet:`, or `csv:` and `json:` for files
+`EngineBuilder::csv` and `json` read; and of the canonical Arrow IPC of rows a host registered),
+and the SHA-256 of the answer's canonical IPC. `Receipt::to_json` writes it as one
 line; `Engine::verify_receipt` runs it again over the inputs this engine holds and names the
 first field that differs. Inputs are hashed by content, not path or table name, so a nest on disk,
 the same files in a bucket and the same rows in the tab give the same receipt

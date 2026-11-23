@@ -172,7 +172,9 @@ fn broken_quoting_is_one_field_and_a_row_number() {
             .report()
             .rejected
             .iter()
-            .any(|i| i.reason == Issue::UnclosedQuote && i.row == 2)
+            .any(|i| i.reason == Issue::UnclosedQuote
+                && i.row == 2
+                && i.column.as_deref() == Some("column_1"))
     );
     assert!(table.report().rejected.iter().any(|i| {
         i.reason

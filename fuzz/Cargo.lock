@@ -388,6 +388,7 @@ dependencies = [
  "arrow",
  "arrow-schema",
  "async-trait",
+ "burrmill-ingest",
  "burrmill-parquet-source",
  "bytes",
  "chrono",

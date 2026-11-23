@@ -49,11 +49,13 @@ pub(crate) fn parse(
         stop: None,
     };
     let body = text.trim_start_matches(WHITESPACE);
+    // The error and the slice its parser was over, which starts this far into `text`.
     let read = if body.starts_with('[') {
         let mut de = serde_json::Deserializer::from_str(body);
         Array(&mut sink)
             .deserialize(&mut de)
             .and_then(|()| de.end())
+            .map_err(|e| (e, text.len() - body.len()))
     } else {
         let mut rest = body;
         loop {
@@ -62,14 +64,14 @@ pub(crate) fn parse(
             }
             let mut de = serde_json::Deserializer::from_str(rest);
             if let Err(e) = Record(&mut sink).deserialize(&mut de) {
-                break Err(e);
+                break Err((e, text.len() - rest.len()));
             }
             let used = de.into_iter::<IgnoredAny>().byte_offset();
             rest = rest[used..].trim_start_matches(WHITESPACE);
         }
     };
-    if read.is_err() {
-        return Err(sink.stop.take().unwrap_or(INVALID));
+    if let Err((e, start)) = read {
+        return Err(sink.stop.take().unwrap_or_else(|| at(text, start, &e)));
     }
     let mut header = Row::default();
     for name in &sink.names {
@@ -89,6 +91,23 @@ pub(crate) fn parse(
 const WHITESPACE: [char; 4] = [' ', '\t', '\n', '\r'];
 
 const INVALID: IngestError = IngestError::Invalid { format: "json" };
+
+/// Where in `text` the parser over `text[start..]` went wrong, as `IngestError::Syntax`.
+fn at(text: &str, start: usize, e: &serde_json::Error) -> IngestError {
+    let before = &text[..start];
+    let line = before.matches('\n').count() as u64 + 1;
+    let column = (before.len() - before.rfind('\n').map_or(0, |i| i + 1)) as u64;
+    let (line, column) = match e.line() as u64 {
+        0 => return INVALID,
+        1 => (line, column + e.column() as u64),
+        n => (line + n - 1, e.column() as u64),
+    };
+    IngestError::Syntax {
+        format: "json",
+        line,
+        column,
+    }
+}
 
 struct Sink<'a> {
     budget: &'a Budget,

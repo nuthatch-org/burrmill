@@ -4,7 +4,9 @@ use burrmill_ingest::{
     Budget, BudgetBreach, Format, FormatHint, InferredType, IngestError, Table, ingest_bytes,
 };
 
-const INVALID: IngestError = IngestError::Invalid { format: "json" };
+fn not_json(err: &IngestError) -> bool {
+    matches!(err, IngestError::Syntax { format: "json", .. })
+}
 
 fn sniff(text: &str) -> Table {
     ingest_bytes(text.as_bytes(), FormatHint::Sniff, &Budget::untrusted()).unwrap()
@@ -216,7 +218,7 @@ fn a_csv_whose_first_cell_opens_a_bracket_is_still_csv() {
         assert_eq!(table.report().columns.len(), 2, "{text:?}");
         // Told it is JSON, the same bytes are not.
         let err = ingest_bytes(text.as_bytes(), FormatHint::Json, &Budget::untrusted());
-        assert_eq!(err.unwrap_err(), INVALID, "{text:?}");
+        assert!(not_json(&err.unwrap_err()), "{text:?}");
     }
     // A budget crossed while it still read as JSON is the answer, not a reason to try CSV.
     let b = breach(
@@ -241,8 +243,32 @@ fn what_is_not_records_is_refused_without_its_text() {
     ] {
         let err =
             ingest_bytes(text.as_bytes(), FormatHint::Json, &Budget::untrusted()).unwrap_err();
-        assert_eq!(err, INVALID, "{text}");
+        assert!(not_json(&err), "{text}: {err:?}");
         assert!(!err.to_string().contains("CANARY"), "{err}");
+    }
+}
+
+#[test]
+fn a_syntax_error_is_placed_by_line_and_column() {
+    for (text, line, column) in [
+        // The third record of newline-delimited JSON, at the first byte of `nope` that is not `null`.
+        ("{\"a\": 1}\n{\"a\": 2}\n{\"a\": nope}\n", 3, 8),
+        // A record that starts partway along a line.
+        ("{\"a\": 1}  {\"a\" 2}", 1, 16),
+        // Inside an array that opens after blank lines.
+        ("\n\n[\n  {\"a\": 1},\n  {\"a\": 1,}\n]", 5, 11),
+    ] {
+        let err =
+            ingest_bytes(text.as_bytes(), FormatHint::Json, &Budget::untrusted()).unwrap_err();
+        assert_eq!(
+            err,
+            IngestError::Syntax {
+                format: "json",
+                line,
+                column
+            },
+            "{text:?}"
+        );
     }
 }
 

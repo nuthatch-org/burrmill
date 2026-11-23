@@ -4,7 +4,10 @@
 //! the rest makes a receipt edited by hand fail to verify; it is a checksum, not a signature.
 //!
 //! Inputs are hashed by content, never by path or table name, so a nest on disk and the same files
-//! in a bucket or a tab make the same receipt. Rows a host registered are hashed as canonical IPC.
+//! in a bucket or a tab make the same receipt. Rows a host registered are hashed as canonical IPC,
+//! and a CSV or JSON file the builder opened by its bytes, as a Parquet file is.
+
+use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
@@ -32,14 +35,15 @@ pub struct Receipt {
     pub strict_decimals: bool,
     /// The statement as the parser prints it back.
     pub statement: String,
-    /// `parquet:<sha256>:<bytes>` per file and `rows:<sha256>:<rows>` per registered table,
-    /// sorted and each once.
+    /// `parquet:<sha256>:<bytes>` per Parquet file, `csv:` or `json:<sha256>:<bytes>` per file the
+    /// builder read as CSV or JSON, and `rows:<sha256>:<rows>` per registered table, sorted and each
+    /// once.
     pub inputs: Vec<String>,
     /// `<sha256>:<rows>` of the answer's canonical Arrow IPC.
     pub answer: String,
 }
 
-fn hex(d: impl AsRef<[u8]>) -> String {
+pub(super) fn hex(d: impl AsRef<[u8]>) -> String {
     d.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -140,19 +144,25 @@ fn ipc(schema: &SchemaRef, batches: &[RecordBatch]) -> Result<Vec<u8>> {
     w.into_inner().map_err(io)
 }
 
-/// What a statement reads: files in a store by location, and rows a host registered.
+/// What a statement reads: files in a store by location, CSV and JSON files by the name their
+/// content was given when read, and rows a host registered.
 #[derive(Default)]
 pub(super) struct Inputs {
     files: Vec<(
         datafusion_execution::object_store::ObjectStoreUrl,
         object_store::path::Path,
     )>,
+    named: Vec<String>,
     rows: Vec<(SchemaRef, Vec<RecordBatch>)>,
 }
 
-/// Every table `plan` reads, through views and subqueries. A table of any other kind is refused:
-/// a receipt that left an input out would verify against different data.
-pub(super) async fn inputs_of(plan: &LogicalPlan) -> Result<Inputs> {
+/// A table read from a CSV or JSON file, and how a receipt names that file.
+pub(super) type TextInput = (Arc<dyn TableProvider>, String);
+
+/// Every table `plan` reads, through views and subqueries; `text` are the tables read from CSV and
+/// JSON files. A table of any other kind is refused: a receipt that left an input out would verify
+/// against different data.
+pub(super) async fn inputs_of(plan: &LogicalPlan, text: &[TextInput]) -> Result<Inputs> {
     let mut providers = Vec::new();
     let mut stack = vec![plan.clone()];
     while let Some(p) = stack.pop() {
@@ -171,7 +181,12 @@ pub(super) async fn inputs_of(plan: &LogicalPlan) -> Result<Inputs> {
     }
     let mut out = Inputs::default();
     for (name, p) in providers {
-        if let Some(t) = p.downcast_ref::<SegmentTable>() {
+        let read = text
+            .iter()
+            .find(|(t, _)| std::ptr::addr_eq(Arc::as_ptr(t), Arc::as_ptr(&p)));
+        if let Some((_, input)) = read {
+            out.named.push(input.clone());
+        } else if let Some(t) = p.downcast_ref::<SegmentTable>() {
             let (url, located) = t.located();
             out.files
                 .extend(located.map(|l| (url.clone(), l.object_meta.location.clone())));
@@ -211,6 +226,7 @@ pub(super) async fn hash_inputs(
             .map_err(sub)?;
         out.insert(format!("parquet:{}:{}", sha256(&bytes), bytes.len()));
     }
+    out.extend(inputs.named);
     for (schema, batches) in inputs.rows {
         let canon = super::deterministic::canonical(&schema, &batches).map_err(super::df_err)?;
         let rows: usize = canon.iter().map(|b| b.num_rows()).sum();

@@ -758,6 +758,7 @@ dependencies = [
  "arrow 59.3.2",
  "arrow-schema 59.3.2",
  "async-trait",
+ "burrmill-ingest",
  "burrmill-parquet-source",
  "bytes",
  "chrono",

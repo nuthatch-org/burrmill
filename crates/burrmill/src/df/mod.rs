@@ -88,6 +88,7 @@ mod sharing;
 mod smallinputs;
 mod strict;
 mod tables;
+mod textfiles;
 #[cfg(not(target_arch = "wasm32"))]
 mod workers;
 pub use tables::duckdb_type;
@@ -256,6 +257,8 @@ pub struct Engine {
     /// Each store segment's columns, as `register_store_facts` read them from its footer. Sealed
     /// segments never change, so once. Local files share a process-wide cache instead.
     bound_segments: HashMap<(std::path::PathBuf, u64), arrow::datatypes::SchemaRef>,
+    /// The tables the builder read from CSV and JSON files, and how a receipt names each file.
+    text_inputs: Vec<receipt::TextInput>,
 }
 
 impl Engine {
@@ -395,6 +398,7 @@ impl Engine {
             sql_limit: std::sync::atomic::AtomicUsize::new(SQL_LIMIT),
             txn: None,
             bound_segments: Default::default(),
+            text_inputs: Vec::new(),
         })
     }
 
@@ -502,7 +506,7 @@ impl Engine {
         let logical = plan_query(&self.session, &statement, &self.cancel)?;
         let env = self.session.runtime_env();
         let inputs = self.block_on(async {
-            let inputs = receipt::inputs_of(&logical).await?;
+            let inputs = receipt::inputs_of(&logical, &self.text_inputs).await?;
             receipt::hash_inputs(inputs, env).await
         })?;
         let batches = self.sql(&statement)?;
@@ -529,7 +533,7 @@ impl Engine {
         self.refuse_without_determinism()?;
         let statement = receipt::normalised(sql);
         let logical = plan_query(&self.session, &statement, &self.cancel)?;
-        let inputs = receipt::inputs_of(&logical).await?;
+        let inputs = receipt::inputs_of(&logical, &self.text_inputs).await?;
         let inputs = receipt::hash_inputs(inputs, self.session.runtime_env()).await?;
         let batches = self.sql_async(&statement).await?;
         let schema = match batches.first() {
