@@ -883,20 +883,24 @@ fn parsing_grows_linearly_with_the_statement() {
         }
         sql
     };
-    let best = |sql: &str| {
-        (0..7)
-            .map(|_| {
-                let t = std::time::Instant::now();
-                burrmill::inspect::parse(sql).unwrap();
-                t.elapsed()
-            })
-            .min()
-            .unwrap()
+    // 4x the size: linear parsing costs about 4x, quadratic about 16x, so a
+    // limit of 8x sits far from both. The two sizes are timed alternately, so a
+    // slow patch on a shared runner hits both, and each keeps its best of 9.
+    let (small_sql, large_sql) = (statement(16), statement(64));
+    let time = |sql: &str| {
+        let t = std::time::Instant::now();
+        burrmill::inspect::parse(sql).unwrap();
+        t.elapsed()
     };
-    let (small, large) = (best(&statement(8)), best(&statement(16)));
+    let (mut small, mut large) = (std::time::Duration::MAX, std::time::Duration::MAX);
+    for _ in 0..9 {
+        small = small.min(time(&small_sql));
+        large = large.min(time(&large_sql));
+    }
     assert!(
-        large.as_secs_f64() < small.as_secs_f64() * 3.0,
-        "8 KiB took {small:?}, 16 KiB took {large:?}"
+        large.as_secs_f64() < small.as_secs_f64() * 8.0,
+        "16 KiB took {small:?}, 64 KiB took {large:?}, ratio {:.2}",
+        large.as_secs_f64() / small.as_secs_f64()
     );
 }
 
