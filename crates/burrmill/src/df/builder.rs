@@ -125,12 +125,13 @@ impl EngineBuilder {
         self
     }
 
-    /// The table `table` over a CSV file, read whole into memory by `burrmill-ingest`, the browser
-    /// tab's reader, which finds the delimiter, the header and each column's type as the tab does.
-    /// The memory it holds comes out of the budget's, and a file that would need more than is left,
-    /// or over 1 GiB, is refused. So is a file with a short row, a quote never closed, or a cell its
-    /// column's type does not read, at that row (from 1, after the header) and column. A receipt
-    /// names the file by its content, `csv:<sha256>:<bytes>`. Beside any other source.
+    /// The table `table` over a CSV file, read into memory by `burrmill-ingest`, the browser tab's
+    /// reader, on the budget's threads, which finds the delimiter, the header and each column's
+    /// type as the tab does. The memory it holds, and the file's bytes while it is read, come out
+    /// of the budget's, and a file that would need more than is left is refused. So is a file
+    /// with a short row, a quote never closed, or a cell its column's type does not read, at that
+    /// row (from 1, after the header) and column. A receipt names the file by its content,
+    /// `csv:<sha256>:<bytes>`. Beside any other source.
     pub fn csv(mut self, path: &Path, table: &str) -> Self {
         self.text
             .push((path.to_path_buf(), table.to_string(), TextFormat::Csv));
@@ -139,8 +140,8 @@ impl EngineBuilder {
 
     /// As [`EngineBuilder::csv`], over JSON: an array of objects, or objects one after another, as
     /// NDJSON is. Each key is a column, and a value that is an object or an array is its JSON text.
-    /// Text that does not parse is refused at its line and column. A receipt names the file
-    /// `json:<sha256>:<bytes>`.
+    /// Text that does not parse is refused at its line and column, and so is a file over 1 GiB.
+    /// A receipt names the file `json:<sha256>:<bytes>`.
     pub fn json(mut self, path: &Path, table: &str) -> Self {
         self.text
             .push((path.to_path_buf(), table.to_string(), TextFormat::Json));
@@ -248,9 +249,10 @@ impl EngineBuilder {
     /// budget then left for statements.
     fn read_text(&mut self) -> Result<Vec<TextTable>> {
         let mut left = self.budget.as_ref().map(|b| b.memory_bytes as u64);
+        let threads = self.budget.as_ref().map_or(self.threads, |b| b.threads);
         let mut out = Vec::with_capacity(self.text.len());
         for (path, name, format) in &self.text {
-            let t = textfiles::read(path, name, *format, left)?;
+            let t = textfiles::read(path, name, *format, left, threads)?;
             left = left.map(|m| m.saturating_sub(t.held));
             out.push(t);
         }

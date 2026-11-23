@@ -15,10 +15,16 @@ Engine (`burrmill`, feature `datafusion`)
 - `EngineBuilder::csv(path, table)` and `json(path, table)` open a CSV, JSON or NDJSON file as a
   table through `burrmill-ingest`, the tab's reader, so a column is typed as the tab types it. The
   table is held in memory, and that memory comes out of the budget's; a file that would need more
-  than is left, or is over 1 GiB, is refused. A short row, a quote never closed or a cell its
+  than is left, or is JSON over 1 GiB, is refused. A short row, a quote never closed or a cell its
   column's type does not read is refused at its row and column. A receipt names such a file
   `csv:<sha256>:<bytes>` or `json:<sha256>:<bytes>`, by its bytes, as it names a Parquet file; no
   existing receipt changes (#389).
+- A CSV is read on the budget's threads and built as a batch every 4 MiB of text, not held as rows
+  before its columns are typed, and the 1 GiB cap on a CSV file is gone. Each column's type is still
+  chosen over the whole file, so a cell far into it that its column's type does not read is refused
+  at its row and column. The table, the receipt and every refusal are the same at any thread count.
+  The 1 GB file of `burrmill-bench csv-ingest` now reads at the CLI's default `--memory` of 4 GiB
+  (#407).
 
 CLI (`burrmill`)
 
@@ -31,6 +37,9 @@ Ingest (`burrmill-ingest`)
 - JSON that does not parse is `IngestError::Syntax`, with the line and column it went wrong at,
   where it was `Invalid` (#389).
 - An unclosed quote's issue names the column it opened in (#389).
+- `ingest_parallel` reads CSV on up to a given number of threads, with the same table, report and
+  refusals as `ingest_bytes`, which is that reader on one thread. A CSV table is now a batch every
+  4 MiB of text rather than one batch, and the tab and the engine type it by the same pass (#407).
 
 ## 0.2.0 - 2026-11-22
 

@@ -1,11 +1,12 @@
 //! `csv-ingest`: how fast Burrmill reads a large CSV into a table, against DuckDB's `read_csv`
 //! (#389). The CSV is generated into a temporary directory, the same bytes on every machine, and
 //! deleted when the run ends. Both engines answer one statement over every column, compared before
-//! any time is printed; then each reads the file into memory, best of `RUNS`: Burrmill through
-//! `EngineBuilder::csv` (the tab's reader, one thread), DuckDB through
-//! `CREATE TABLE AS SELECT * FROM read_csv(...)` at `THREADS` and at one thread.
+//! any time is printed; then each reads the file into memory, best of `RUNS`, at `THREADS` and at
+//! one thread: Burrmill through `EngineBuilder::csv` (the tab's reader) under a budget of that
+//! many threads, DuckDB through `CREATE TABLE AS SELECT * FROM read_csv(...)`.
 //!
-//! `BYTES` of CSV (1,000,000,000), `THREADS` (8), `RUNS` (3), `BUDGET` in bytes (8 GiB).
+//! `BYTES` of CSV (1,000,000,000), `THREADS` (8), `RUNS` (3), `BUDGET` in bytes (4 GiB, the CLI's
+//! default `--memory`).
 
 use std::io::Write;
 use std::path::Path;
@@ -71,26 +72,25 @@ pub fn run() -> anyhow::Result<()> {
     let bytes = crate::env_usize("BYTES", 1_000_000_000) as u64;
     let threads = crate::env_usize("THREADS", 8);
     let runs = crate::env_usize("RUNS", 3);
-    let memory = crate::env_usize("BUDGET", 8 << 30);
+    let memory = crate::env_usize("BUDGET", 4 << 30);
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("trades.csv");
     let rows = generate(&path, bytes)?;
     let size = std::fs::metadata(&path)?.len();
     let shown = path.display().to_string();
-    let budget = || burrmill::Budget {
-        memory_bytes: memory,
-        threads,
-        spill: None,
-    };
-    let open = || {
+    let open = |threads: usize| {
         burrmill::Engine::builder()
             .csv(&path, "trades")
-            .budget(budget())
+            .budget(burrmill::Budget {
+                memory_bytes: memory,
+                threads,
+                spill: None,
+            })
             .open()
     };
 
     // Parity first, untimed.
-    let engine = open()?;
+    let engine = open(threads)?;
     let ours = engine.sql(&statement("trades", "amount"))?;
     let ours: Vec<String> = (0..COLUMNS)
         .map(|i| array_value_to_string(ours[0].column(i), 0))
@@ -120,10 +120,14 @@ pub fn run() -> anyhow::Result<()> {
     );
     let answer = ours;
 
-    let ours = best(runs, || {
-        open()?;
-        Ok(())
-    })?;
+    let ours_at = |n: usize| {
+        best(runs, || {
+            open(n)?;
+            Ok(())
+        })
+    };
+    let ours = ours_at(threads)?;
+    let ours_one = ours_at(1)?;
     let duck_at = |n: usize| -> anyhow::Result<Duration> {
         duck.execute_batch(&format!("SET threads = {n};"))?;
         best(runs, || {
@@ -150,13 +154,17 @@ pub fn run() -> anyhow::Result<()> {
     );
     println!("burrmill types: {}", types.join(", "));
     println!("answers agree: {answer:?}");
-    line("burrmill EngineBuilder::csv (1 thread)", ours);
+    line(
+        &format!("burrmill EngineBuilder::csv ({threads} threads)"),
+        ours,
+    );
     line(&format!("duckdb read_csv ({threads} threads)"), theirs);
+    line("burrmill EngineBuilder::csv (1 thread)", ours_one);
     line("duckdb read_csv (1 thread)", theirs_one);
     println!(
         "burrmill / duckdb: {:.2} at {threads} threads, {:.2} at 1",
         ours.as_secs_f64() / theirs.as_secs_f64(),
-        ours.as_secs_f64() / theirs_one.as_secs_f64()
+        ours_one.as_secs_f64() / theirs_one.as_secs_f64()
     );
     Ok(())
 }
