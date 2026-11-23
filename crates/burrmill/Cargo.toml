@@ -55,6 +55,7 @@ datafusion = [
     "dep:datafusion-sql",
     "dep:libc",
     "dep:sha2",
+    "dep:burrmill-ingest",
 ]
 
 [dependencies]
@@ -71,6 +72,8 @@ async-trait = { version = "0.1", optional = true }
 recursive = { version = "0.1.1", optional = true }
 bytes = { version = "1", optional = true }
 regex = { version = "1", optional = true }
+# The tab's CSV and JSON reader, for `EngineBuilder::csv` and `json` (#389). No C, as in the tab.
+burrmill-ingest = { path = "../burrmill-ingest", version = "0.0.1", features = ["json"], optional = true }
 # Receipts' content hashes; already in DataFusion's graph, and pure Rust for the tab.
 sha2 = { version = "0.11", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
@@ -423,6 +426,11 @@ required-features = ["datafusion"]
 [[test]]
 name = "df_receipt"
 path = "tests/df_receipt.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_textfiles"
+path = "tests/df_textfiles.rs"
 required-features = ["datafusion"]
 
 [[test]]

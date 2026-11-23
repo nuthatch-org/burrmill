@@ -8,6 +8,30 @@ version number promises.
 A release that changes any receipt in `corpus/receipts/receipts.jsonl` says which, and why, in its
 entry: a receipt someone kept stops verifying on that release (`tests/receipt_corpus.rs`).
 
+## Unreleased
+
+Engine (`burrmill`, feature `datafusion`)
+
+- `EngineBuilder::csv(path, table)` and `json(path, table)` open a CSV, JSON or NDJSON file as a
+  table through `burrmill-ingest`, the tab's reader, so a column is typed as the tab types it. The
+  table is held in memory, and that memory comes out of the budget's; a file that would need more
+  than is left, or is over 1 GiB, is refused. A short row, a quote never closed or a cell its
+  column's type does not read is refused at its row and column. A receipt names such a file
+  `csv:<sha256>:<bytes>` or `json:<sha256>:<bytes>`, by its bytes, as it names a Parquet file; no
+  existing receipt changes (#389).
+
+CLI (`burrmill`)
+
+- `burrmill q` and `verify` read a `.csv` file as CSV and a `.json`, `.ndjson` or `.jsonl` file as
+  JSON, named as a Parquet file is, `NAME=PATH` included. Directories are read for Parquet only, as
+  before (#389).
+
+Ingest (`burrmill-ingest`)
+
+- JSON that does not parse is `IngestError::Syntax`, with the line and column it went wrong at,
+  where it was `Invalid` (#389).
+- An unclosed quote's issue names the column it opened in (#389).
+
 ## 0.2.0 - 2026-11-22
 
 Prebuilt `burrmill` binaries for five targets, as a GitHub Release. What changed since 0.1.0:

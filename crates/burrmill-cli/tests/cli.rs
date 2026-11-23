@@ -158,3 +158,103 @@ fn strict_decimals_and_bad_arguments_are_refused() {
     ]);
     assert_eq!(code, 1, "{err}");
 }
+
+fn text(dir: &Path, name: &str, body: &str) -> String {
+    let p = dir.join(name);
+    std::fs::write(&p, body).unwrap();
+    p.to_str().unwrap().to_string()
+}
+
+#[test]
+fn csv_json_and_ndjson_files_are_tables() {
+    let t = tempfile::tempdir().unwrap();
+    let csv = text(t.path(), "Trades.CSV", "id,amount\n1,1.50\n2,2.25\n");
+    let json = text(
+        t.path(),
+        "who.json",
+        r#"[{"id": 1, "who": "a"}, {"id": 2, "who": "b"}]"#,
+    );
+    let ndjson = text(
+        t.path(),
+        "events.ndjson",
+        "{\"id\": 2, \"n\": 3}\n{\"id\": 2, \"n\": 4}\n",
+    );
+    let jsonl = text(t.path(), "more.jsonl", "{\"id\": 1}\n");
+    let sql = "SELECT w.who, SUM(t.amount) AS amount, (SELECT SUM(n) FROM events) AS n, \
+               (SELECT COUNT(*) FROM more) AS m, (SELECT COUNT(*) FROM named) AS c \
+               FROM Trades t JOIN who w ON t.id = w.id GROUP BY w.who ORDER BY w.who";
+    let named = format!("named={csv}");
+    let (code, out, err) = burrmill(&["q", sql, &csv, &json, &ndjson, &jsonl, &named]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "who,amount,n,m,c\na,1.50,7,1,2\nb,2.25,7,1,2\n");
+    let (code, out, err) = burrmill(&["q", "SELECT n FROM events ORDER BY n", &ndjson]);
+    assert_eq!((code, out.as_str()), (0, "n\n3\n4\n"), "{err}");
+}
+
+#[test]
+fn a_csv_receipt_verifies_and_an_edit_to_the_file_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let body = "k,v\na,1\nb,2\na,3\n";
+    let csv = text(t.path(), "kv.csv", body);
+    let receipt = t.path().join("r.json");
+    let (code, out, err) = burrmill(&[
+        "q",
+        "SELECT k, SUM(v) AS s FROM kv GROUP BY k",
+        &csv,
+        "--receipt",
+        receipt.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "k,s\na,4\nb,2\n");
+    let r = std::fs::read_to_string(&receipt).unwrap();
+    // Named by its bytes, as a Parquet file is: `csv:<sha256>:<bytes>`.
+    let input = r
+        .split("\"inputs\":[\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let parts: Vec<&str> = input.split(':').collect();
+    assert_eq!(parts[0], "csv", "{r}");
+    assert_eq!(parts[1].len(), 64, "{r}");
+    assert_eq!(parts[2], body.len().to_string(), "{r}");
+    let (code, _, err) = burrmill(&["verify", receipt.to_str().unwrap(), &csv]);
+    assert_eq!(code, 0, "{err}");
+    text(t.path(), "kv.csv", &body.replace("b,2", "b,5"));
+    let (code, _, err) = burrmill(&["verify", receipt.to_str().unwrap(), &csv]);
+    assert_eq!(code, 1);
+    assert!(err.contains("receipt does not verify"), "{err}");
+}
+
+#[test]
+fn a_malformed_or_oversized_file_is_refused_with_where() {
+    let t = tempfile::tempdir().unwrap();
+    let csv = text(t.path(), "bad.csv", "a,b,c\n1,2,3\n4,5\n6,7,8\n");
+    let (code, _, err) = burrmill(&["q", "SELECT * FROM bad", &csv]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains(
+            "bad.csv: refused at row 2, column 3 (c): 2 fields where the widest row has 3"
+        ),
+        "{err}"
+    );
+    let ndjson = text(
+        t.path(),
+        "bad.ndjson",
+        "{\"a\": 1}\n{\"a\": 2}\n{\"a\": nope}\n",
+    );
+    let (code, _, err) = burrmill(&["q", "SELECT * FROM bad", &ndjson]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("bad.ndjson: not a readable json file: line 3, column 8"),
+        "{err}"
+    );
+    let ok = text(t.path(), "ok.csv", "a,b\n1,2\n3,4\n");
+    let (code, _, err) = burrmill(&["q", "SELECT * FROM ok", &ok, "--memory", "40"]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("limit exceeded") && err.contains("ok.csv"),
+        "{err}"
+    );
+}

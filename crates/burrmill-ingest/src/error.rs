@@ -21,6 +21,13 @@ pub enum IngestError {
     Invalid {
         format: &'static str,
     },
+    /// The text does not parse as `format`, first going wrong at a 1-based `line` and `column`
+    /// (bytes into the line) of the decoded text. The parser's message is not kept.
+    Syntax {
+        format: &'static str,
+        line: u64,
+        column: u64,
+    },
     /// The byte source failed. The message is the source's, not a cell.
     Source(String),
 }
@@ -41,6 +48,14 @@ impl fmt::Display for IngestError {
                 write!(f, "unsupported format: {format}")
             }
             Self::Invalid { format } => write!(f, "not a readable {format} file"),
+            Self::Syntax {
+                format,
+                line,
+                column,
+            } => write!(
+                f,
+                "not a readable {format} file: line {line}, column {column}"
+            ),
             Self::Source(m) => write!(f, "source: {m}"),
         }
     }

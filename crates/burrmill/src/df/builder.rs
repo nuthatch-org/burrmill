@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::catalog::{self, NestTable, apply_schema_json, discover_tables};
+use super::textfiles::{self, TextFormat, TextTable};
 use super::{Budget, Engine, SharedPool};
 use crate::error::{BurrmillError, Result};
 use crate::limits::Limits;
@@ -27,6 +28,7 @@ enum Source {
 pub struct EngineBuilder {
     source: Source,
     parquet: Vec<Parquet>,
+    text: Vec<(PathBuf, String, TextFormat)>,
     threads: usize,
     budget: Option<Budget>,
     pool: Option<SharedPool>,
@@ -39,6 +41,7 @@ impl Engine {
         EngineBuilder {
             source: Source::Empty,
             parquet: Vec::new(),
+            text: Vec::new(),
             threads: Limits::default().max_threads,
             budget: None,
             pool: None,
@@ -122,6 +125,28 @@ impl EngineBuilder {
         self
     }
 
+    /// The table `table` over a CSV file, read whole into memory by `burrmill-ingest`, the browser
+    /// tab's reader, which finds the delimiter, the header and each column's type as the tab does.
+    /// The memory it holds comes out of the budget's, and a file that would need more than is left,
+    /// or over 1 GiB, is refused. So is a file with a short row, a quote never closed, or a cell its
+    /// column's type does not read, at that row (from 1, after the header) and column. A receipt
+    /// names the file by its content, `csv:<sha256>:<bytes>`. Beside any other source.
+    pub fn csv(mut self, path: &Path, table: &str) -> Self {
+        self.text
+            .push((path.to_path_buf(), table.to_string(), TextFormat::Csv));
+        self
+    }
+
+    /// As [`EngineBuilder::csv`], over JSON: an array of objects, or objects one after another, as
+    /// NDJSON is. Each key is a column, and a value that is an object or an array is its JSON text.
+    /// Text that does not parse is refused at its line and column. A receipt names the file
+    /// `json:<sha256>:<bytes>`.
+    pub fn json(mut self, path: &Path, table: &str) -> Self {
+        self.text
+            .push((path.to_path_buf(), table.to_string(), TextFormat::Json));
+        self
+    }
+
     /// Planning partitions, fold workers and runtime threads, without a budget. A budget's own
     /// `threads` takes precedence.
     pub fn threads(mut self, threads: usize) -> Self {
@@ -151,7 +176,7 @@ impl EngineBuilder {
 
     /// Open a local or empty source. A store source refuses: it opens with
     /// [`EngineBuilder::open_async`].
-    pub fn open(self) -> Result<Engine> {
+    pub fn open(mut self) -> Result<Engine> {
         if self.parquet.iter().any(|p| matches!(p, Parquet::Store(..))) {
             return Err(BurrmillError::Config(
                 "an engine over a store opens with open_async".into(),
@@ -172,7 +197,8 @@ impl EngineBuilder {
                 tables.push(super::files::local_table(path, name)?);
             }
         }
-        self.open_over(tables, Vec::new())
+        let text = self.read_text()?;
+        self.open_over(tables, text, Vec::new())
     }
 
     /// Open any source, listing a store's segments and reading its `schema.json` first.
@@ -210,24 +236,47 @@ impl EngineBuilder {
             ),
         };
         all.extend(tables);
-        let engine = self.open_over(all, stores)?;
+        let text = self.read_text()?;
+        let engine = self.open_over(all, text, stores)?;
         if let Some(store) = nest_store {
             engine.attach_store(store)?;
         }
         Ok(engine)
     }
 
+    /// Each CSV and JSON file, read in what the budget leaves after the ones before it, and the
+    /// budget then left for statements.
+    fn read_text(&mut self) -> Result<Vec<TextTable>> {
+        let mut left = self.budget.as_ref().map(|b| b.memory_bytes as u64);
+        let mut out = Vec::with_capacity(self.text.len());
+        for (path, name, format) in &self.text {
+            let t = textfiles::read(path, name, *format, left)?;
+            left = left.map(|m| m.saturating_sub(t.held));
+            out.push(t);
+        }
+        if let (Some(b), Some(left)) = (self.budget.as_mut(), left) {
+            b.memory_bytes = left as usize;
+        }
+        Ok(out)
+    }
+
     fn open_over(
         self,
         tables: Vec<NestTable>,
+        text: Vec<TextTable>,
         stores: Vec<(String, Arc<dyn object_store::ObjectStore>)>,
     ) -> Result<Engine> {
         let mut names = std::collections::HashSet::new();
-        if let Some(t) = tables.iter().find(|t| !names.insert(t.name.to_lowercase())) {
-            return Err(BurrmillError::Config(format!(
-                "two tables are named {}",
-                t.name
-            )));
+        let named = tables
+            .iter()
+            .map(|t| &t.name)
+            .chain(text.iter().map(|t| &t.name));
+        for name in named {
+            if !names.insert(name.to_lowercase()) {
+                return Err(BurrmillError::Config(format!(
+                    "two tables are named {name}"
+                )));
+            }
         }
         // Silently unbounded is worse than refused: the host asked for its statements to be held.
         if self.pool.is_some() && self.budget.is_none() {
@@ -246,13 +295,14 @@ impl EngineBuilder {
                     .into(),
             ));
         }
-        let engine = Engine::from_tables(
+        let mut engine = Engine::from_tables(
             tables,
             self.threads,
             self.budget,
             self.pool.as_ref(),
             stores,
         )?;
+        engine.register_text(text)?;
         if let Some(bytes) = self.small_bytes {
             engine.set_small_statement_bytes(bytes);
         }

@@ -1,5 +1,6 @@
-//! `burrmill`: SQL over Parquet files, with the three things datafusion-cli and DuckDB do not offer
-//! (#343): strict decimals, answers independent of threads and file layout, and receipts.
+//! `burrmill`: SQL over Parquet, CSV and JSON files, with the three things datafusion-cli and DuckDB
+//! do not offer (#343): strict decimals, answers independent of threads and file layout, and
+//! receipts.
 //!
 //! ```text
 //! burrmill q SQL [NAME=]PATH... [--strict] [--deterministic] [--receipt FILE]
@@ -9,7 +10,9 @@
 //!
 //! A PATH holding `segments/` is a nest. A directory's `.parquet` files are each a table named by
 //! the file, and its subdirectories each one table of everything beneath; a directory whose
-//! subdirectories are all `key=value` is itself one table. `NAME=PATH` names one table outright.
+//! subdirectories are all `key=value` is itself one table. A file ending `.csv` is read as CSV, and
+//! one ending `.json`, `.ndjson` or `.jsonl` as JSON, by `burrmill-ingest` (#389); any other file as
+//! Parquet. `NAME=PATH` names one table outright.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,7 +24,10 @@ use burrmill::{Budget, Engine, EngineBuilder, Receipt};
 const USAGE: &str = "usage:
   burrmill q SQL [NAME=]PATH... [--strict] [--deterministic] [--receipt FILE]
                  [--format csv|json|parquet|arrow] [--out FILE] [--threads N] [--memory BYTES]
-  burrmill verify RECEIPT [NAME=]PATH... [--threads N] [--memory BYTES]";
+  burrmill verify RECEIPT [NAME=]PATH... [--threads N] [--memory BYTES]
+
+A PATH is a Parquet file or directory, a nest, or a .csv, .json, .ndjson or .jsonl file.
+CSV and JSON are read into memory, out of --memory.";
 
 #[derive(Debug, Default)]
 struct Args {
@@ -87,7 +93,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         return Err(format!("no command {}", a.command));
     }
     if a.paths.is_empty() {
-        return Err("name the Parquet to read".into());
+        return Err("name the files to read".into());
     }
     // A receipt is made only of a deterministic answer.
     a.deterministic |= a.receipt.is_some() || a.command == "verify";
@@ -99,7 +105,7 @@ fn tables(mut b: EngineBuilder, paths: &[String]) -> Result<EngineBuilder, Strin
     let mut nest = false;
     for p in paths {
         if let Some((name, path)) = p.split_once('=').filter(|(n, _)| !n.contains('/')) {
-            b = b.parquet(Path::new(path), name);
+            b = file(b, Path::new(path), name);
             continue;
         }
         let path = Path::new(p);
@@ -110,7 +116,7 @@ fn tables(mut b: EngineBuilder, paths: &[String]) -> Result<EngineBuilder, Strin
             nest = true;
             b = b.nest(path);
         } else if path.is_file() {
-            b = b.parquet(path, &stem(path)?);
+            b = file(b, path, &stem(path)?);
         } else if path.is_dir() {
             let mut entries: Vec<PathBuf> = std::fs::read_dir(path)
                 .map_err(|e| format!("{p}: {e}"))?
@@ -149,12 +155,45 @@ fn tables(mut b: EngineBuilder, paths: &[String]) -> Result<EngineBuilder, Strin
     Ok(b)
 }
 
+/// How a file is read, by its extension, ignoring case.
+#[derive(Debug, PartialEq)]
+enum Kind {
+    Parquet,
+    Csv,
+    Json,
+}
+
+fn kind(p: &Path) -> Kind {
+    let ext = p
+        .extension()
+        .and_then(|x| x.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("csv") => Kind::Csv,
+        Some("json" | "ndjson" | "jsonl") => Kind::Json,
+        _ => Kind::Parquet,
+    }
+}
+
+/// The table `name` over the file or directory at `path`, read as its extension says.
+fn file(b: EngineBuilder, path: &Path, name: &str) -> EngineBuilder {
+    match kind(path) {
+        Kind::Csv => b.csv(path, name),
+        Kind::Json => b.json(path, name),
+        Kind::Parquet => b.parquet(path, name),
+    }
+}
+
 fn stem(p: &Path) -> Result<String, String> {
     let name = p
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| format!("{} has no name to give a table", p.display()))?;
-    Ok(name.strip_suffix(".parquet").unwrap_or(name).to_string())
+    let stem = match kind(p) {
+        Kind::Parquet => name.strip_suffix(".parquet"),
+        Kind::Csv | Kind::Json => p.file_stem().and_then(|s| s.to_str()),
+    };
+    Ok(stem.unwrap_or(name).to_string())
 }
 
 fn engine(a: &Args) -> Result<Engine, String> {

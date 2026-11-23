@@ -48,8 +48,8 @@ impl std::ops::Index<usize> for Row {
 #[derive(Debug)]
 pub struct Parsed {
     pub rows: Vec<Row>,
-    /// 1-based physical row numbers whose quoted field ran to EOF.
-    pub unclosed_rows: Vec<u64>,
+    /// 1-based physical row numbers whose quoted field ran to EOF, and that field's 0-based index.
+    pub unclosed_rows: Vec<(u64, usize)>,
     pub memory_bytes: u64,
 }
 
@@ -94,7 +94,7 @@ pub fn parse_csv(
                     budget,
                     &mut clock,
                     &mut unclosed_rows,
-                    false,
+                    None,
                 )?;
                 if c == '\r' && chars.peek() == Some(&'\n') {
                     chars.next();
@@ -133,7 +133,7 @@ pub fn parse_csv(
                 budget,
                 &mut clock,
                 &mut unclosed_rows,
-                false,
+                None,
             )?;
             if c == '\r' && chars.peek() == Some(&'\n') {
                 chars.next();
@@ -144,6 +144,7 @@ pub fn parse_csv(
     }
 
     if in_quote {
+        let column = row.len();
         end_field(&mut row, &mut field, &mut memory, budget)?;
         end_row(
             &mut rows,
@@ -152,7 +153,7 @@ pub fn parse_csv(
             budget,
             &mut clock,
             &mut unclosed_rows,
-            true,
+            Some(column),
         )?;
     } else if closed_quote || !field.is_empty() || !row.is_empty() {
         end_field(&mut row, &mut field, &mut memory, budget)?;
@@ -163,7 +164,7 @@ pub fn parse_csv(
             budget,
             &mut clock,
             &mut unclosed_rows,
-            false,
+            None,
         )?;
     }
 
@@ -204,14 +205,14 @@ fn end_row(
     physical: &mut u64,
     budget: &Budget,
     clock: &mut impl FnMut() -> Result<()>,
-    unclosed: &mut Vec<u64>,
-    was_unclosed: bool,
+    unclosed: &mut Vec<(u64, usize)>,
+    unclosed_column: Option<usize>,
 ) -> Result<()> {
     if row.len() as u64 > budget.max_columns {
         return Err(budget.breach("max_columns", budget.max_columns, row.len() as u64));
     }
-    if was_unclosed {
-        unclosed.push(*physical);
+    if let Some(column) = unclosed_column {
+        unclosed.push((*physical, column));
     }
     let mut finished = std::mem::take(row);
     finished.text.shrink_to_fit();

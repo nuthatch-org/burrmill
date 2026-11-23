@@ -60,12 +60,11 @@ pub fn build(
         },
     };
 
-    for (physical, _) in parsed.unclosed_rows.iter().enumerate() {
-        let row = parsed.unclosed_rows[physical];
+    for &(row, column) in &parsed.unclosed_rows {
         let data_row = if header { row.saturating_sub(1) } else { row };
         report.push_issue(RowIssue {
             row: data_row,
-            column: None,
+            column: names.get(column).cloned(),
             reason: Issue::UnclosedQuote,
         });
     }

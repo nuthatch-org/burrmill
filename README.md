@@ -38,16 +38,25 @@ lists. The page is `demo/` in this repo.
 [nuthatch quickstart](https://github.com/nuthatch-org/nuthatch#readme) is the way to run it over sealed
 segments. As a library it is `burrmill::Engine`.
 
-**Over Parquet files:** `cargo install --path crates/burrmill-cli` gives `burrmill`, which is worth
+**Over Parquet, CSV and JSON files:** `cargo install --path crates/burrmill-cli` gives `burrmill`, which is worth
 having for three things datafusion-cli and DuckDB do not do: `--strict` decimals, `--deterministic`
 answers, and `--receipt` for an answer anyone holding the same files can re-check with
 `burrmill verify`. For anything else either of them is the better tool.
 
     burrmill q "SELECT who, SUM(amount) FROM trades GROUP BY who" data/ --receipt r.json
     burrmill verify r.json data/
+    burrmill q "SELECT COUNT(*) FROM data JOIN events USING (id)" data.csv events.ndjson
 
 Each `.parquet` file in a directory is a table named after it, each subdirectory one table of
-everything beneath, `NAME=PATH` names one outright; `--format csv|json|parquet|arrow`.
+everything beneath, `NAME=PATH` names one outright; `--format csv|json|parquet|arrow`. A file
+named on the command line ending `.csv` is read as CSV, and one ending `.json`, `.ndjson` or `.jsonl`
+as JSON (an array of objects, or one object after another), by the tab's reader, so each column is
+typed as the tab types it. Such a file is held in memory, out of `--memory`, up to 1 GiB each; a
+1 GB CSV needs more than 4.5 GB, and reads at 38 MB/s, far behind DuckDB
+([docs/bench/csv-ingest.md](docs/bench/csv-ingest.md)). A
+short row, a quote never closed, a cell its column's type does not read, or JSON that does not
+parse is refused at its row (from 1, after the header) or line, and column. A receipt names the file
+by its bytes, as it does a Parquet file. Directories are still read for Parquet only.
 
 **As a library:** `cargo add burrmill --features datafusion`, then
 
@@ -57,6 +66,7 @@ engine.set_strict_decimals(true);
 let batches = engine.sql("SELECT sum(amount) FROM t")?;
 ```
 
+`.csv(path, table)` and `.json(path, table)` open those files the same way.
 `crates/burrmill/examples/parquet_dir.rs` is that as a program. Without `datafusion` the crate is the
 owned fold path alone, which is not a SQL engine on its own.
 
@@ -283,13 +293,13 @@ Said plainly, because a README that implies otherwise is the thing this project 
                              rules, one file each.
     crates/burrmill/examples hosted_fold: the memory gate in a Burrmill-only binary.
     crates/burrmill-ingest   untrusted CSV to Arrow under counted budgets. No engine, no C, builds
-                             for wasm32.
+                             for wasm32. The engine's builder reads CSV and JSON with it.
     crates/burrmill-wasm     the browser tab's package: ingest, the engine, and the checks on what
                              a model is sent and answers, in schema, aggregates and pseudonymised
                              modes. The page does the HTTP.
     crates/burrmill-size     the wasm size probes' binaries (docs/bench/*-wasm.txt).
     crates/burrmill-cli      the burrmill binary: strict, deterministic, receipted queries over
-                             Parquet files (docs/bench/cli-size.md).
+                             Parquet, CSV and JSON files (docs/bench/cli-size.md).
     crates/burrmill-bench    publish = false. Both oracles (DuckDB, the umbrella DataFusion) live
                              here, so neither can reach the shipped graph. Note it lends the crate
                              DataFusion features by unification; test a consumer on burrmill alone.

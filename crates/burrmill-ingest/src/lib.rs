@@ -230,7 +230,7 @@ fn keyed_records(
     }
     match json::parse(text, budget, text.len() as u64, clock) {
         Ok(r) => Ok(Some((r.parsed, r.nested))),
-        Err(IngestError::Invalid { .. }) if sniffed => Ok(None),
+        Err(IngestError::Invalid { .. } | IngestError::Syntax { .. }) if sniffed => Ok(None),
         Err(e) => Err(e),
     }
 }
