@@ -8,7 +8,12 @@ version number promises.
 A release that changes any receipt in `corpus/receipts/receipts.jsonl` says which, and why, in its
 entry: a receipt someone kept stops verifying on that release (`tests/receipt_corpus.rs`).
 
-## Unreleased
+## 0.3.0 - 2026-11-24
+
+Prebuilt `burrmill` binaries for five targets, as a GitHub Release. What changed since 0.2.0:
+
+A receipt still verifies only on the release that made it. `corpus/receipts` and `demo/receipt.json`
+are regenerated for 0.3.0; every statement, input and answer is unchanged.
 
 Engine (`burrmill`, feature `datafusion`)
 
