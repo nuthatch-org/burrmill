@@ -1,7 +1,7 @@
 # Reading a 1 GB CSV, against DuckDB's read_csv (#389, #407)
 
-Measured 2026-11-23 on a 32-thread Linux 6.12 machine (i9-13980HX) with 62 GiB, release build. The
-machine was shared and loaded (load average between 8 and 60 over the hour), so each figure is
+Measured 2026-11-24 on a 32-thread Linux 6.12 machine (i9-13980HX) with 62 GiB, release build. The
+CLI table below was measured on 2026-11-23, when the machine was shared and loaded. Each figure is
 the best of three warm runs, and every run of the bench is shown. `burrmill-bench csv-ingest`
 writes the CSV into a temporary directory (the same bytes on every machine), checks that both
 engines answer one statement over every column alike, then times each reading the whole file into
@@ -17,17 +17,17 @@ through `EngineBuilder::csv`, which is `burrmill-ingest`, the tab's reader, unde
 
 ## Since #407
 
-Three runs of the bench, a minute apart, seconds each (best of three):
+Three runs of the bench, a minute apart, on a quiet machine (1-minute load under 4 at the start of
+each), seconds each (best of three):
 
 | run | burrmill 8 threads | duckdb 8 threads | ratio | burrmill 1 thread | duckdb 1 thread | ratio |
 |---|---:|---:|---:|---:|---:|---:|
-| 1 (load 24) | 2.18 | 0.85 | 2.56 | 7.29 | 5.14 | 1.42 |
-| 2 (load 17) | 1.50 | 1.00 | 1.50 | 7.34 | 5.19 | 1.42 |
-| 3 (load 11) | 1.48 | 0.96 | 1.54 | 7.29 | 5.26 | 1.39 |
+| 1 (load 3.5) | 1.31 | 0.80 | 1.64 | 7.07 | 5.19 | 1.36 |
+| 2 (load 2.9) | 1.32 | 0.79 | 1.68 | 7.11 | 5.17 | 1.37 |
+| 3 (load 2.4) | 1.31 | 0.78 | 1.67 | 7.09 | 5.18 | 1.37 |
 
-**Burrmill is within 1.6 times DuckDB at 8 threads and 1.4 times on one thread** in the two runs
-on the quieter machine; in the first, under more load, it was 2.56 times at 8 threads. At 8 threads
-Burrmill reads at 675 MB/s, against 38.4 MB/s before.
+**Burrmill is within 1.7 times DuckDB at 8 threads and 1.4 times on one thread.** At 8 threads
+Burrmill reads at 760 MB/s, against 38.4 MB/s before.
 
 Through the CLI, `burrmill q "SELECT COUNT(*) AS n FROM trades" trades.csv` at the default
 `--memory` (4 GiB), timed with `getrusage` around the process, best of three:

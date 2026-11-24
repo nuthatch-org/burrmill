@@ -8,7 +8,12 @@ version number promises.
 A release that changes any receipt in `corpus/receipts/receipts.jsonl` says which, and why, in its
 entry: a receipt someone kept stops verifying on that release (`tests/receipt_corpus.rs`).
 
-## Unreleased
+## 0.3.0 - 2026-11-24
+
+Prebuilt `burrmill` binaries for five targets, as a GitHub Release. What changed since 0.2.0:
+
+A receipt still verifies only on the release that made it. `corpus/receipts` and `demo/receipt.json`
+are regenerated for 0.3.0; every statement, input and answer is unchanged.
 
 Engine (`burrmill`, feature `datafusion`)
 
@@ -40,6 +45,11 @@ Ingest (`burrmill-ingest`)
 - `ingest_parallel` reads CSV on up to a given number of threads, with the same table, report and
   refusals as `ingest_bytes`, which is that reader on one thread. A CSV table is now a batch every
   4 MiB of text rather than one batch, and the tab and the engine type it by the same pass (#407).
+
+Dependencies
+
+- `parquet` and the `arrow` 59 crates are 59.3.3, for RUSTSEC-2026-0595, an unsoundness
+  advisory against `parquet` 59.3.2 (#409).
 
 ## 0.2.0 - 2026-11-22
 
