@@ -146,7 +146,7 @@ fn strict_decimals_and_bad_arguments_are_refused() {
     assert!(err.contains("div("), "{err}");
     let (code, out, _) = burrmill(&["q", "SELECT 1 / 2 AS h", d.to_str().unwrap()]);
     assert_eq!((code, out.as_str()), (0, "h\n0.5\n"));
-    assert_eq!(burrmill(&[]).0, 2);
+    assert_eq!(burrmill(&["--help"]).0, 2);
     assert_eq!(
         burrmill(&["q", "SELECT 1", d.to_str().unwrap(), "--format", "xml"]).0,
         2
@@ -257,4 +257,231 @@ fn a_malformed_or_oversized_file_is_refused_with_where() {
         err.contains("limit exceeded") && err.contains("ok.csv"),
         "{err}"
     );
+}
+
+/// `burrmill PATH... < script`, as CI drives it: no prompt, every dot-command, a statement over
+/// lines, an error the session survives, and each `.mode`'s bytes.
+#[test]
+fn a_scripted_session_runs_its_statements_and_commands() {
+    use std::io::Write as _;
+    let t = tempfile::tempdir().unwrap();
+    let csv = text(t.path(), "t.csv", "id,k\n1,a\n2,\n3,c\n");
+    let json = text(t.path(), "j.ndjson", "{\"x\": 1.5}\n");
+    text(
+        t.path(),
+        "more.sql",
+        "SELECT 41 + 1\n  AS n;\n.mode table\n",
+    );
+    let script = "\
+.help
+.tables
+.schema t
+.schema nope
+-- a comment, then a statement over two lines
+SELECT id,
+       k FROM t ORDER BY id;
+.mode csv
+SELECT * FROM t ORDER BY id; SELECT ';' AS semi;
+.mode json
+SELECT * FROM t ORDER BY id;
+SELECT nope FROM t;
+.mode xml
+.timer on
+SELECT x FROM j;
+.timer off
+.read more.sql
+.schema
+.frobnicate
+.quit
+SELECT 'never' AS z;
+";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_burrmill"))
+        .args([&csv, &json])
+        .current_dir(t.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let o = child.wait_with_output().unwrap();
+    let (out, err) = (
+        String::from_utf8(o.stdout).unwrap(),
+        String::from_utf8(o.stderr).unwrap(),
+    );
+    let help = out.split_once("line at the prompt.\n").map(|(h, _)| h);
+    assert!(
+        help.is_some_and(
+            |h| [".tables", ".schema", ".timer", ".mode", ".read", ".quit"]
+                .iter()
+                .all(|c| h.contains(c))
+        ),
+        "{out}"
+    );
+    let rest = &out[help.unwrap().len() + "line at the prompt.\n".len()..];
+    assert_eq!(
+        rest,
+        "\
++------------+
+| table_name |
++------------+
+| j          |
+| t          |
++------------+
+(2 rows)
++-------------+-----------+-------------+
+| column_name | data_type | is_nullable |
++-------------+-----------+-------------+
+| id          | BIGINT    | YES         |
+| k           | VARCHAR   | YES         |
++-------------+-----------+-------------+
+(2 rows)
++----+------+
+| id | k    |
++----+------+
+| 1  | a    |
+| 2  | NULL |
+| 3  | c    |
++----+------+
+(3 rows)
+id,k
+1,a
+2,
+3,c
+semi
+;
+[{\"id\":1,\"k\":\"a\"},{\"id\":2,\"k\":null},{\"id\":3,\"k\":\"c\"}]
+[{\"x\":1.5}]
+[{\"n\":42}]
++------------+-------------+--------------+-------------+
+| table_name | column_name | data_type    | is_nullable |
++------------+-------------+--------------+-------------+
+| j          | x           | DECIMAL(2,1) | YES         |
+| t          | id          | BIGINT       | YES         |
+| t          | k           | VARCHAR      | YES         |
++------------+-------------+--------------+-------------+
+(3 rows)
+"
+    );
+    let lines: Vec<&str> = err.lines().collect();
+    assert_eq!(lines[0], "error: no table nope", "{err}");
+    assert!(lines[1].starts_with("error: plan error: "), "{err}");
+    assert!(
+        err.contains("error: .mode table, .mode csv or .mode json\n"),
+        "{err}"
+    );
+    assert!(err.contains("\ntime: "), "{err}");
+    assert_eq!(err.matches("time: ").count(), 1, "{err}");
+    assert!(
+        err.ends_with("error: no command .frobnicate; .help lists them\n"),
+        "{err}"
+    );
+    // An error does not end the session, but a script that had one says so.
+    assert_eq!(o.status.code(), Some(1));
+    let (code, out, err) = burrmill_in(&[&csv], "SELECT COUNT(*) AS n FROM t");
+    assert_eq!(
+        (code, out.as_str()),
+        (0, "+---+\n| n |\n+---+\n| 3 |\n+---+\n(1 row)\n"),
+        "{err}"
+    );
+    let (code, out, _) = burrmill_in(&[], ".mode csv\nSELECT 1 AS a;\n");
+    assert_eq!((code, out.as_str()), (0, "a\n1\n"));
+}
+
+fn burrmill_in(args: &[&str], stdin: &str) -> (i32, String, String) {
+    use std::io::Write as _;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_burrmill"))
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let o = child.wait_with_output().unwrap();
+    (
+        o.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&o.stdout).into_owned(),
+        String::from_utf8_lossy(&o.stderr).into_owned(),
+    )
+}
+
+/// Ctrl-C, as the signal: the statement running is cancelled within the engine's bound, and the
+/// session goes on to the next.
+#[cfg(unix)]
+#[test]
+fn ctrl_c_cancels_the_statement_running_and_not_the_session() {
+    use std::io::{BufRead as _, Write as _};
+    use std::time::{Duration, Instant};
+    // The engine's join bound is 100 ms in release (#344); an unoptimised build on a loaded runner
+    // misses it by tens, as crates/burrmill/tests/df_host.rs allows. The rest is margin.
+    let bound = Duration::from_millis(if cfg!(debug_assertions) { 1000 } else { 250 });
+    let t = tempfile::tempdir().unwrap();
+    let body: String = std::iter::once("id\n".to_string())
+        .chain((0..60_000).map(|i| format!("{i}\n")))
+        .collect();
+    let csv = text(t.path(), "big.csv", &body);
+    let mut seen = Vec::new();
+    // A shared runner can stall one attempt; a cancel that is not seen is late on every one.
+    for _ in 0..3 {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_burrmill"))
+            .args([&csv])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                b".mode csv\nSELECT 'go' AS x;\nSELECT sum(a.id * b.id) AS s FROM big a, big b;\n\
+                  SELECT 'after' AS y;\n",
+            )
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let cancelled = std::thread::spawn(move || {
+            let mut line = String::new();
+            std::io::BufReader::new(stderr)
+                .read_line(&mut line)
+                .unwrap();
+            (Instant::now(), line)
+        });
+        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut out = String::new();
+        while !out.contains("go\n") {
+            assert!(stdout.read_line(&mut out).unwrap() > 0, "{out}");
+        }
+        // Into the join, which runs for many seconds.
+        std::thread::sleep(Duration::from_millis(300));
+        let sent = Instant::now();
+        let kill = Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(kill.success());
+        let (back, line) = cancelled.join().unwrap();
+        assert_eq!(line, "cancelled\n");
+        std::io::Read::read_to_string(&mut stdout, &mut out).unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(out, "x\ngo\ny\nafter\n");
+        assert_eq!(status.code(), Some(1));
+        eprintln!("back {:?} after the signal", back - sent);
+        seen.push(back - sent);
+        if back - sent < bound {
+            break;
+        }
+    }
+    assert!(seen.iter().any(|l| *l < bound), "late by {seen:?}");
 }

@@ -8,6 +8,20 @@ version number promises.
 A release that changes any receipt in `corpus/receipts/receipts.jsonl` says which, and why, in its
 entry: a receipt someone kept stops verifying on that release (`tests/receipt_corpus.rs`).
 
+## Unreleased
+
+CLI (`burrmill`)
+
+- `burrmill` with no command, or `burrmill PATH...`, is a shell: a prompt with history, statements
+  over several lines that run once one ends with `;`, and `.tables`, `.schema [TABLE]` (both from
+  `information_schema`), `.timer on|off`, `.mode table|csv|json`, `.read FILE`, `.help` and
+  `.quit`. The banner and the prompt name the session's trust (a sandbox, the only kind until #387)
+  and its budget. Ctrl-C cancels the statement running through the engine's token and returns to the
+  prompt; Ctrl-D leaves. With stdin not a terminal it runs stdin's statements with no prompt and
+  exits 1 if any failed. Line editing is rustyline, pure Rust; the wasm build does not reach it.
+  `burrmill` alone used to print the usage and exit 2; `burrmill --help` still does. `q` and
+  `verify` are unchanged (#390).
+
 ## 0.3.0 - 2026-11-24
 
 Prebuilt `burrmill` binaries for five targets, as a GitHub Release. What changed since 0.2.0:
