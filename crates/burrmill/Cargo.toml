@@ -166,6 +166,11 @@ path = "tests/df_spillrepartition.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_spilljoin"
+path = "tests/df_spilljoin.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_lambda"
 path = "tests/df_lambda.rs"
 required-features = ["datafusion"]

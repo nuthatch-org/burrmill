@@ -86,6 +86,7 @@ mod sequential;
 mod session;
 mod sharing;
 mod smallinputs;
+mod spillingjoins;
 mod strict;
 mod tables;
 mod textfiles;

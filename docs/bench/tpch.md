@@ -30,6 +30,9 @@ the 2,048-row batches a budgeted session runs at.
   use, which DuckDB and datafusion-cli answer without one. The refusal is the budget working; that
   Q21 needs it is the loss.
 
+  Since measured: with a spill directory it answers at SF10, SF30 and SF100 under 2 GiB, as DuckDB
+  does; without one it is refused as above (#383, [Spilling](#spilling-q21-under-2-gib-383)).
+
 **Every answer given agrees with DuckDB:** 22 of 22 at SF1, 21 of 22 at SF10 with Q21 refused.
 
 **Q6 skips no row groups here.** tpchgen does not cluster `l_shipdate`, so every row group's range
@@ -94,10 +97,74 @@ splits it, so the 16 parts are not what makes the scans parallel.
 | 21 | 2221 | refused | | 1629 | limit exceeded: Out of Memory Error: the statement needed more than the engine's memory budget of 1792.0 MB; a spill directory would let ope |
 | 22 | 324 | 334 | 1.03x | 106 | same |
 
+## Spilling: Q21 under 2 GiB (#383)
+
+Q21's `EXISTS` and `NOT EXISTS` are each a partitioned hash join that builds on all of `lineitem`.
+A hash join holds its build side in memory and cannot spill it, so at SF10 the statement was
+refused at 1,791 of its 1,792 MB, the refusal naming `HashJoinInput`, with a spill directory or
+without. Under a budget with a spill directory the engine now plans a hash join whose build side
+may not fit as a sort-merge join, whose sorts and key buffer spill
+(`crates/burrmill/src/df/spillingjoins.rs` says when).
+
+Measured 2026-11-24 on the ThinkPad, **a shared host under other work**: the 1-minute load is given
+beside every timing, and DuckDB ran in the same few minutes, so the ratio is fairer than the
+absolute times. Burrmill and DuckDB ran in separate processes so that neither's allocator counts
+against the other's peak RSS; a third run of both compared the answers. Budget 2 GiB, 8 threads,
+spill directory on the same disk. Best of 3 at SF10 and SF30; at SF100 too, each run being under 5
+minutes. "Most spilled" is the most the spill directory held at once; "spilled in all" is every
+operator's `spilled_bytes` from `EXPLAIN ANALYZE`, summed. The pool is what the engine's
+operators reserved; the rest of the RSS is outside it. The two spill figures are taken differently,
+one by sampling the directory and one from the operators' metrics, and at SF10 the first is the
+larger; why is not measured.
+
+| SF | DuckDB ms | DuckDB peak RSS MiB | Burrmill ms | ratio | Burrmill peak RSS MiB | pool peak MiB | most spilled MiB | spilled in all MiB | load at start | answer |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 10 | 1,767 | 953 | 2,388 | 1.35x | 2,396 | 1,652 | 709 | 575 | 4.9 / 6.9 | same |
+| 30 | 5,505 | 1,941 | 13,955 | 2.54x | 2,278 | 1,676 | 6,496 | 12,238 | 8.4 / 10.1 | same |
+| 100 | 20,503 | 5,483 | 96,993 | 4.73x | 2,974 | 1,678 | 21,659 | 42,910 | 3.5 / 3.6 | same |
+
+The two loads are at the start of Burrmill's runs and of DuckDB's. The SF100 row is from the
+build before Q18's exception below, which does not change Q21's plan (its build sides group
+nothing); SF10 and SF30 are from the final build.
+
+**Peak RSS is the budget plus up to 926 MiB.** The pool stays under its 1,792 MB at every scale
+factor; what is above it is the process before the query (about 225 MiB: the binary, the tables'
+footers), Parquet decoding outside the pool, and pages the allocator freed and kept. At SF100 a
+build with the system allocator in place of jemalloc (`--features alloc-stats`, 1 run, 284 s
+under its counting) peaked at 2,533 MiB, so jemalloc's retention is about 440 MiB of it. A host
+that budgets 2 GiB should allow 3 GiB resident for such a statement.
+
+**Without a spill directory nothing changes:** Q21 at SF10 is refused with the same error, the pool
+at 1,791 MiB, and plans are as before.
+
+**Other queries with a spill directory at SF10.** Q18 was the one regression the rule first
+caused: as a sort-merge join it was refused under 2 GiB. Its `IN` builds on an aggregate's groups,
+624 of 15.00 M orders, which the files do not measure, so a build side under an aggregate keeps its
+hash join. Every answer below with a spill directory at 2 GiB matched DuckDB's. Best of 3; the
+three runs were back to back, at loads 5.9, 12.5 and 13.9 at their starts and climbing, so the
+column without a spill directory, last, ran on the busiest box. Peak RSS at 2 GiB counts DuckDB too,
+which ran in that process; at 16 GiB Q21 keeps its hash joins, which fit.
+
+| Q | DuckDB ms | spill dir, 2 GiB ms | spill dir, 16 GiB ms | no spill dir, 2 GiB ms | spilled MiB at 2 GiB |
+|---|---:|---:|---:|---:|---:|
+| 1 | 778 | 1,081 | 958 | 1,411 | 0 |
+| 3 | 536 | 569 | 554 | 1,730 | 0 |
+| 5 | 624 | 915 | 906 | 2,272 | 0 |
+| 9 | 1,482 | 1,962 | 1,990 | 4,120 | 0 |
+| 10 | 865 | 1,014 | 1,000 | 1,464 | 0 |
+| 12 | 476 | 935 | 1,045 | 1,502 | 0 |
+| 13 | 1,191 | 1,026 | 979 | 1,001 | 0 |
+| 18 | 1,484 | 1,696 | 1,785 | 1,727 | 0 |
+| 21 | 2,097 | 2,961 | 2,662 | refused | 636 |
+
+With a spill directory and memory to spare (16 GiB) no query is slower than without one by more
+than Q18's 58 ms (1,785 against 1,727), and the load moved more than that between the columns.
+
 ## Running it
 
     tpchgen-cli parquet -s 10 --parts 16 --output-dir sf10
     DIR=sf10 THREADS=8 RUNS=3 DFCLI=$(which datafusion-cli) cargo run --release -p burrmill-bench -- tpch
+    DIR=sf10 THREADS=8 RUNS=3 QUERIES=21 ENGINE=burrmill SPILL=spill ANALYZE=1 cargo run --release -p burrmill-bench -- tpch
 
 The queries are DataFusion's own (`crates/burrmill-bench/tpch/`), with Q15's view written as a `WITH`
 for all three engines, because Burrmill serves queries only.
