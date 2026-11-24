@@ -46,6 +46,11 @@ Ingest (`burrmill-ingest`)
   refusals as `ingest_bytes`, which is that reader on one thread. A CSV table is now a batch every
   4 MiB of text rather than one batch, and the tab and the engine type it by the same pass (#407).
 
+Dependencies
+
+- `parquet` and the `arrow` 59 crates are 59.3.3, for RUSTSEC-2026-0595, an unsoundness
+  advisory against `parquet` 59.3.2 (#409).
+
 ## 0.2.0 - 2026-11-22
 
 Prebuilt `burrmill` binaries for five targets, as a GitHub Release. What changed since 0.1.0:
