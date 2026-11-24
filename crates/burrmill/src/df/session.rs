@@ -191,6 +191,15 @@ pub(super) fn budget_pool(memory_bytes: usize, spills: bool) -> Arc<dyn MemoryPo
 /// `FairSpillPool` caps each at a share of every spiller registered, finished or idle, which was 49
 /// on nuthatch's QoS nest: a final aggregate replaying its spills, which cannot spill again, was
 /// refused at 12.4 MB of a pool with 560 MB free.
+///
+/// Two limits keep what a spiller holds from starving the others, since nothing makes it give that
+/// back (#383). Spillers leave a sixteenth of the pool ([`SPILL_RESERVE`]) free between them: a
+/// consumer that cannot spill fails at the first batch it cannot reserve, and TPC-H Q21 at SF30
+/// under 2 GiB had its spillers hold all but 31 KB, and a sort's merge, which reads its spilled
+/// runs back and cannot spill again, refused 32 KB for its next batch. And a repartition does not
+/// borrow: what it holds is batches for a partition whose reader has not started, as a sort-merge
+/// join's second input waits for its first to be sorted, and Q21's repartitions had borrowed 1.1 GB
+/// that way while a sort holding nothing could get no batch to sort. Past its share it spills.
 #[derive(Debug)]
 pub(super) struct LendingSpillPool {
     pool_size: usize,
@@ -219,17 +228,24 @@ impl LendingSpillPool {
     }
 }
 
+/// Spillers leave one part in this of a spilling pool free for consumers that cannot spill.
+const SPILL_RESERVE: usize = 16;
+
 impl Loans {
     /// What the spilling consumer `id` may take of `additional`. A loan leaves a share free because
     /// nothing makes a borrower give it back; the split counts small holders at what they hold, as a
     /// partial aggregate that could emit early once borrowed 53 MB and left a replay none.
-    fn spill_room(&self, id: usize, additional: usize, pool_size: usize) -> usize {
-        let free = pool_size.saturating_sub(self.spillable + self.unspillable);
+    fn spill_room(&self, id: usize, additional: usize, pool_size: usize, borrows: bool) -> usize {
+        let free =
+            pool_size.saturating_sub(self.spillable + self.unspillable + pool_size / SPILL_RESERVE);
         let spill_available = pool_size.saturating_sub(self.unspillable);
         let fair = spill_available / self.spillers.max(1);
         let held = self.held.get(&id).copied().unwrap_or(0);
         if held + additional <= fair {
             return free;
+        }
+        if !borrows {
+            return free.min(fair.saturating_sub(held));
         }
         let kept = fair;
         let mut lendable = spill_available - kept;
@@ -315,7 +331,8 @@ impl MemoryPool for LendingSpillPool {
         let mut s = self.state();
         let c = r.consumer();
         let available = if c.can_spill() {
-            s.spill_room(c.id(), additional, self.pool_size)
+            let borrows = !c.name().starts_with("RepartitionExec");
+            s.spill_room(c.id(), additional, self.pool_size, borrows)
         } else {
             self.pool_size.saturating_sub(s.spillable + s.unspillable)
         };
@@ -565,6 +582,11 @@ impl MiniSession {
         let mut one_pass = config.options().as_ref().clone();
         one_pass.optimizer.max_passes = 1;
 
+        let spilling_joins = budget.filter(|b| b.spill.is_some()).map(|b| {
+            Arc::new(super::spillingjoins::SpillingJoins::new(
+                b.memory_bytes - b.memory_bytes / 8,
+            )) as Arc<dyn PhysicalOptimizerRule + Send + Sync>
+        });
         Ok(Self {
             session_id: "s".into(),
             config,
@@ -717,6 +739,8 @@ impl MiniSession {
                         Arc::new(super::buildside::BuildOnSmaller)
                             as Arc<dyn PhysicalOptimizerRule + Send + Sync>
                     }))
+                    // Once the build sides are chosen; only where a join that can spill may.
+                    .chain(after_selection.then_some(spilling_joins.clone()).flatten())
             })
             .chain([
                 Arc::new(super::topkfilter::TopKFilters)

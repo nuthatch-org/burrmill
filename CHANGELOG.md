@@ -10,6 +10,18 @@ entry: a receipt someone kept stops verifying on that release (`tests/receipt_co
 
 ## Unreleased
 
+Engine (`burrmill`, feature `datafusion`)
+
+- Under a budget with a spill directory, a hash join whose build side's files hold more than half
+  the statement pool, or cannot be measured, is planned as a sort-merge join, whose sorts and key
+  buffer can spill where a hash join's build side cannot. TPC-H Q21, refused at SF10 under 2 GiB,
+  answers at SF10, SF30 and SF100 with a spill directory, and as DuckDB does (#383). A join that
+  fits keeps its hash join, and without a spill directory no plan changes and Q21 is refused as
+  before.
+- A spilling budget's spillers leave a sixteenth of the pool free for consumers that cannot spill,
+  such as a sort's merge, and a repartition spills past its fair share rather than borrowing; both
+  had starved Q21 at SF30 (#383).
+
 CLI (`burrmill`)
 
 - `burrmill` with no command, or `burrmill PATH...`, is a shell: a prompt with history, statements
