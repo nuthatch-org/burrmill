@@ -32,6 +32,7 @@ mod fixture;
 mod fuzz;
 mod generate;
 mod host_scan;
+mod json_ingest;
 mod oracles;
 mod reach_parity;
 mod scan_parity;
@@ -206,6 +207,7 @@ async fn run() -> anyhow::Result<()> {
         Some("fuzz") => fuzz::run(),
         Some("tpch") => tpch::run(),
         Some("csv-ingest") => csv_ingest::run(),
+        Some("json-ingest") => json_ingest::run(),
         Some("determinism") => fuzz::determinism(),
         Some("asof") => fuzz::asof(),
         Some("duck-eval") => dialect_parity::duck_eval(

@@ -139,9 +139,10 @@ impl EngineBuilder {
     }
 
     /// As [`EngineBuilder::csv`], over JSON: an array of objects, or objects one after another, as
-    /// NDJSON is. Each key is a column, and a value that is an object or an array is its JSON text.
-    /// Text that does not parse is refused at its line and column, and so is a file over 1 GiB.
-    /// A receipt names the file `json:<sha256>:<bytes>`.
+    /// NDJSON is, read on the budget's threads. Each key is a column, and a value that is an object
+    /// or an array is its JSON text. Text that does not parse is refused at its line and column, and
+    /// a value its key's type does not read at its row and key. A receipt names the file
+    /// `json:<sha256>:<bytes>`.
     pub fn json(mut self, path: &Path, table: &str) -> Self {
         self.text
             .push((path.to_path_buf(), table.to_string(), TextFormat::Json));
