@@ -24,7 +24,11 @@ pub(crate) const CHUNK_BYTES: usize = 4 << 20;
 
 /// `f(0..jobs)` on up to `threads` threads, in job order. One thread runs on the caller's, which
 /// is all wasm32 has.
-fn parallel<T: Send>(jobs: usize, threads: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+pub(crate) fn parallel<T: Send>(
+    jobs: usize,
+    threads: usize,
+    f: impl Fn(usize) -> T + Sync,
+) -> Vec<T> {
     if threads <= 1 || jobs <= 1 {
         return (0..jobs).map(f).collect();
     }

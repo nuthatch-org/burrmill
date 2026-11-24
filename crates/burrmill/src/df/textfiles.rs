@@ -1,8 +1,8 @@
 //! CSV and JSON files as tables (#389), read by `burrmill-ingest`, the browser tab's reader, so a
 //! column is typed as the tab types it. The file's bytes are read once and hashed beside the parse;
-//! CSV is parsed on the engine's threads into a batch every few MiB (#407). The table is held in
-//! memory as Arrow, and that memory, with the file's bytes while it is read, comes out of the
-//! engine's budget. A file that does not read cleanly is refused at its row and column:
+//! CSV (#407) and JSON (#413) are parsed on the engine's threads into a batch every few MiB. The
+//! table is held in memory as Arrow, and that memory, with the file's bytes while it is read, comes
+//! out of the engine's budget. A file that does not read cleanly is refused at its row and column:
 //! a cell that does not fit its column's type is a refusal here, where the tab shows it as a null
 //! on the report beside the table.
 
@@ -17,10 +17,6 @@ use datafusion_catalog::{MemTable, TableProvider};
 use sha2::{Digest, Sha256};
 
 use crate::error::{BurrmillError, Result};
-
-/// The most one JSON file may hold. A JSON text column is still one Arrow array with 32-bit
-/// offsets, and at this size none can overflow it. CSV is built a batch at a time and has no cap.
-pub(super) const MAX_JSON_BYTES: u64 = 1 << 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TextFormat {
@@ -71,10 +67,8 @@ pub(super) fn read(
     let file = std::fs::File::open(path).map_err(io)?;
     let len = file.metadata().map_err(io)?.len();
     let memory = memory.unwrap_or(u64::MAX);
-    let max_bytes = match format {
-        TextFormat::Csv => memory,
-        TextFormat::Json => memory.min(MAX_JSON_BYTES),
-    };
+    // A batch at a time, so no text column nears its 32-bit offsets, and no cap but the memory.
+    let max_bytes = memory;
     // The untrusted limits on a cell, a key, columns and nesting; the engine's memory for the rest,
     // which holds the file's bytes while it is read. Rows are bounded by the memory they take.
     let budget = burrmill_ingest::Budget::untrusted()

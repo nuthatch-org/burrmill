@@ -46,29 +46,36 @@ fn a_csv_is_typed_as_the_tab_types_it() {
 }
 
 #[test]
-fn every_corpus_csv_is_typed_or_refused_as_the_tab_reads_it_at_any_thread_count() {
+fn every_corpus_file_is_typed_or_refused_as_the_tab_reads_it_at_any_thread_count() {
+    use burrmill_ingest::FormatHint;
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/ingest");
-    let mut seen = 0;
+    let (mut csv, mut json) = (0, 0);
     for entry in std::fs::read_dir(&dir).unwrap() {
         let p = entry.unwrap().path();
-        if p.extension().and_then(|e| e.to_str()) != Some("csv") {
-            continue;
-        }
-        seen += 1;
+        let hint = match p.extension().and_then(|e| e.to_str()) {
+            Some("csv") => {
+                csv += 1;
+                FormatHint::Csv
+            }
+            Some("json" | "ndjson") => {
+                json += 1;
+                FormatHint::Json
+            }
+            _ => continue,
+        };
         let bytes = std::fs::read(&p).unwrap();
-        let tab = burrmill_ingest::ingest_bytes(
-            &bytes,
-            burrmill_ingest::FormatHint::Csv,
-            &burrmill_ingest::Budget::untrusted(),
-        );
+        let tab =
+            burrmill_ingest::ingest_bytes(&bytes, hint, &burrmill_ingest::Budget::untrusted());
         let tab = tab
             .ok()
             .filter(|t| t.report().rejected.is_empty() && !t.batches().is_empty());
         for threads in [1, 8] {
-            let e = Engine::builder()
-                .csv(&p, "t")
-                .budget(budget(1 << 30, threads))
-                .open();
+            let b = Engine::builder();
+            let b = match hint {
+                FormatHint::Csv => b.csv(&p, "t"),
+                _ => b.json(&p, "t"),
+            };
+            let e = b.budget(budget(1 << 30, threads)).open();
             let shown = format!("{} at {threads} threads", p.display());
             match (&tab, e) {
                 (Some(tab), Ok(e)) => {
@@ -91,7 +98,8 @@ fn every_corpus_csv_is_typed_or_refused_as_the_tab_reads_it_at_any_thread_count(
             }
         }
     }
-    assert!(seen >= 10, "corpus shrank to {seen}");
+    assert!(csv >= 10, "corpus shrank to {csv} CSV files");
+    assert!(json >= 2, "corpus shrank to {json} JSON files");
 }
 
 #[test]
@@ -267,6 +275,108 @@ fn a_contradiction_far_into_a_large_csv_is_refused_at_its_row() {
             err.contains("refused at row 300000, column 2 (n): not a INTEGER, which the rest of the column is"),
             "{err}"
         );
+    }
+}
+
+/// About 10 MB of JSON records over several of the reader's chunks, one a line (CRLF where
+/// `array` is not set) or one array of them, with nested values, a key that comes and goes and
+/// `"oops"` in place of record `bad_at`'s integer if there is one.
+fn large_json(array: bool, bad_at: Option<usize>) -> String {
+    let mut s = String::from(if array { "[\n" } else { "" });
+    let mut row = 0;
+    while s.len() < 10 << 20 {
+        row += 1;
+        let n = if Some(row) == bad_at {
+            "\"oops\"".to_string()
+        } else {
+            (row % 1000).to_string()
+        };
+        let extra = if row % 97 == 0 {
+            format!(", \"tags\": [{{\"t\": {row}}}, \"line\\nend\"], \"late\": {row}.5")
+        } else {
+            String::new()
+        };
+        if array && row > 1 {
+            s.push_str(",\n");
+        }
+        s.push_str(&format!(
+            "{{\"id\": {row}, \"n\": {n}, \"who\": \"w{}\"{extra}}}",
+            row % 7
+        ));
+        if !array {
+            s.push_str("\r\n");
+        }
+    }
+    if array {
+        s.push_str("\n]\n");
+    }
+    s
+}
+
+#[test]
+fn a_large_json_file_is_one_table_and_one_receipt_at_any_thread_count() {
+    let t = tempfile::tempdir().unwrap();
+    for (name, array) in [("large.ndjson", false), ("large.json", true)] {
+        let text = large_json(array, None);
+        let p = file(t.path(), name, &text);
+        let want = format!("json:{}:{}", hex(&Sha256::digest(&text)), text.len());
+        let tab = burrmill_ingest::ingest_bytes(
+            text.as_bytes(),
+            burrmill_ingest::FormatHint::Json,
+            &burrmill_ingest::Budget::untrusted(),
+        )
+        .unwrap();
+        assert!(tab.batches().len() > 1, "{name}");
+        let mut seen = Vec::new();
+        for threads in [1, 3, 8] {
+            let e = Engine::builder()
+                .json(&p, "data")
+                .budget(budget(1 << 30, threads))
+                .open()
+                .unwrap();
+            e.set_deterministic(true);
+            let all = e.sql("SELECT * FROM data LIMIT 1").unwrap();
+            assert_eq!(
+                all[0].schema().fields(),
+                tab.batches()[0].schema().fields(),
+                "{name}"
+            );
+            let (got, r) = e
+                .sql_receipt(
+                    "SELECT who, COUNT(*), SUM(n), MIN(id), MAX(id), COUNT(tags), SUM(late) \
+                     FROM data GROUP BY who ORDER BY who",
+                )
+                .unwrap();
+            assert_eq!(r.inputs, vec![want.clone()]);
+            e.verify_receipt(&r).unwrap();
+            let shown = arrow::util::pretty::pretty_format_batches(&got)
+                .unwrap()
+                .to_string();
+            seen.push((shown, r));
+        }
+        assert_eq!(seen[0], seen[1], "{name}");
+        assert_eq!(seen[0], seen[2], "{name}");
+    }
+}
+
+#[test]
+fn a_contradiction_far_into_a_large_json_file_is_refused_at_its_row_and_key() {
+    let t = tempfile::tempdir().unwrap();
+    for (name, array) in [("late.ndjson", false), ("late.json", true)] {
+        let p = file(t.path(), name, &large_json(array, Some(200_000)));
+        for threads in [1, 8] {
+            let err = refused(
+                Engine::builder()
+                    .json(&p, "t")
+                    .budget(budget(1 << 30, threads))
+                    .open(),
+            )
+            .to_string();
+            assert!(
+                err.contains("refused at row 200000, column 2 (n): not a INTEGER, which the rest of the column is"),
+                "{name} at {threads} threads: {err}"
+            );
+        }
     }
 }
 

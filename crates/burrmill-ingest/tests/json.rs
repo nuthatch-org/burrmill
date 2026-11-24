@@ -171,12 +171,18 @@ fn json_is_held_to_each_budget() {
         "max_bytes"
     );
 
-    // Rows are charged as they are read, not once the whole file has been.
+    // Records are not held: the table is charged from the counts before it is built, the text and
+    // 10,000 integers with their validity bits.
     let many = "{\"a\": 1}\n".repeat(10_000);
     let limit = many.len() as u64 + 10_000;
-    let b = breach(&many, Budget::untrusted().max_memory_bytes(limit));
-    assert_eq!(b.which, "max_memory_bytes");
-    assert!(b.at < limit + 100, "{b:?}");
+    assert_eq!(
+        breach(&many, Budget::untrusted().max_memory_bytes(limit)),
+        BudgetBreach {
+            which: "max_memory_bytes",
+            limit,
+            at: many.len() as u64 + 10_000 * 8 + 10_000 / 8
+        }
+    );
 
     let len = three.len() as u64;
     let b = breach(three, Budget::untrusted().max_memory_bytes(len + 40));

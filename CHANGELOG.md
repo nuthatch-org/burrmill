@@ -22,6 +22,17 @@ Engine (`burrmill`, feature `datafusion`)
 - A spilling budget's spillers leave a sixteenth of the pool free for consumers that cannot spill,
   such as a sort's merge, and a repartition spills past its fair share rather than borrowing; both
   had starved Q21 at SF30 (#383).
+- JSON and NDJSON are read as CSV is since #407: on the budget's threads, a batch every 4 MiB of
+  text, never held as rows before the columns are typed, and the 1 GiB cap on a JSON file is gone.
+  Objects one after another are cut at record starts; a JSON array is cut the same way, at the
+  `{` after a `,`, and where a guess at a cut lands inside a record that chunk is read again from
+  where the one before it ended. Types, notes and refusals are the tab's: one inference path over
+  the whole file, so a value far into it that its key's type does not read is refused at its row
+  and key. Text that does not parse is still refused at its line and column, found by one walk
+  over the file. The table, the receipt (`json:<sha256>:<bytes>`, unchanged) and every refusal are
+  the same at any thread count. The 1 GB file of `burrmill-bench json-ingest` reads at the CLI's
+  default `--memory` of 4 GiB, in 1.43 s at 8 threads with a peak of 1.43 GiB, where it peaked at
+  3.32 GiB before (docs/bench/json-ingest.md) (#413).
 
 CLI (`burrmill`)
 

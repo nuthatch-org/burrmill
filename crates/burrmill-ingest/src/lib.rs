@@ -102,8 +102,8 @@ pub fn ingest_bytes(data: &[u8], hint: FormatHint, budget: &Budget) -> Result<Ta
     ingest_parallel(data, hint, budget, 1)
 }
 
-/// [`ingest_bytes`] on up to `threads` threads, for CSV; the table, its report and any refusal
-/// are the same at every thread count. More than one thread is not for wasm32.
+/// [`ingest_bytes`] on up to `threads` threads, for CSV and JSON; the table, its report and any
+/// refusal are the same at every thread count. More than one thread is not for wasm32.
 pub fn ingest_parallel(
     data: &[u8],
     hint: FormatHint,
@@ -190,10 +190,26 @@ fn read(
     )?;
 
     #[cfg(feature = "json")]
-    if let Some((parsed, nested)) = keyed_records(&text, hint, budget, &mut || check_clock(budget))?
     {
-        drop(text);
-        return keyed_table(parsed, &nested, encoding, bytes_read, budget, &check_clock);
+        let sniffed = hint == FormatHint::Sniff && json::looks_like(&text);
+        if hint == FormatHint::Json || sniffed {
+            let clock = || check_clock(budget);
+            let read = json::read(
+                &text,
+                encoding,
+                budget,
+                text.len() as u64,
+                bytes_read,
+                threads,
+                &clock,
+            );
+            match read {
+                Ok((batches, report)) => return Ok(Table { batches, report }),
+                // A sniffed `{` or `[` that opened a CSV cell and not a document.
+                Err(IngestError::Invalid { .. } | IngestError::Syntax { .. }) if sniffed => {}
+                Err(e) => return Err(e),
+            }
+        }
     }
     #[cfg(not(feature = "json"))]
     if hint == FormatHint::Json {
@@ -210,67 +226,6 @@ fn read(
         &|| check_clock(budget),
     )?;
     Ok(Table { batches, report })
-}
-
-/// JSON's records as a table.
-#[cfg(feature = "json")]
-fn keyed_table(
-    parsed: json::Parsed,
-    nested: &[bool],
-    encoding: EncodingKind,
-    bytes_read: u64,
-    budget: &Budget,
-    check_clock: &dyn Fn(&Budget) -> Result<()>,
-) -> Result<Table> {
-    let dialect = Dialect {
-        delimiter: b',',
-        quote: b'"',
-        encoding,
-        locale: Locale::Point,
-    };
-    check_clock(budget)?;
-
-    let data_rows_with_possible_header = parsed.rows.len() as u64;
-    if data_rows_with_possible_header > budget.max_rows + 1 {
-        return Err(budget.breach("max_rows", budget.max_rows, data_rows_with_possible_header));
-    }
-
-    let (batches, mut report) = infer::build_keyed(parsed, dialect, bytes_read, nested);
-    if report.rows > budget.max_rows {
-        return Err(budget.breach("max_rows", budget.max_rows, report.rows));
-    }
-    // The columns are built while the parsed rows are still held, so both count.
-    let arrays: u64 = batches
-        .iter()
-        .map(|b| b.get_array_memory_size() as u64)
-        .sum();
-    report.budget_used.memory_bytes += arrays;
-    budget.charge(
-        "max_memory_bytes",
-        budget.max_memory_bytes,
-        report.budget_used.memory_bytes,
-    )?;
-    Ok(Table { batches, report })
-}
-
-/// The text as JSON records and which columns held nested values, or `None` where it is to be
-/// read as CSV: the hint says so, or a sniffed `{` or `[` opened a CSV cell and not a document.
-#[cfg(feature = "json")]
-fn keyed_records(
-    text: &str,
-    hint: FormatHint,
-    budget: &Budget,
-    clock: &mut dyn FnMut() -> Result<()>,
-) -> Result<Option<(json::Parsed, Vec<bool>)>> {
-    let sniffed = hint == FormatHint::Sniff && json::looks_like(text);
-    if hint != FormatHint::Json && !sniffed {
-        return Ok(None);
-    }
-    match json::parse(text, budget, text.len() as u64, clock) {
-        Ok(r) => Ok(Some((r.parsed, r.nested))),
-        Err(IngestError::Invalid { .. } | IngestError::Syntax { .. }) if sniffed => Ok(None),
-        Err(e) => Err(e),
-    }
 }
 
 fn cell_string(col: &Arc<dyn Array>, row: usize) -> Option<String> {

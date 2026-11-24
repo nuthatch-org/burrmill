@@ -13,13 +13,9 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 
-#[cfg(feature = "json")]
-use crate::json::{Parsed, Row};
 use crate::report::{
     ColumnReport, InferredType, IngestReport, Issue, MAX_ISSUES, RowIssue, TYPE_CONFIDENCE,
 };
-#[cfg(feature = "json")]
-use crate::sniff::Dialect;
 use crate::sniff::Locale;
 
 #[derive(Clone, Copy)]
@@ -37,17 +33,6 @@ enum Kind {
 pub(crate) trait Cells {
     fn len(&self) -> usize;
     fn cell(&self, i: usize) -> &str;
-}
-
-#[cfg(feature = "json")]
-impl Cells for Row {
-    fn len(&self) -> usize {
-        Row::len(self)
-    }
-
-    fn cell(&self, i: usize) -> &str {
-        &self[i]
-    }
 }
 
 impl Cells for Vec<String> {
@@ -407,11 +392,12 @@ impl Plan {
     }
 
     /// Whether `other` reads every cell as this does: the same names, decimal marks and types,
-    /// a decimal's precision aside.
+    /// a decimal's precision aside, for this plan's columns, which begin `other`'s.
     pub fn reads_as(&self, other: &Plan) -> bool {
-        self.names == other.names
-            && self.locales == other.locales
-            && self.columns.len() == other.columns.len()
+        let width = self.columns.len();
+        width <= other.columns.len()
+            && self.names[..] == other.names[..width]
+            && self.locales[..] == other.locales[..width]
             && self.columns.iter().zip(&other.columns).all(|(a, b)| {
                 match (&a.inferred, &b.inferred) {
                     (
@@ -423,8 +409,11 @@ impl Plan {
             })
     }
 
-    /// A batch built under a plan that reads as this one, typed as this one.
+    /// A batch built under a plan that reads as this one, typed as this one; a column that plan
+    /// did not have is all nulls.
     pub fn retag(&self, batch: RecordBatch) -> RecordBatch {
+        let rows = batch.num_rows();
+        let built = batch.num_columns();
         let arrays = batch
             .columns()
             .iter()
@@ -440,6 +429,11 @@ impl Plan {
                 }
                 _ => Arc::clone(a),
             })
+            .chain(
+                self.schema.fields()[built..]
+                    .iter()
+                    .map(|f| arrow::array::new_null_array(f.data_type(), rows)),
+            )
             .collect();
         RecordBatch::try_new(Arc::clone(&self.schema), arrays)
             .expect("a plan that reads as this one builds these columns")
@@ -493,6 +487,12 @@ impl Issues {
                 issue.row += base;
             }
         }
+    }
+
+    /// As found by a builder of fewer columns than `width`, which found none in the rest.
+    #[cfg(feature = "json")]
+    pub fn widen(&mut self, width: usize) {
+        self.by_column.resize(width, (Vec::new(), 0));
     }
 
     /// Onto `report` in its order: column by column, each in row order across `parts`.
@@ -774,60 +774,6 @@ impl<'a> BatchBuilder<'a> {
             .expect("schema matches the columns just built");
         (batch, self.issues)
     }
-}
-
-/// JSON's records: the first row is the names whatever it looks like, a short row is missing its
-/// last keys, and a column flagged in `nested` held nested values.
-#[cfg(feature = "json")]
-pub fn build_keyed(
-    parsed: Parsed,
-    dialect: Dialect,
-    budget_bytes: u64,
-    nested: &[bool],
-) -> (Vec<RecordBatch>, IngestReport) {
-    let width = parsed.rows.iter().map(|r| r.len()).max().unwrap_or(0);
-    let data: &[Row] = parsed.rows.get(1..).unwrap_or(&[]);
-    let header: Option<Vec<String>> = parsed
-        .rows
-        .first()
-        .map(|h| h.iter().map(str::to_string).collect());
-    let names = column_names(header.as_deref(), width);
-    let mut tallies = Vec::new();
-    for row in data {
-        tally_row(&mut tallies, row);
-    }
-    let rows = data.len() as u64;
-    let plan = Plan::new(names, &tallies, rows, dialect.locale, Some(nested));
-    let mut report = IngestReport {
-        format: crate::report::Format::Json,
-        dialect,
-        header: true,
-        rows,
-        columns: Vec::new(),
-        rejected: Vec::new(),
-        rejected_omitted: 0,
-        budget_used: crate::budget::BudgetUse {
-            bytes: budget_bytes,
-            rows,
-            columns: width as u64,
-            memory_bytes: parsed.memory_bytes,
-        },
-    };
-    report.dialect.locale = plan.locale;
-    let batches = if width == 0 {
-        Vec::new()
-    } else {
-        let bytes: Vec<u64> = tallies.iter().map(|t| t.bytes).collect();
-        let mut b = BatchBuilder::new(&plan, data.len(), &bytes, false);
-        for (i, row) in data.iter().enumerate() {
-            b.push(row, i as u64 + 1);
-        }
-        let (batch, issues) = b.finish();
-        Issues::drain_into(vec![issues], width, &mut report);
-        vec![batch]
-    };
-    report.columns = plan.columns;
-    (batches, report)
 }
 
 fn digit_count(v: i128) -> u8 {
