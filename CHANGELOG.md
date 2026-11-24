@@ -46,6 +46,16 @@ CLI (`burrmill`)
   `burrmill` alone used to print the usage and exit 2; `burrmill --help` still does. `q` and
   `verify` are unchanged (#390).
 
+Build and CI
+
+- DuckDB's own sqllogictest suite, every `test/sql/**/*.test` at v2.0.1, fetched as data and never
+  committed, runs against the engine in a CI job of its own (`yatr sqllogictest`, run by
+  `docs/bench/sqllogictest.sh`). Each record is a pass, a refusal by name, a wrong answer, an error
+  or a skip, judged as DuckDB's runner judges it. `docs/bench/sqllogictest.md` publishes the counts
+  per directory: 12088 pass, 6828 refused, 718 wrong, 3594 error and 56491 skipped of 79719
+  records. The job fails if any directory's wrong answers rise or its passes fall against
+  `docs/bench/sqllogictest-baseline.tsv`, and says how to lock in an improvement (#386).
+
 ## 0.3.0 - 2026-11-24
 
 Prebuilt `burrmill` binaries for five targets, as a GitHub Release. What changed since 0.2.0:
