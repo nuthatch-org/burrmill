@@ -19,6 +19,11 @@ const KEYS: i64 = 800_000;
 /// Each key three times, in three passes over the keys; an even key's three rows share a supplier,
 /// an odd key's have three.
 fn write(path: &Path) {
+    write_passes(path, 3);
+}
+
+/// As [`write`], over `passes` passes.
+fn write_passes(path: &Path, passes: i64) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("k", DataType::Int64, false),
         Field::new("s", DataType::Int64, false),
@@ -34,7 +39,7 @@ fn write(path: &Path) {
         Some(props),
     )
     .unwrap();
-    for pass in 0..3 {
+    for pass in 0..passes {
         let k: Vec<i64> = (0..KEYS).map(|i| (i * 7919) % KEYS).collect();
         let s: Vec<i64> = k
             .iter()
@@ -133,4 +138,35 @@ fn a_join_that_fits_keeps_its_hash_join() {
         "{p}"
     );
     assert_eq!(count(&roomy, EXISTS).unwrap(), 3 * (KEYS / 2));
+}
+
+#[test]
+fn a_join_building_on_groups_keeps_its_hash_join() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (file, outer) = (tmp.path().join("t.parquet"), tmp.path().join("u.parquet"));
+    write(&file);
+    write_passes(&outer, 6);
+    let spill = tmp.path().join("spill");
+    std::fs::create_dir(&spill).unwrap();
+    // As TPC-H Q18's `IN`: the grouped side's files are larger than the pool, and the other side's
+    // larger still, so the join builds on the keys the `HAVING` kept: the even ones, whose
+    // suppliers sum to 15.
+    let sql = "SELECT count(*) AS n FROM u WHERE k IN \
+        (SELECT k FROM t GROUP BY k HAVING sum(s) > 10)";
+    let e = Engine::builder()
+        .parquet(&file, "t")
+        .parquet(&outer, "u")
+        .budget(Budget {
+            memory_bytes: 32 << 20,
+            threads: 2,
+            spill: Some((spill, 4 << 30)),
+        })
+        .open()
+        .unwrap();
+    let p = plan(&e, sql);
+    assert!(
+        p.contains("HashJoinExec") && !p.contains("SortMergeJoinExec"),
+        "{p}"
+    );
+    assert_eq!(count(&e, sql).unwrap(), 6 * (KEYS / 2));
 }

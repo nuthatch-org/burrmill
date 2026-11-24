@@ -275,7 +275,10 @@ Said plainly, because a README that implies otherwise is the thing this project 
   release build; nuthatch's `graph` CI job went from 13 minutes on DuckDB to 45 on a runner, and its
   router tests carry a ten-times allowance under `cfg!(test)`. The time sits in DataFusion's physical
   planning (`equivalence::properties`, `Statistics`), and is the engine's to recover.
-- **Spilling joins.** A whole QoS view at 512 MB still spills past 2 GB or runs to the 600 s wall.
+- **Spilling joins.** Under a budget with a spill directory, a hash join whose build side may not
+  fit is planned as a sort-merge join, which can spill, and TPC-H Q21, refused at SF10 under 2 GiB,
+  answers at SF10, SF30 and SF100 (#383, docs/bench/tpch.md). The whole QoS view that at 512 MB
+  spilled past 2 GB or ran to the 600 s wall has not been run again since.
 - **The owned operator alone runs 0 of 65 real statements.** Every fold sub-plan in the workload
   admits (8/8), but each sits inside a CTE or a join, so whole statements run on the engine.
 - **No redb `HotTip`.** The hot/cold seam holds under concurrent seal (COR-1), but the only tip is

@@ -9,12 +9,18 @@
 //! (#383).
 //!
 //! Statistics are off, so the rows a build side holds are unknown; the bytes its scans read from
-//! disk, every column, are known ([`super::smallinputs::bytes_read`]). A hash table holds its rows
-//! decoded, with their hashes and chains, which over Parquet is commonly more than the file bytes
-//! of the columns it reads, and several builds are held at once, as Q21's five are. So a build side
-//! whose files hold more than half the statement pool, or that cannot be measured, gets the join
-//! that can spill. One under that keeps its hash join, which is faster wherever it fits: Q21's
-//! `orders` side, 647 MB of files at SF10, is built in 192 MB (`build_mem_used`).
+//! disk, every column, are known ([`super::smallinputs::bytes_read`]), and are a rough measure.
+//! At SF10 Q21's `orders` side, 647 MB of files filtered to one column, is built in 192 MB
+//! (`build_mem_used`), and Q18's, the same files at four columns unfiltered, in 193 MB in each of
+//! eight partitions. So a build side whose files hold more than half the statement pool, or that
+//! cannot be measured, gets the join that can spill, and one under that keeps its hash join, faster
+//! wherever it fits. Q18's is under, and fits as it did without a spill directory.
+//!
+//! A build side grouped by an aggregate keeps its hash join too. Its rows are groups, which the
+//! files do not measure: Q18's `IN` builds on 624 of the 15 million orders it groups `lineitem`'s
+//! 2.4 GB into, those whose quantity passes its `HAVING`. And the aggregate spills by itself. As a
+//! sort-merge join, Q18 under 2 GiB was refused: its sorts could get no batch beside what its other
+//! join had built.
 //!
 //! The rule is placed only for a budget with a spill directory; without one a sort-merge join could
 //! only refuse later, and plans stay as they were. It runs straight after the choice of build
@@ -30,6 +36,7 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_plan::aggregates::AggregateExec;
 use datafusion_physical_plan::joins::{HashJoinExec, SortMergeJoinExec};
 use datafusion_physical_plan::projection::ProjectionExec;
 use datafusion_session::PhysicalOptimizerRule;
@@ -52,8 +59,15 @@ impl SpillingJoins {
     }
 
     fn fits(&self, build: &Arc<dyn ExecutionPlan>) -> bool {
-        few_rows(build) || bytes_read(build).is_some_and(|b| b <= self.build_bytes)
+        few_rows(build)
+            || grouped(build)
+            || bytes_read(build).is_some_and(|b| b <= self.build_bytes)
     }
+}
+
+/// Whether an aggregate's groups are what `p` answers rows from.
+fn grouped(p: &Arc<dyn ExecutionPlan>) -> bool {
+    p.is::<AggregateExec>() || p.children().into_iter().any(grouped)
 }
 
 impl PhysicalOptimizerRule for SpillingJoins {

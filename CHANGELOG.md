@@ -16,8 +16,9 @@ Engine (`burrmill`, feature `datafusion`)
   the statement pool, or cannot be measured, is planned as a sort-merge join, whose sorts and key
   buffer can spill where a hash join's build side cannot. TPC-H Q21, refused at SF10 under 2 GiB,
   answers at SF10, SF30 and SF100 with a spill directory, and as DuckDB does (#383). A join that
-  fits keeps its hash join, and without a spill directory no plan changes and Q21 is refused as
-  before.
+  fits keeps its hash join, and so does one that builds on an aggregate's groups, which the files
+  do not measure, as TPC-H Q18's `IN` does. Without a spill directory no plan changes and Q21 is
+  refused as before.
 - A spilling budget's spillers leave a sixteenth of the pool free for consumers that cannot spill,
   such as a sort's merge, and a repartition spills past its fair share rather than borrowing; both
   had starved Q21 at SF30 (#383).
