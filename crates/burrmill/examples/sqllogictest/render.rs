@@ -64,8 +64,8 @@ pub fn top(col: &ArrayRef, i: usize) -> String {
     }
 }
 
-/// `{}` of DuckDB's fmt for a double: the shortest digits that round-trip, positional between
-/// 1e-5 and 1e16, else `d.ddde+XX`, and a `.0` on a whole number.
+/// `{}` of DuckDB's fmt for a double: the shortest digits that round-trip, positional from
+/// 1e-4 up to 1e16 (`0.0001`, `5e-05`), else `d.ddde+XX`, and a `.0` on a whole number.
 pub fn float(v: f64, shortest: String) -> String {
     if v.is_nan() {
         return "nan".into();
@@ -79,7 +79,7 @@ pub fn float(v: f64, shortest: String) -> String {
     let neg = mant.starts_with('-');
     let digits: String = mant.chars().filter(|c| c.is_ascii_digit()).collect();
     let sign = if neg { "-" } else { "" };
-    if !(-5..16).contains(&exp) {
+    if !(-4..16).contains(&exp) {
         let (first, rest) = digits.split_at(1);
         let frac = if rest.is_empty() {
             String::new()
@@ -599,6 +599,6 @@ mod tests {
         assert_eq!(interval(14, 3, 0), "1 year 2 months 3 days");
         assert_eq!(interval(0, 0, 5_400_000_000), "01:30:00");
         assert_eq!(interval(0, 0, 0), "00:00:00");
-        assert_eq!(interval(0, -1, -1_500_000), "-1 days -00:00:01.5");
+        assert_eq!(interval(0, -1, -1_500_000), "-1 day -00:00:01.5");
     }
 }
