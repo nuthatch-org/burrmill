@@ -16,7 +16,7 @@ This project's build, test and lint commands are [yatr](https://github.com/cargo
 | `agents-check` | Fail if the task table in AGENTS.md has drifted from this file |  | cached on its inputs |
 | `asof` | Generated ASOF joins on DuckDB and Burrmill, CASES cases, 3,000 unless set |  | cached on its inputs |
 | `bench-lint` | Clippy on the bench, which builds a bundled DuckDB |  | cached on its inputs |
-| `ci` | Every CI job but demo | `fmt-check`, `fuzz-lock`, `agents-check`, `lint`, `test`, `cli`, `bench-lint`, `deny`, `ingest`, `ingest-size`, `tab`, `tab-build`, `engine-size` | runs its dependencies only |
+| `ci` | Every CI job but demo | `fmt-check`, `fuzz-lock`, `agents-check`, `lint`, `test`, `cli`, `bench-lint`, `deny`, `ingest`, `ingest-size`, `tab`, `tab-build`, `engine-size`, `sqllogictest` | runs its dependencies only |
 | `cli` | Clippy and tests on burrmill-cli, the burrmill binary |  | cached on its inputs |
 | `cli-musl` | The burrmill binary static on x86_64 musl, and run (Linux, needs musl-gcc) |  | cached on its inputs |
 | `demo-build` | demo/pkg: burrmill-wasm and its JS glue (needs the pinned wasm-bindgen) |  | cached on its inputs |
@@ -33,6 +33,7 @@ This project's build, test and lint commands are [yatr](https://github.com/cargo
 | `ingest` | Clippy and tests on the tab's reader, bare and with json,parquet |  | cached on its inputs |
 | `ingest-size` | The reader's wasm32 graph has no C, and its gzip size |  | cached on its inputs |
 | `lint` | Clippy on burrmill, default graph and with datafusion |  | cached on its inputs |
+| `sqllogictest` | DuckDB's sqllogictest suite at a pinned tag; fail if wrong answers rise or passes fall |  | cached on its inputs |
 | `tab` | Clippy and tests on burrmill-wasm |  | cached on its inputs |
 | `tab-build` | burrmill-wasm for wasm32, warnings refused |  | cached on its inputs |
 | `test` | burrmill's tests, default graph and with datafusion |  | cached on its inputs |

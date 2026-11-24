@@ -109,6 +109,42 @@ jobs:
       - name: clippy
         run: yatr bench-lint
 
+  # #386: DuckDB's own test/sql at the tag in docs/bench/sqllogictest.sh, fetched as data, run
+  # against the engine and held to docs/bench/sqllogictest-baseline.tsv: the job fails if any
+  # directory's wrong answers rise or its passes fall, and says how to lock in an improvement.
+  sqllogictest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: sqllogictest
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Cache yatr
+        id: cache-yatr
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/yatr
+          key: yatr-${{ runner.os }}-${{ env.YATR_VERSION }}
+      - name: Install yatr
+        if: steps.cache-yatr.outputs.cache-hit != 'true'
+        run: cargo install yatr --version ${{ env.YATR_VERSION }} --locked --force
+        env:
+          RUSTFLAGS: ""
+      - name: DuckDB's test/sql against the baseline
+        run: yatr sqllogictest
+      # file, line, class and detail for every record, to see what moved.
+      - name: records
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sqllogictest-records
+          path: target/sqllogictest/records.tsv
+          if-no-files-found: ignore
+
   # Advisories, licences, duplicate versions and sources, from deny.toml.
   deny:
     runs-on: ubuntu-latest
