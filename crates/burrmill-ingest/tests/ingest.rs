@@ -3,7 +3,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 
-use arrow::array::AsArray;
+use arrow::array::{Array, AsArray};
 use arrow::datatypes::{DataType, Date32Type, TimestampMicrosecondType};
 use burrmill_ingest::{
     Budget, BudgetBreach, EncodingKind, FormatHint, InferredType, IngestError, Issue, Locale,
@@ -379,6 +379,21 @@ fn an_empty_file_and_a_header_only_file() {
     let display = only.report().to_string();
     assert!(!display.contains("name"), "{display}");
     assert!(!display.contains("city"), "{display}");
+
+    // Smaller than one chunk: the same on any number of threads.
+    for (name, one) in [("empty.csv", &empty), ("header-only.csv", &only)] {
+        for threads in [2, 8] {
+            let t = burrmill_ingest::ingest_parallel(
+                &corpus(name),
+                FormatHint::Sniff,
+                &Budget::untrusted(),
+                threads,
+            )
+            .unwrap();
+            assert_eq!(t.report(), one.report(), "{name} at {threads} threads");
+            assert_eq!(t.batches(), one.batches(), "{name} at {threads} threads");
+        }
+    }
     let debug = format!("{only:?}");
     assert!(
         !debug.contains("\"name\"") && !debug.contains("\"city\""),
@@ -1011,4 +1026,107 @@ fn an_empty_field_costs_memory_too() {
     let fits = ingest_bytes(text.as_bytes(), FormatHint::Csv, &Budget::untrusted()).unwrap();
     let fields = 2048 * 1024;
     assert!(fits.report().budget_used.memory_bytes >= text.len() as u64 + 4 * fields);
+}
+
+/// About `bytes` of CSV over several of the reader's 4 MiB chunks: CRLF line ends, a quoted field
+/// with line ends in it every 97 rows, and `bad` in place of row `bad_at`'s integer.
+fn chunked_csv(bytes: usize, bad_at: Option<usize>) -> (String, usize) {
+    let mut s = String::from("id,n,note,amount\r\n");
+    let mut row = 0;
+    while s.len() < bytes {
+        row += 1;
+        let n = if Some(row) == bad_at {
+            "bad".to_string()
+        } else {
+            (row * 7 % 1000).to_string()
+        };
+        let note = if row % 97 == 0 {
+            format!("\"line\r\nbreak {row}, \"\"quoted\"\"\n\"")
+        } else {
+            format!("w{}", row % 50)
+        };
+        s.push_str(&format!(
+            "{row},{n},{note},{}.{:02}\r\n",
+            row % 9999,
+            row % 100
+        ));
+    }
+    (s, row)
+}
+
+#[test]
+fn a_file_of_many_chunks_reads_alike_on_any_number_of_threads() {
+    let (csv, rows) = chunked_csv(13 << 20, None);
+    let one = ingest_bytes(csv.as_bytes(), FormatHint::Csv, &Budget::untrusted()).unwrap();
+    assert_eq!(one.report().rows, rows as u64);
+    assert!(
+        one.report().rejected.is_empty(),
+        "{:?}",
+        one.report().rejected
+    );
+    assert!(one.batches().len() > 1);
+    let types: Vec<_> = one
+        .report()
+        .columns
+        .iter()
+        .map(|c| c.inferred.clone())
+        .collect();
+    assert_eq!(
+        types,
+        [
+            InferredType::Integer,
+            InferredType::Integer,
+            InferredType::Text,
+            InferredType::Decimal {
+                precision: 6,
+                scale: 2
+            },
+        ]
+    );
+    let note = |t: &Table| -> Vec<String> {
+        t.batches()
+            .iter()
+            .flat_map(|b| {
+                let a = b.column(2).as_string::<i32>().clone();
+                (0..a.len()).map(move |i| a.value(i).to_string())
+            })
+            .collect()
+    };
+    assert_eq!(note(&one)[96], "line\r\nbreak 97, \"quoted\"");
+    for threads in [2, 8] {
+        let t = burrmill_ingest::ingest_parallel(
+            csv.as_bytes(),
+            FormatHint::Csv,
+            &Budget::untrusted(),
+            threads,
+        )
+        .unwrap();
+        assert_eq!(t.report(), one.report(), "{threads} threads");
+        assert_eq!(t.batches(), one.batches(), "{threads} threads");
+    }
+}
+
+#[test]
+fn a_cell_that_contradicts_its_column_far_into_the_file_is_reported_at_its_row() {
+    let bad_at = 400_000;
+    let (csv, rows) = chunked_csv(13 << 20, Some(bad_at));
+    // Past the first two of the reader's 4 MiB chunks.
+    assert!(rows > bad_at && csv.find("bad").unwrap() > 8 << 20);
+    for threads in [1, 8] {
+        let t = burrmill_ingest::ingest_parallel(
+            csv.as_bytes(),
+            FormatHint::Csv,
+            &Budget::untrusted(),
+            threads,
+        )
+        .unwrap();
+        let r = t.report();
+        assert_eq!(r.columns[1].inferred, InferredType::Integer);
+        assert_eq!(r.columns[1].nulls, 0);
+        assert_eq!(r.columns[1].matched, r.columns[1].non_empty - 1);
+        assert_eq!(r.rejected.len(), 1);
+        assert_eq!(r.rejected[0].row, bad_at as u64);
+        assert_eq!(r.rejected[0].column.as_deref(), Some("n"));
+        assert_eq!(r.rejected[0].reason, Issue::TypeMismatch);
+    }
 }

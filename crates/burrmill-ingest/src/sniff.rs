@@ -110,6 +110,17 @@ pub fn decode(bytes: &[u8], kind: EncodingKind) -> String {
     text.trim_start_matches('\u{feff}').to_string()
 }
 
+/// [`decode`], borrowing the bytes where they are UTF-8 already.
+pub fn decode_borrowed(bytes: &[u8], kind: EncodingKind) -> std::borrow::Cow<'_, str> {
+    if kind == EncodingKind::Utf8 {
+        let raw = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+        if let Ok(s) = std::str::from_utf8(raw) {
+            return std::borrow::Cow::Borrowed(s.trim_start_matches('\u{feff}'));
+        }
+    }
+    std::borrow::Cow::Owned(decode(bytes, kind))
+}
+
 fn decode_utf16(bytes: &[u8], be: bool) -> String {
     let mut units = Vec::with_capacity(bytes.len() / 2);
     let mut i = 0;

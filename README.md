@@ -51,11 +51,11 @@ Each `.parquet` file in a directory is a table named after it, each subdirectory
 everything beneath, `NAME=PATH` names one outright; `--format csv|json|parquet|arrow`. A file
 named on the command line ending `.csv` is read as CSV, and one ending `.json`, `.ndjson` or `.jsonl`
 as JSON (an array of objects, or one object after another), by the tab's reader, so each column is
-typed as the tab types it. Such a file is held in memory, out of `--memory`, up to 1 GiB each; a
-1 GB CSV needs more than 4.5 GB, and reads at 38 MB/s, far behind DuckDB
-([docs/bench/csv-ingest.md](docs/bench/csv-ingest.md)). A
-short row, a quote never closed, a cell its column's type does not read, or JSON that does not
-parse is refused at its row (from 1, after the header) or line, and column. A receipt names the file
+typed as the tab types it. Such a file is held in memory, out of `--memory`, a JSON file up to
+1 GiB. A CSV is read on `--threads`, a batch every 4 MiB: a 1 GB CSV reads in about 1.5 s on 8
+threads at the default `--memory`, where DuckDB's `read_csv` takes about 1 s
+([docs/bench/csv-ingest.md](docs/bench/csv-ingest.md)). A short row, a quote never closed, a cell
+its column's type does not read, or JSON that does not parse is refused at its row (from 1, after the header) or line, and column. A receipt names the file
 by its bytes, as it does a Parquet file. Directories are still read for Parquet only.
 
 **As a library:** `cargo add burrmill --features datafusion`, then

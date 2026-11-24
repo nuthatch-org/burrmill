@@ -14,8 +14,49 @@ use serde::de::{DeserializeSeed, Deserializer, Error, IgnoredAny, MapAccess, Seq
 use serde_json::value::RawValue;
 
 use crate::budget::Budget;
-use crate::csv::{Parsed, Row};
 use crate::error::{IngestError, Result};
+
+/// One row's fields end to end, and where each ends: four bytes a field rather than a `String`.
+#[derive(Debug, Default)]
+pub struct Row {
+    text: String,
+    ends: Vec<u32>,
+}
+
+impl Row {
+    pub fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    pub fn get(&self, i: usize) -> Option<&str> {
+        let end = *self.ends.get(i)? as usize;
+        let start = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+        Some(&self.text[start..end])
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        (0..self.len()).map(|i| &self[i])
+    }
+
+    pub(crate) fn push(&mut self, field: &str) {
+        self.text.push_str(field);
+        self.ends.push(self.text.len() as u32);
+    }
+}
+
+impl std::ops::Index<usize> for Row {
+    type Output = str;
+
+    fn index(&self, i: usize) -> &str {
+        self.get(i).expect("field index within the row")
+    }
+}
+
+#[derive(Debug)]
+pub struct Parsed {
+    pub rows: Vec<Row>,
+    pub memory_bytes: u64,
+}
 
 pub(crate) struct Records {
     /// The keys as the first row, as a CSV header is, then a row per record. A row ends at the
@@ -81,7 +122,6 @@ pub(crate) fn parse(
     Ok(Records {
         parsed: Parsed {
             rows: sink.rows,
-            unclosed_rows: Vec::new(),
             memory_bytes: sink.memory,
         },
         nested: sink.nested,

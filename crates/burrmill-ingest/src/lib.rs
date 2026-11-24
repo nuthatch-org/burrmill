@@ -99,13 +99,40 @@ impl fmt::Debug for Table {
 }
 
 pub fn ingest_bytes(data: &[u8], hint: FormatHint, budget: &Budget) -> Result<Table> {
-    ingest(&mut SliceSource::new(data), hint, budget)
+    ingest_parallel(data, hint, budget, 1)
+}
+
+/// [`ingest_bytes`] on up to `threads` threads, for CSV; the table, its report and any refusal
+/// are the same at every thread count. More than one thread is not for wasm32.
+pub fn ingest_parallel(
+    data: &[u8],
+    hint: FormatHint,
+    budget: &Budget,
+    threads: usize,
+) -> Result<Table> {
+    budget.charge("max_bytes", budget.max_bytes, data.len() as u64)?;
+    read(std::borrow::Cow::Borrowed(data), hint, budget, threads)
 }
 
 pub fn ingest(source: &mut dyn ByteSource, hint: FormatHint, budget: &Budget) -> Result<Table> {
     if let Some(hint_len) = source.len_hint() {
         budget.charge("max_bytes", budget.max_bytes, hint_len)?;
     }
+    let mut raw = Vec::new();
+    while let Some(chunk) = source.next_chunk()? {
+        let at = raw.len() as u64 + chunk.len() as u64;
+        budget.charge("max_bytes", budget.max_bytes, at)?;
+        raw.extend_from_slice(&chunk);
+    }
+    read(std::borrow::Cow::Owned(raw), hint, budget, 1)
+}
+
+fn read(
+    raw: std::borrow::Cow<'_, [u8]>,
+    hint: FormatHint,
+    budget: &Budget,
+    threads: usize,
+) -> Result<Table> {
     // `Instant` panics on wasm32-unknown-unknown. A caller who set a clock budget
     // gets a budget error rather than a trap.
     #[cfg(target_arch = "wasm32")]
@@ -126,13 +153,6 @@ pub fn ingest(source: &mut dyn ByteSource, hint: FormatHint, budget: &Budget) ->
     #[cfg(target_arch = "wasm32")]
     let check_clock = |_budget: &Budget| -> Result<()> { Ok(()) };
 
-    let mut raw = Vec::new();
-    while let Some(chunk) = source.next_chunk()? {
-        let at = raw.len() as u64 + chunk.len() as u64;
-        budget.charge("max_bytes", budget.max_bytes, at)?;
-        raw.extend_from_slice(&chunk);
-        check_clock(budget)?;
-    }
     budget.charge(
         "max_memory_bytes",
         budget.max_memory_bytes,
@@ -147,7 +167,7 @@ pub fn ingest(source: &mut dyn ByteSource, hint: FormatHint, budget: &Budget) ->
     if parquet {
         #[cfg(feature = "parquet")]
         {
-            let (batches, report) = parquet::read(raw, budget, &check_clock)?;
+            let (batches, report) = parquet::read(raw.into_owned(), budget, &check_clock)?;
             return Ok(Table { batches, report });
         }
         #[cfg(not(feature = "parquet"))]
@@ -161,35 +181,53 @@ pub fn ingest(source: &mut dyn ByteSource, hint: FormatHint, budget: &Budget) ->
 
     let sample_end = (budget.sniff_bytes as usize).min(raw.len());
     let encoding = sniff::sniff_encoding(&raw[..sample_end]);
-    let text = sniff::decode(&raw, encoding);
+    let text = sniff::decode_borrowed(&raw, encoding);
     let bytes_read = raw.len() as u64;
-    drop(raw);
     budget.charge(
         "max_memory_bytes",
         budget.max_memory_bytes,
         text.len() as u64,
     )?;
 
-    let records = keyed_records(&text, hint, budget, &mut || check_clock(budget))?;
-    let (parsed, dialect, nested) = match records {
-        Some((parsed, nested)) => {
-            let dialect = Dialect {
-                delimiter: b',',
-                quote: b'"',
-                encoding,
-                locale: Locale::Point,
-            };
-            (parsed, dialect, Some(nested))
-        }
-        None => {
-            let dialect = sniff::sniff_dialect(&text, encoding);
-            let parsed = csv::parse_csv(&text, &dialect, budget, text.len() as u64, || {
-                check_clock(budget)
-            })?;
-            (parsed, dialect, None)
-        }
+    #[cfg(feature = "json")]
+    if let Some((parsed, nested)) = keyed_records(&text, hint, budget, &mut || check_clock(budget))?
+    {
+        drop(text);
+        return keyed_table(parsed, &nested, encoding, bytes_read, budget, &check_clock);
+    }
+    #[cfg(not(feature = "json"))]
+    if hint == FormatHint::Json {
+        return Err(IngestError::Unsupported { format: "json" });
+    }
+    let dialect = sniff::sniff_dialect(&text, encoding);
+    let (batches, report) = csv::read(
+        &text,
+        dialect,
+        budget,
+        text.len() as u64,
+        bytes_read,
+        threads,
+        &|| check_clock(budget),
+    )?;
+    Ok(Table { batches, report })
+}
+
+/// JSON's records as a table.
+#[cfg(feature = "json")]
+fn keyed_table(
+    parsed: json::Parsed,
+    nested: &[bool],
+    encoding: EncodingKind,
+    bytes_read: u64,
+    budget: &Budget,
+    check_clock: &dyn Fn(&Budget) -> Result<()>,
+) -> Result<Table> {
+    let dialect = Dialect {
+        delimiter: b',',
+        quote: b'"',
+        encoding,
+        locale: Locale::Point,
     };
-    drop(text);
     check_clock(budget)?;
 
     let data_rows_with_possible_header = parsed.rows.len() as u64;
@@ -197,7 +235,7 @@ pub fn ingest(source: &mut dyn ByteSource, hint: FormatHint, budget: &Budget) ->
         return Err(budget.breach("max_rows", budget.max_rows, data_rows_with_possible_header));
     }
 
-    let (batches, mut report) = infer::build(parsed, dialect, bytes_read, nested.as_deref());
+    let (batches, mut report) = infer::build_keyed(parsed, dialect, bytes_read, nested);
     if report.rows > budget.max_rows {
         return Err(budget.breach("max_rows", budget.max_rows, report.rows));
     }
@@ -223,7 +261,7 @@ fn keyed_records(
     hint: FormatHint,
     budget: &Budget,
     clock: &mut dyn FnMut() -> Result<()>,
-) -> Result<Option<(csv::Parsed, Vec<bool>)>> {
+) -> Result<Option<(json::Parsed, Vec<bool>)>> {
     let sniffed = hint == FormatHint::Sniff && json::looks_like(text);
     if hint != FormatHint::Json && !sniffed {
         return Ok(None);
@@ -233,19 +271,6 @@ fn keyed_records(
         Err(IngestError::Invalid { .. } | IngestError::Syntax { .. }) if sniffed => Ok(None),
         Err(e) => Err(e),
     }
-}
-
-#[cfg(not(feature = "json"))]
-fn keyed_records(
-    _text: &str,
-    hint: FormatHint,
-    _budget: &Budget,
-    _clock: &mut dyn FnMut() -> Result<()>,
-) -> Result<Option<(csv::Parsed, Vec<bool>)>> {
-    if hint == FormatHint::Json {
-        return Err(IngestError::Unsupported { format: "json" });
-    }
-    Ok(None)
 }
 
 fn cell_string(col: &Arc<dyn Array>, row: usize) -> Option<String> {

@@ -1,6 +1,8 @@
 //! CSV and JSON files as tables (#389), read by `burrmill-ingest`, the browser tab's reader, so a
-//! column is typed as the tab types it. The table is held in memory as Arrow, and that memory comes
-//! out of the engine's budget. A file that does not read cleanly is refused at its row and column:
+//! column is typed as the tab types it. The file's bytes are read once and hashed beside the parse;
+//! CSV is parsed on the engine's threads into a batch every few MiB (#407). The table is held in
+//! memory as Arrow, and that memory, with the file's bytes while it is read, comes out of the
+//! engine's budget. A file that does not read cleanly is refused at its row and column:
 //! a cell that does not fit its column's type is a refusal here, where the tab shows it as a null
 //! on the report beside the table.
 
@@ -10,15 +12,15 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use burrmill_ingest::{FormatHint, IngestError, Issue, ReadSource, Table};
+use burrmill_ingest::{BudgetBreach, FormatHint, IngestError, Issue, Table};
 use datafusion_catalog::{MemTable, TableProvider};
 use sha2::{Digest, Sha256};
 
 use crate::error::{BurrmillError, Result};
 
-/// The most one file may hold. A text column is one Arrow array with 32-bit offsets, and decoding
-/// Latin-1 or UTF-16 to UTF-8 at most doubles the bytes, so at this size no column can overflow it.
-pub(super) const MAX_FILE_BYTES: u64 = 1 << 30;
+/// The most one JSON file may hold. A JSON text column is still one Arrow array with 32-bit
+/// offsets, and at this size none can overflow it. CSV is built a batch at a time and has no cap.
+pub(super) const MAX_JSON_BYTES: u64 = 1 << 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TextFormat {
@@ -55,48 +57,63 @@ pub(super) struct TextTable {
     pub held: u64,
 }
 
-/// A reader that hashes what passes through it, so the file is read once.
-struct Hashing<R> {
-    inner: R,
-    sha: Sha256,
-    bytes: u64,
-}
-
-impl<R: Read> Read for Hashing<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.sha.update(&buf[..n]);
-        self.bytes += n as u64;
-        Ok(n)
-    }
-}
-
-/// The table `name` over the file at `path`, read in at most `memory` bytes where there is a bound.
+/// The table `name` over the file at `path`, read in at most `memory` bytes where there is a bound,
+/// on up to `threads` threads.
 pub(super) fn read(
     path: &Path,
     name: &str,
     format: TextFormat,
     memory: Option<u64>,
+    threads: usize,
 ) -> Result<TextTable> {
     let shown = path.display();
     let io = |e: std::io::Error| BurrmillError::Substrate(format!("{shown}: {e}"));
     let file = std::fs::File::open(path).map_err(io)?;
     let len = file.metadata().map_err(io)?.len();
     let memory = memory.unwrap_or(u64::MAX);
-    // The untrusted limits on a cell, a key, columns and nesting; the file's own size and the
-    // engine's memory for the rest. Rows are bounded by the memory they take.
+    let max_bytes = match format {
+        TextFormat::Csv => memory,
+        TextFormat::Json => memory.min(MAX_JSON_BYTES),
+    };
+    // The untrusted limits on a cell, a key, columns and nesting; the engine's memory for the rest,
+    // which holds the file's bytes while it is read. Rows are bounded by the memory they take.
     let budget = burrmill_ingest::Budget::untrusted()
-        .max_bytes(memory.min(MAX_FILE_BYTES))
+        .max_bytes(max_bytes)
         .max_rows(u64::MAX / 2)
         .max_memory_bytes(memory);
-    let mut hashing = Hashing {
-        inner: file,
-        sha: Sha256::new(),
-        bytes: 0,
+    let too_big = |at: u64| {
+        refused(
+            path,
+            IngestError::Budget(BudgetBreach {
+                which: "max_bytes",
+                limit: max_bytes,
+                at,
+            }),
+        )
     };
-    let mut source = ReadSource::new(&mut hashing).with_hint(len);
-    let table = burrmill_ingest::ingest(&mut source, format.hint(), &budget)
-        .map_err(|e| refused(path, e))?;
+    if len > max_bytes {
+        return Err(too_big(len));
+    }
+    let mut raw = Vec::with_capacity(len as usize);
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut raw)
+        .map_err(io)?;
+    if raw.len() as u64 > max_bytes {
+        return Err(too_big(raw.len() as u64));
+    }
+    // The hash on a thread of its own beside the parse, which then has one fewer.
+    let threads = threads.max(1);
+    let (sha, table) = std::thread::scope(|s| {
+        let hasher = (threads > 1).then(|| s.spawn(|| Sha256::digest(&raw)));
+        let parsers = if hasher.is_some() { threads - 1 } else { 1 };
+        let table = burrmill_ingest::ingest_parallel(&raw, format.hint(), &budget, parsers);
+        let sha = match hasher {
+            Some(h) => h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)),
+            None => Sha256::digest(&raw),
+        };
+        (sha, table)
+    });
+    let table = table.map_err(|e| refused(path, e))?;
     clean(path, &table)?;
     let batches = table.batches().to_vec();
     let Some(schema) = batches.first().map(|b| b.schema()) else {
@@ -109,8 +126,8 @@ pub(super) fn read(
     let input = format!(
         "{}:{}:{}",
         format.name(),
-        super::receipt::hex(hashing.sha.finalize()),
-        hashing.bytes
+        super::receipt::hex(sha),
+        raw.len()
     );
     Ok(TextTable {
         name: name.to_string(),
