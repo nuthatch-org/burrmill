@@ -6,7 +6,10 @@
 //! burrmill q SQL [NAME=]PATH... [--strict] [--deterministic] [--receipt FILE]
 //!                [--format csv|json|parquet|arrow] [--out FILE] [--threads N] [--memory BYTES]
 //! burrmill verify RECEIPT [NAME=]PATH... [--threads N] [--memory BYTES]
+//! burrmill [[NAME=]PATH...] [--strict] [--deterministic] [--threads N] [--memory BYTES]
 //! ```
+//!
+//! With no command, `burrmill` is a shell over the tables the paths name (`shell.rs`).
 //!
 //! A PATH holding `segments/` is a nest. A directory's `.parquet` files are each a table named by
 //! the file, and its subdirectories each one table of everything beneath; a directory whose
@@ -21,10 +24,14 @@ use std::process::ExitCode;
 use arrow::record_batch::RecordBatch;
 use burrmill::{Budget, Engine, EngineBuilder, Receipt};
 
+mod shell;
+
 const USAGE: &str = "usage:
   burrmill q SQL [NAME=]PATH... [--strict] [--deterministic] [--receipt FILE]
                  [--format csv|json|parquet|arrow] [--out FILE] [--threads N] [--memory BYTES]
   burrmill verify RECEIPT [NAME=]PATH... [--threads N] [--memory BYTES]
+  burrmill [[NAME=]PATH...] [--strict] [--deterministic] [--threads N] [--memory BYTES]
+                 a shell over the tables; .help in it lists its commands
 
 A PATH is a Parquet file or directory, a nest, or a .csv, .json, .ndjson or .jsonl file.
 CSV and JSON are read into memory, out of --memory.";
@@ -196,14 +203,17 @@ fn stem(p: &Path) -> Result<String, String> {
     Ok(stem.unwrap_or(name).to_string())
 }
 
-fn engine(a: &Args) -> Result<Engine, String> {
+fn budget(a: &Args) -> Budget {
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let budget = Budget {
+    Budget {
         memory_bytes: a.memory.unwrap_or(4 << 30),
         threads: a.threads.unwrap_or(cores.min(8)),
         spill: None,
-    };
-    let e = tables(Engine::builder().budget(budget), &a.paths)?
+    }
+}
+
+fn engine(a: &Args) -> Result<Engine, String> {
+    let e = tables(Engine::builder().budget(budget(a)), &a.paths)?
         .open()
         .map_err(|e| e.to_string())?;
     e.set_strict_decimals(a.strict);
@@ -290,8 +300,103 @@ fn run(a: &Args) -> Result<(), String> {
     }
 }
 
+/// The first argument that is not an option or an option's value: the command, if one is named.
+fn command(argv: &[String]) -> Option<&str> {
+    let mut it = argv.iter();
+    while let Some(x) = it.next() {
+        match x.as_str() {
+            "--receipt" | "--out" | "-o" | "--format" | "--threads" | "--memory" => {
+                it.next();
+            }
+            f if f.starts_with('-') => {}
+            c => return Some(c),
+        }
+    }
+    None
+}
+
+/// `burrmill [PATH...]`: the shell's options are the engine's, and every other argument is a path.
+fn parse_shell(argv: &[String]) -> Result<Args, String> {
+    let mut a = Args {
+        command: "shell".into(),
+        ..Args::default()
+    };
+    let mut it = argv.iter();
+    let value = |it: &mut std::slice::Iter<String>, flag: &str| {
+        it.next()
+            .cloned()
+            .ok_or_else(|| format!("{flag} takes a value"))
+    };
+    while let Some(x) = it.next() {
+        match x.as_str() {
+            "--strict" => a.strict = true,
+            "--deterministic" => a.deterministic = true,
+            "--threads" => a.threads = Some(value(&mut it, x)?.parse().map_err(|_| "--threads N")?),
+            "--memory" => {
+                a.memory = Some(value(&mut it, x)?.parse().map_err(|_| "--memory BYTES")?)
+            }
+            f if f.starts_with('-') => return Err(format!("no option {f} without a command")),
+            _ => a.paths.push(x.clone()),
+        }
+    }
+    Ok(a)
+}
+
+/// The shell: a prompt on a terminal, otherwise stdin's statements with no prompt.
+fn run_shell(a: &Args) -> ExitCode {
+    use std::io::IsTerminal;
+    let e = match engine(a) {
+        Ok(e) => e,
+        Err(m) => {
+            eprintln!("burrmill: {m}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let interactive = std::io::stdin().is_terminal();
+    let mut shell = shell::Shell::new(
+        &e,
+        Box::new(std::io::BufWriter::new(std::io::stdout())),
+        Box::new(std::io::stderr()),
+    );
+    let interrupt = shell.interrupt();
+    // Ctrl-C cancels the statement running. With none, a script stops; at a prompt the line editor
+    // has the key, and between statements it does nothing.
+    if let Err(m) = ctrlc::set_handler(move || {
+        if !interrupt.cancel() && !interactive {
+            std::process::exit(130);
+        }
+    }) {
+        eprintln!("burrmill: Ctrl-C will not cancel a statement: {m}");
+    }
+    let r = if interactive {
+        shell::interactive(&mut shell, &budget(a))
+    } else {
+        shell.script(std::io::stdin().lock()).map(drop)
+    };
+    match r {
+        // A reader that has gone, as `| head` does, is not a failure.
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(m) => {
+            eprintln!("burrmill: {m}");
+            ExitCode::FAILURE
+        }
+        Ok(()) if shell.failed && !interactive => ExitCode::FAILURE,
+        Ok(()) => ExitCode::SUCCESS,
+    }
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    let help = argv.iter().any(|x| x == "-h" || x == "--help");
+    if !help && !matches!(command(&argv), Some("q" | "verify")) {
+        return match parse_shell(&argv) {
+            Ok(a) => run_shell(&a),
+            Err(m) => {
+                eprintln!("burrmill: {m}\n{USAGE}");
+                ExitCode::from(2)
+            }
+        };
+    }
     let a = match parse(&argv) {
         Ok(a) => a,
         Err(m) => {

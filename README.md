@@ -58,6 +58,16 @@ threads at the default `--memory`, where DuckDB's `read_csv` takes about 1 s
 its column's type does not read, or JSON that does not parse is refused at its row (from 1, after the header) or line, and column. A receipt names the file
 by its bytes, as it does a Parquet file. Directories are still read for Parquet only.
 
+**As a shell:** `burrmill` with no command, or `burrmill data/ events.ndjson`, opens a prompt over
+the tables those paths name, with history (`~/.burrmill_history`, or `$BURRMILL_HISTORY`). A
+statement runs once a line ends it with `;`, so it may span lines. `.tables` and `.schema [TABLE]`
+read `information_schema`; `.mode table|csv|json`, `.timer on|off`, `.read FILE`, `.help` and
+`.quit` do what they say. The banner and the `sandbox>` prompt name the session's trust and budget:
+every session is a sandbox, SELECT only over the tables opened, under `--memory` and `--threads`.
+Ctrl-C cancels the statement running and returns to the prompt; at the prompt it clears the line,
+and Ctrl-D leaves. With stdin not a terminal, `burrmill data/ < script.sql` runs the script with no
+prompt, prints each answer, carries on past an error and exits 1 if there was one.
+
 **As a library:** `cargo add burrmill --features datafusion`, then
 
 ```rust
