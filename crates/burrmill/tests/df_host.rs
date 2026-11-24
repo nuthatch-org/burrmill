@@ -418,33 +418,43 @@ fn a_join_under_an_aggregate_stops_at_its_deadline() {
     ] {
         let plan = format!("{:?}", rows(&engine, &format!("EXPLAIN {sql}")));
         assert!(plan.contains(shape), "{shape} not in {plan}");
-        let deadline = Instant::now() + Duration::from_millis(300);
-        let stop = burrmill::Stop {
-            deadline: Some(deadline),
-            ..Default::default()
-        };
-        let mut metrics = burrmill::QueryMetrics::default();
-        let r = engine.sql_for_each_stoppable(sql, &[], &stop, Some(&mut metrics), |_| Ok(()));
-        let returned = deadline.elapsed();
-        while engine.tasks_alive() > 0 && deadline.elapsed() < Duration::from_secs(60) {
-            std::thread::sleep(Duration::from_millis(1));
+        // A shared runner can stall one attempt; a missing check is late on every one, so the
+        // statement passes if any of three attempts stops in time.
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let deadline = Instant::now() + Duration::from_millis(300);
+            let stop = burrmill::Stop {
+                deadline: Some(deadline),
+                ..Default::default()
+            };
+            let mut metrics = burrmill::QueryMetrics::default();
+            let r = engine.sql_for_each_stoppable(sql, &[], &stop, Some(&mut metrics), |_| Ok(()));
+            let returned = deadline.elapsed();
+            while engine.tasks_alive() > 0 && deadline.elapsed() < Duration::from_secs(60) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let stopped = deadline.elapsed();
+            eprintln!("{shape}: returned {returned:?}, stopped {stopped:?} after the deadline");
+            assert!(
+                matches!(r, Err(BurrmillError::Timeout)),
+                "{shape}: {:?}",
+                r.map(|_| ())
+            );
+            // Stopped while running, not while still being planned.
+            assert!(metrics.sealed_bytes_read > 0, "{shape}: {metrics:?}");
+            seen.push((returned, stopped));
+            if returned < late && stopped < late {
+                break;
+            }
         }
-        let stopped = deadline.elapsed();
-        eprintln!("{shape}: returned {returned:?}, stopped {stopped:?} after the deadline");
-        assert!(
-            matches!(r, Err(BurrmillError::Timeout)),
-            "{shape}: {:?}",
-            r.map(|_| ())
-        );
-        // Stopped while running, not while still being planned.
-        assert!(metrics.sealed_bytes_read > 0, "{shape}: {metrics:?}");
+        let (returned, stopped) = *seen.last().unwrap();
         assert!(
             returned < late,
-            "{shape} returned {returned:?} after its deadline"
+            "{shape} returned {returned:?} after its deadline on every attempt: {seen:?}"
         );
         assert!(
             stopped < late,
-            "{shape}'s tasks ran on {stopped:?} past its deadline"
+            "{shape}'s tasks ran on {stopped:?} past its deadline on every attempt: {seen:?}"
         );
     }
 }
@@ -475,19 +485,33 @@ fn a_statement_over_rows_in_memory_stops_at_its_deadline() {
         "SELECT count(*) AS n FROM h WHERE regexp_like(repeat(who, 20), '(\\w+\\s?)*$')",
         "SELECT count(*) AS n FROM (VALUES (1), (2)) v(x), h WHERE regexp_like(repeat(who, 20), 'z')",
     ] {
-        let deadline = Instant::now() + Duration::from_millis(300);
-        let stop = burrmill::Stop {
-            deadline: Some(deadline),
-            ..Default::default()
-        };
-        let r = engine.sql_for_each_stoppable(sql, &[], &stop, None, |_| Ok(()));
-        let late = deadline.elapsed();
+        // Unstopped, these run 1.8 s to 38 s (debug), so 500 ms late is a stop, not a finish. A
+        // shared runner can still stall one attempt for hundreds of ms (565 ms seen), so a statement
+        // passes if any of three attempts stops in time: a check that is missing or too sparse is
+        // late on every attempt, a stall is not.
+        let mut lates = Vec::new();
+        for _ in 0..3 {
+            let deadline = Instant::now() + Duration::from_millis(300);
+            let stop = burrmill::Stop {
+                deadline: Some(deadline),
+                ..Default::default()
+            };
+            let r = engine.sql_for_each_stoppable(sql, &[], &stop, None, |_| Ok(()));
+            let late = deadline.elapsed();
+            assert!(
+                matches!(r, Err(BurrmillError::Timeout)),
+                "{sql}: {:?}",
+                r.map(|_| ())
+            );
+            lates.push(late);
+            if late < Duration::from_millis(500) {
+                break;
+            }
+        }
         assert!(
-            matches!(r, Err(BurrmillError::Timeout)),
-            "{sql}: {:?}",
-            r.map(|_| ())
+            lates.last().unwrap() < &Duration::from_millis(500),
+            "{sql}: late on every attempt: {lates:?}"
         );
-        assert!(late < Duration::from_millis(500), "{sql}: {late:?} late");
     }
     assert_eq!(
         rows(&engine, "SELECT count(*) AS n FROM h"),
