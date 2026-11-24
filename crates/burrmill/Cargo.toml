@@ -368,6 +368,14 @@ required-features = ["datafusion"]
 name = "parquet_dir"
 required-features = ["datafusion"]
 
+# DuckDB's sqllogictest suite against the engine (#386), run by docs/bench/sqllogictest.sh. `test`
+# runs its own unit tests (value text, comparison, MD5) under `cargo test`.
+[[example]]
+name = "sqllogictest"
+path = "examples/sqllogictest/main.rs"
+required-features = ["datafusion"]
+test = true
+
 [[test]]
 name = "df_store"
 path = "tests/df_store.rs"
