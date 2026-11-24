@@ -4,6 +4,47 @@ Newest first. One entry per RFC-0044 slice.
 
 ---
 
+## TPC-H Q17 at SF10 is within 1.5x datafusion-cli; #381's Done-when re-measured — 2026-11-24
+
+No code changed. The cause was found and fixed by #399, in the entry for 2026-11-22 below: a
+constant group key from decorrelation made Q17's aggregates ordered, and DataFusion's ordered
+emit is quadratic in the groups. This entry re-measures the ratio that entry left "not reliably
+under 1.5x" on 3283a14. That build includes #415's spilling and #416, which came after #399.
+
+**Numbers.** These are from the ThinkPad, shared with other work, at 8 threads and best of 3 warm,
+over tpchgen-cli 4.0.0 Parquet in 16 parts:
+
+    DIR=sf10 THREADS=8 RUNS=3 QUERIES=17 DFCLI=$(which datafusion-cli) target/release/burrmill-bench tpch
+
+| run | 1-minute load, start / end | Burrmill ms | datafusion-cli ms | ratio | DuckDB ms |
+|---|---|---:|---:|---:|---:|
+| 1 | 6.5 / 7.1 | 1,432 | 1,229 | 1.17x | 674 |
+| 2 | 7.1 / 7.8 | 1,585 | 1,217 | 1.30x | 676 |
+| 3 | 7.8 / 7.9 | 1,576 | 1,320 | 1.19x | 669 |
+| 4 | 7.9 / 9.5 | 1,501 | 1,528 | 0.98x | 639 |
+| 5, in the spot-check | 6.8 / 11.2 | 1,543 | 1,246 | 1.24x | 715 |
+
+SF1 took 161 ms against datafusion-cli's 137 ms and DuckDB's 70 ms, at load 10.9. Every answer was
+the same as DuckDB's.
+
+**Every suspect, checked by `ANALYZE=1` at SF1 and SF10** (figures in `docs/bench/tpch.md`):
+- The decorrelation was the cause, as above.
+- Neither aggregate is ordered now, and no operator spilled. The pool peaked at 139 MiB.
+- The final aggregate's cost per row grows from 33 ns to 80 ns as its groups go from 200K to 2M.
+  datafusion-cli's own `avg` grows the same way (5.66 against Burrmill's 4.81 CPU seconds at SF10).
+- `checked_avg` costs 423 ms CPU against 96 ms in the partial aggregate.
+- The semi join builds on the 2M averaged parts, not on the 61K joined rows.
+
+The last two are what is left of the gap and are not separately measured.
+
+**Test.** `tests/df_literalkeys.rs` (#399) asserts the plan: no literal key and no `ordering_mode`
+on any aggregate of a Q17-shaped query. Its rule was disabled on 3283a14 by an early return in
+`LiteralGroupKeys::rewrite`. With that, `q17_shape_groups_by_the_key_alone` and
+`a_written_literal_key_is_answered_above_the_aggregate` fail at their plan assertions, and the third
+case passes. No test was added.
+
+---
+
 ## Analyzer and optimizer walks that cannot change a small plan are skipped (#348) — 2026-11-22
 
 `DuckSemantics` and `DuckDoubles` now look at a node's expressions first (`semantics_may_rewrite`;

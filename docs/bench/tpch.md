@@ -26,6 +26,38 @@ the 2,048-row batches a budgeted session runs at.
   Since measured: both were a constant group key from decorrelation that made the aggregate
   ordered, and are fixed (#381; the progress log has the cause and figures). The tables below are
   from before.
+
+  **The cause, named (#381).** Decorrelating the subquery grouped lineitem by `l_partkey` and a
+  constant `true AS __always_true`, which DataFusion counts as sorted, so both aggregates ran in
+  its ordered mode. That mode emits its last groups 2,048 at a time and renumbers every group still
+  held at each emit: quadratic in the 2M parts, 179 of the partial aggregate's 190 CPU seconds at
+  SF10. `LiteralGroupKeys` (`df/literalkeys.rs`, #399) takes the constant out of the key. It was
+  not `checked_avg`, a hash table's growth or the pool. Re-measured on 3283a14 on 2026-11-24, at
+  8 threads and best of 3:
+
+  - **Q17 at SF10 is within 1.5x datafusion-cli.** Five rounds ran with all three engines: Burrmill
+    took 1,432 to 1,585 ms against datafusion-cli's 1,217 to 1,528 ms, 0.98x to 1.30x. The 1-minute
+    load was 6.5 to 11.2. SF1 took 161 ms against 137 ms, so ten times the rows now cost 8.9 to 9.8
+    times the time. Every answer was the same as DuckDB's.
+  - **Its `EXPLAIN ANALYZE` at SF10 has no ordered operator,** and no operator spilled. The
+    statement pool peaked at 139 MiB of 1,792. Both aggregates group by `l_partkey` alone. The
+    partial one skips aggregation for 59.18M of its 59.97M rows, as datafusion-cli's does
+    (59.13M).
+  - **Most of the time is the final aggregate's 2M groups:** 4.81 CPU seconds over 60M rows at SF10
+    against 51 ms over 1.55M at SF1. That is 80 ns a row against 33 as the groups outgrow the
+    caches. datafusion-cli's plain `avg` takes 5.66 s at the same step, so that growth is
+    DataFusion's and not the exact average's.
+  - **What `checked_avg` still costs** is in the partial aggregate's skipped rows: 423 ms CPU
+    against datafusion-cli's 96 ms; the difference is about 40 ms of wall time at 8 threads.
+  - **The semi join builds differently.** It builds on the 2M averaged parts (113.8 MB), where
+    datafusion-cli builds on the 61K joined rows (4.9 MB). The session does not collect statistics
+    to swap it. This is not measured apart from the rest.
+
+  The SF10 spot-check of [Spilling](#spilling-q21-under-2-gib-383), run again on 3283a14 with a
+  spill directory, still gives DuckDB's answer for all ten queries. The load was 6.8 at the start
+  and 11.2 at the end; DuckDB / Burrmill / datafusion-cli in ms: Q1 720 / 1,162 / 759, Q3 664 / 754 / 480,
+  Q5 746 / 981 / 699, Q9 1,533 / 1,719 / 1,163, Q10 722 / 757 / 579, Q12 411 / 718 / 363, Q13
+  954 / 806 / 415, Q17 715 / 1,543 / 1,246, Q18 983 / 1,318 / 1,594, Q21 1,847 / 2,427 / 1,497.
 - **Q21 is refused at SF10:** it needs more than the 1,792 MB of the 2 GiB budget a statement may
   use, which DuckDB and datafusion-cli answer without one. The refusal is the budget working; that
   Q21 needs it is the loss.
