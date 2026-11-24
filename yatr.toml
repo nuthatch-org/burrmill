@@ -29,7 +29,7 @@ sources = ["fuzz/Cargo.toml", "fuzz/Cargo.lock", "crates/*/Cargo.toml", "vendor/
 desc = "Clippy on burrmill, default graph and with datafusion"
 run = [
     "cargo clippy --locked -p burrmill --all-targets -- -D warnings",
-    "cargo clippy --locked -p burrmill --all-targets --features datafusion -- -D warnings",
+    "cargo clippy --locked -p burrmill --all-targets --features datafusion,sqllogictest -- -D warnings",
 ]
 sources = ["crates/burrmill/**", "crates/burrmill-ingest/**", "vendor/**", "corpus/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 
@@ -179,7 +179,10 @@ sources = ["crates/burrmill/**", "crates/burrmill-cli/**", "vendor/**", "corpus/
 # #386: DuckDB's test/sql at the tag in the script, fetched as data, and held to the baseline.
 [tasks.sqllogictest]
 desc = "DuckDB's sqllogictest suite at a pinned tag; fail if wrong answers rise or passes fall"
-run = ["docs/bench/sqllogictest.sh"]
+run = [
+    "cargo test --locked --release -p burrmill --features sqllogictest --example sqllogictest",
+    "docs/bench/sqllogictest.sh",
+]
 sources = ["crates/burrmill/**", "vendor/**", "docs/bench/sqllogictest.sh", "docs/bench/sqllogictest-baseline.tsv", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 
 [tasks.agents-check]

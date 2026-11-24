@@ -40,7 +40,7 @@ if [ "$at" != "$TAG" ]; then
   exit 2
 fi
 
-cargo build --locked --release -p burrmill --features datafusion --example sqllogictest
+cargo build --locked --release -p burrmill --features sqllogictest --example sqllogictest
 bin=target/release/examples/sqllogictest
 out=target/sqllogictest
 rm -rf "$out"

@@ -57,6 +57,9 @@ datafusion = [
     "dep:sha2",
     "dep:burrmill-ingest",
 ]
+# Only the sqllogictest example (#386), which adds nothing to the library: kept out of the
+# datafusion graph so `cargo test --features datafusion` does not build it.
+sqllogictest = ["datafusion"]
 
 [dependencies]
 arrow.workspace = true
@@ -369,11 +372,11 @@ name = "parquet_dir"
 required-features = ["datafusion"]
 
 # DuckDB's sqllogictest suite against the engine (#386), run by docs/bench/sqllogictest.sh. `test`
-# runs its own unit tests (value text, comparison, MD5) under `cargo test`.
+# runs its own unit tests (value text, comparison, MD5) under `cargo test --features sqllogictest`.
 [[example]]
 name = "sqllogictest"
 path = "examples/sqllogictest/main.rs"
-required-features = ["datafusion"]
+required-features = ["sqllogictest"]
 test = true
 
 [[test]]

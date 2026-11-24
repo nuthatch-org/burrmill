@@ -54,7 +54,9 @@ Build and CI
   or a skip, judged as DuckDB's runner judges it. `docs/bench/sqllogictest.md` publishes the counts
   per directory: 12088 pass, 6828 refused, 718 wrong, 3594 error and 56491 skipped of 79719
   records. The job fails if any directory's wrong answers rise or its passes fall against
-  `docs/bench/sqllogictest-baseline.tsv`, and says how to lock in an improvement (#386).
+  `docs/bench/sqllogictest-baseline.tsv`, and says how to lock in an improvement (#386). The
+  harness is an example behind a feature of its own, `sqllogictest`, which adds nothing to the
+  library and keeps it out of `cargo test --features datafusion`.
 
 ## 0.3.0 - 2026-11-24
 
