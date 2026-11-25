@@ -965,6 +965,66 @@ fn exact_division_by_zero_raises_as_duckdb_does() {
         ),
         vec![serde_json::json!({"a": null, "b": null, "c": 3, "d": 1})]
     );
+    // Where DuckDB may never reach the division, it is not raised (`test_try_in_clause.test`):
+    // DataFusion would evaluate it for every row.
+    assert_eq!(
+        one_row(
+            &engine,
+            "SELECT i, CASE WHEN i = 0 THEN false ELSE (100 // i) IN (1, 3, 7) END AS a, \
+             CASE WHEN i <> 0 AND (100 % i) IN (1, 2) THEN 1 ELSE 0 END AS b, \
+             TRY(100 // i) AS c FROM numbers WHERE i IS NOT NULL ORDER BY i"
+        ),
+        vec![
+            serde_json::json!({"i": 0, "a": false, "b": 0, "c": null}),
+            serde_json::json!({"i": 2, "a": false, "b": 0, "c": 50}),
+            serde_json::json!({"i": 7, "a": false, "b": 1, "c": 14}),
+        ]
+    );
+    assert!(
+        one_row(
+            &engine,
+            "SELECT nth_value(i, 1 // 0) OVER () AS n FROM numbers WHERE i > 10"
+        )
+        .is_empty()
+    );
+}
+
+/// #430: a bare DECIMAL is DECIMAL(18,3), as DuckDB has it, within a list or a struct too
+/// (`struct_of_lists_where.test:33`).
+#[test]
+fn a_bare_decimal_is_eighteen_three() {
+    let engine = Engine::open_empty().unwrap();
+    assert_eq!(
+        one_row(
+            &engine,
+            "SELECT typeof(CAST(1 AS DECIMAL)) AS a, typeof(CAST(1 AS NUMERIC)) AS b, \
+             typeof(CAST([1.5] AS DECIMAL[])) AS c, CAST('1.23456' AS DECIMAL) AS d, \
+             typeof(CAST(NULL AS STRUCT(v DECIMAL[]))) AS e, typeof(CAST(1 AS DECIMAL(10))) AS f"
+        ),
+        vec![serde_json::json!({
+            "a": "DECIMAL(18,3)", "b": "DECIMAL(18,3)", "c": "DECIMAL(18,3)[]", "d": "1.235",
+            "e": "STRUCT(v DECIMAL(18,3)[])", "f": "DECIMAL(10,0)"
+        })]
+    );
+}
+
+/// #430: `typeof` names a type as DuckDB does where the engine's type is DuckDB's
+/// (`type_literal.test:45`).
+#[test]
+fn typeof_names_types_as_duckdb_does() {
+    let engine = Engine::open_empty().unwrap();
+    assert_eq!(
+        one_row(
+            &engine,
+            "SELECT typeof(TIMESTAMP(3) '2024-01-01 00:00:00') AS a, \
+             typeof(CAST('2024-01-01' AS TIMESTAMP)) AS b, typeof(INTERVAL '1 day') AS c, \
+             typeof({'a': 1::INTEGER, 'B c': 'x'}) AS d, typeof(MAP {'k': 1::INTEGER}) AS e"
+        ),
+        vec![serde_json::json!({
+            "a": "TIMESTAMP_MS", "b": "TIMESTAMP", "c": "INTERVAL",
+            "d": "STRUCT(a INTEGER, \"B c\" VARCHAR)", "e": "MAP(VARCHAR, INTEGER)"
+        })]
+    );
 }
 
 /// #430: `list_distinct` drops NULL (`list_distinct.test:62`), `[1, 2] || NULL` and a list `||`

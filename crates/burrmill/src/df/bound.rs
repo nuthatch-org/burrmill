@@ -756,6 +756,15 @@ pub fn wrap(f: Arc<ScalarUDF>, limits: &Arc<Limits>) -> Arc<ScalarUDF> {
     }))
 }
 
+/// The function [`wrap`] wrapped, or `f` itself.
+pub(super) fn unwrapped(f: &ScalarUDF) -> &ScalarUDF {
+    let any: &dyn std::any::Any = f.inner().as_ref();
+    match any.downcast_ref::<Bounded>() {
+        Some(b) => &b.inner,
+        None => f,
+    }
+}
+
 impl Bounded {
     fn imp(&self) -> &dyn ScalarUDFImpl {
         self.inner.inner().as_ref()
