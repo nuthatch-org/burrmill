@@ -78,6 +78,7 @@ mod literalkeys;
 #[cfg(unix)]
 mod localfs;
 mod names;
+mod nestedorder;
 mod ordered_agg;
 mod printf;
 mod rangebounds;

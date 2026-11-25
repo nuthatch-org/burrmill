@@ -2582,6 +2582,8 @@ impl AnalyzerRule for DuckSemantics {
                             let t = t.transform_data(|e| case_nullability(e, &schema))?;
                             let t = t.transform_data(try_as_duckdb)?;
                             let t =
+                                t.transform_data(|e| super::nestedorder::nested_order(e, &schema))?;
+                            let t =
                                 t.transform_data(|e| hugeint_rounding(e, &schema, &self.round))?;
                             t.transform_data(hugeint_null_test)
                         })
@@ -2604,10 +2606,19 @@ impl AnalyzerRule for DuckSemantics {
 fn semantics_may_rewrite(e: &Expr) -> bool {
     match e {
         // `divide_as_double`, `modulo_by_zero` and `dates_as_duckdb`.
+        // ... and `nested_order`, with `BETWEEN`.
         Expr::BinaryExpr(b) => matches!(
             b.op,
-            Operator::Divide | Operator::Modulo | Operator::Plus | Operator::Minus
+            Operator::Divide
+                | Operator::Modulo
+                | Operator::Plus
+                | Operator::Minus
+                | Operator::Lt
+                | Operator::LtEq
+                | Operator::Gt
+                | Operator::GtEq
         ),
+        Expr::Between(_) => true,
         // `timestamp_as_duckdb`, `dates_as_duckdb`, `try_as_duckdb` and `hugeint_rounding`.
         // ... and `guard_zero`.
         Expr::ScalarFunction(f) => matches!(
