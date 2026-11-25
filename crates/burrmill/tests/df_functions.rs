@@ -966,3 +966,69 @@ fn exact_division_by_zero_raises_as_duckdb_does() {
         vec![serde_json::json!({"a": null, "b": null, "c": 3, "d": 1})]
     );
 }
+
+/// #430: `list_distinct` drops NULL (`list_distinct.test:62`), `[1, 2] || NULL` and a list `||`
+/// a NULL list are NULL (`list_concat.test:256`), and `array_to_string` with a NULL separator joins
+/// with `,` (`array_to_string.test:20`), as DuckDB 2.0.1 answers.
+#[test]
+fn list_functions_meet_null_as_duckdb_does() {
+    let engine = Engine::open_empty().unwrap();
+    assert_eq!(
+        one_row(
+            &engine,
+            "SELECT to_json(list_sort(list_distinct([1, 1, NULL, 2, 2, 2, 3, NULL, NULL]))) AS a, \
+             len(list_distinct([NULL, NULL])) AS b, list_distinct(NULL::INT[]) IS NULL AS c, \
+             ([1, 2] || NULL) IS NULL AS d, ([1, 2] || NULL::INT[]) IS NULL AS e, \
+             (NULL::INT[] || [1, 2]) IS NULL AS f, to_json([1, 2] || [3]) AS g, \
+             array_to_string([1, 2, 3], NULL) AS h, array_to_string([1, 2, 3], '-') AS i, \
+             array_to_string(NULL::INT[], '-') IS NULL AS j"
+        ),
+        vec![serde_json::json!({
+            "a": "[1,2,3]", "b": 0, "c": true, "d": true, "e": true, "f": true, "g": "[1,2,3]",
+            "h": "1,2,3", "i": "1-2-3", "j": true
+        })]
+    );
+    assert_eq!(
+        one_row(
+            &engine,
+            "SELECT to_json(list_sort(list_distinct(l))) AS a, to_json(l || m) AS b, \
+             array_to_string(l, s) AS c FROM (VALUES ([2, NULL, 2, 1], NULL::INT[], NULL), \
+             ([NULL], [4], '+')) t(l, m, s) ORDER BY c DESC"
+        ),
+        vec![
+            serde_json::json!({"a": "[1,2]", "b": null, "c": "2,2,1"}),
+            serde_json::json!({"a": "[]", "b": "[null,4]", "c": ""}),
+        ]
+    );
+}
+
+/// #430: `corr` over pairs with no spread is NaN in DuckDB, a single pair included
+/// (`test_corr.test:15`), and NULL only over no pair at all.
+#[test]
+fn corr_without_spread_is_nan_as_duckdb_has_it() {
+    let engine = Engine::open_empty().unwrap();
+    let row = one_row(
+        &engine,
+        "SELECT isnan(corr(1, 1)) AS a, corr(NULL, NULL) IS NULL AS b, \
+         isnan((SELECT corr(a, b) FROM (VALUES (1e301, 0), (-1e301, 0)) t(a, b))) AS c",
+    );
+    assert_eq!(
+        row,
+        vec![serde_json::json!({"a": true, "b": true, "c": true})]
+    );
+    let rows = one_row(
+        &engine,
+        "SELECT k, CASE WHEN isnan(corr(v, w)) THEN 'nan' ELSE CAST(round(corr(v, w), 8) AS VARCHAR) \
+         END AS r, isnan(corr(v, v * 0)) AS z FROM \
+         (VALUES (1, 10, NULL), (2, 10, 11), (2, 20, 22), (2, 25, NULL), (2, 30, 35), (3, 5, 5)) \
+         t(k, v, w) GROUP BY k ORDER BY k",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            serde_json::json!({"k": 1, "r": null, "z": true}),
+            serde_json::json!({"k": 2, "r": "0.9988446", "z": true}),
+            serde_json::json!({"k": 3, "r": "nan", "z": true}),
+        ]
+    );
+}

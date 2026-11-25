@@ -496,6 +496,12 @@ impl MiniSession {
                 "array_append" => super::lists::ElementAndList::udf(f, false),
                 "array_sum" => super::lists::ListSum::udf(f),
                 "array_min" | "array_max" => super::lists::ListExtreme::udf(f),
+                "array_distinct" => {
+                    super::lists::Amended::udf(f, super::lists::Amend::DistinctWithoutNull)
+                }
+                "array_to_string" => {
+                    super::lists::Amended::udf(f, super::lists::Amend::NullSeparatorIsComma)
+                }
                 _ => f,
             };
             // DataFusion names `array_max` `list_max` too, and `array_min` only so.
@@ -528,6 +534,7 @@ impl MiniSession {
         for f in datafusion_functions_aggregate::all_default_aggregate_functions() {
             let f = match f.name() {
                 "sum" | "avg" => super::floatsum::ExactDoubles::udaf(f),
+                "corr" => super::corr::Corr::udaf(f),
                 _ => f,
             };
             for a in f.aliases() {

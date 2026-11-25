@@ -400,3 +400,132 @@ impl ScalarUDFImpl for ListSum {
         )))
     }
 }
+
+/// What [`Amended`] changes about the function it wraps.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+pub enum Amend {
+    /// `list_distinct` drops NULL, as DuckDB's does; DataFusion's keeps one.
+    DistinctWithoutNull,
+    /// `array_to_string(list, NULL)` joins with `,`, as DuckDB's `string_agg` does; DataFusion's
+    /// is NULL.
+    NullSeparatorIsComma,
+}
+
+/// A DataFusion list function with one of DuckDB's differences [`Amend`]ed, under its own names
+/// and signature.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct Amended {
+    inner: Arc<ScalarUDF>,
+    amend: Amend,
+}
+
+impl Amended {
+    pub fn udf(inner: Arc<ScalarUDF>, amend: Amend) -> Arc<ScalarUDF> {
+        Arc::new(ScalarUDF::from(Self { inner, amend }))
+    }
+}
+
+impl ScalarUDFImpl for Amended {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn aliases(&self) -> &[String] {
+        self.inner.aliases()
+    }
+    fn signature(&self) -> &Signature {
+        self.inner.signature()
+    }
+    fn coerce_types(&self, args: &[DataType]) -> Result<Vec<DataType>> {
+        self.inner.coerce_types(args)
+    }
+    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
+        self.inner.return_type(args)
+    }
+    fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
+        self.inner.return_field_from_args(args)
+    }
+    fn invoke_with_args(&self, mut args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        match self.amend {
+            Amend::DistinctWithoutNull => match self.inner.invoke_with_args(args)? {
+                ColumnarValue::Array(a) => Ok(ColumnarValue::Array(without_nulls(&a)?)),
+                ColumnarValue::Scalar(s) => Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(
+                    &without_nulls(&s.to_array()?)?,
+                    0,
+                )?)),
+            },
+            Amend::NullSeparatorIsComma => {
+                if let Some(sep) = args.args.get_mut(1) {
+                    *sep = comma_for_null(sep)?;
+                }
+                self.inner.invoke_with_args(args)
+            }
+        }
+    }
+}
+
+/// `sep` with each NULL a `,`, in the type it has (`Utf8` for an untyped NULL).
+fn comma_for_null(sep: &ColumnarValue) -> Result<ColumnarValue> {
+    Ok(match sep {
+        ColumnarValue::Scalar(s) if s.is_null() => {
+            let t = match s.data_type() {
+                DataType::Null => DataType::Utf8,
+                t => t,
+            };
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some(",".into())).cast_to(&t)?)
+        }
+        ColumnarValue::Array(a) if a.null_count() > 0 => {
+            let t = match a.data_type() {
+                DataType::Null => DataType::Utf8,
+                t => t.clone(),
+            };
+            let text = cast(a, &DataType::Utf8)?;
+            let filled: arrow::array::StringArray = text
+                .as_string::<i32>()
+                .iter()
+                .map(|v| Some(v.unwrap_or(",")))
+                .collect();
+            ColumnarValue::Array(cast(&filled, &t)?)
+        }
+        other => other.clone(),
+    })
+}
+
+/// Each list of `a` with its NULL elements dropped; anything not a list as it was.
+fn without_nulls(a: &ArrayRef) -> Result<ArrayRef> {
+    fn drop_nulls<O: arrow::array::OffsetSizeTrait>(
+        l: &arrow::array::GenericListArray<O>,
+    ) -> Result<ArrayRef> {
+        let offsets = l.value_offsets();
+        let start = offsets[0].as_usize();
+        let values = l
+            .values()
+            .slice(start, offsets[offsets.len() - 1].as_usize() - start);
+        let valid = values.logical_nulls();
+        let keep = |j: usize| valid.as_ref().is_none_or(|n| n.is_valid(j));
+        let mask: arrow::array::BooleanArray = (0..values.len()).map(|j| Some(keep(j))).collect();
+        let kept = arrow::compute::filter(&values, &mask)?;
+        let mut out = Vec::with_capacity(offsets.len());
+        out.push(O::usize_as(0));
+        let mut n = 0;
+        for w in offsets.windows(2) {
+            n += (w[0].as_usize()..w[1].as_usize())
+                .filter(|&j| keep(j - start))
+                .count();
+            out.push(O::usize_as(n));
+        }
+        let (DataType::List(f) | DataType::LargeList(f)) = l.data_type() else {
+            unreachable!("a GenericListArray is a list")
+        };
+        Ok(Arc::new(arrow::array::GenericListArray::<O>::try_new(
+            Arc::clone(f),
+            arrow::buffer::OffsetBuffer::new(out.into()),
+            kept,
+            l.nulls().cloned(),
+        )?))
+    }
+    match a.data_type() {
+        DataType::List(_) => drop_nulls(a.as_list::<i32>()),
+        DataType::LargeList(_) => drop_nulls(a.as_list::<i64>()),
+        _ => Ok(Arc::clone(a)),
+    }
+}

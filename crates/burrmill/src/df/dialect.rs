@@ -3707,6 +3707,9 @@ impl datafusion_expr::planner::ExprPlanner for DuckPlanner {
     {
         use datafusion_expr::planner::PlannerResult;
         use sqlparser::ast::BinaryOperator as B;
+        if e.op == B::StringConcat {
+            return list_concat(e, schema);
+        }
         if !matches!(e.op, B::Eq | B::NotEq | B::Lt | B::Gt | B::LtEq | B::GtEq) {
             return Ok(PlannerResult::Original(e));
         }
@@ -3728,6 +3731,45 @@ impl datafusion_expr::planner::ExprPlanner for DuckPlanner {
             e.right = as_number(e.right, lt);
         }
         Ok(PlannerResult::Original(e))
+    }
+}
+
+/// `list || list` is NULL where either list is, as DuckDB has it; DataFusion's concatenation skips
+/// a NULL list and appends a NULL element (`[1, 2] || NULL` was `[1, 2, NULL]`). Planned as
+/// DataFusion plans it, under a test of both sides.
+fn list_concat(
+    e: datafusion_expr::planner::RawBinaryExpr,
+    schema: &DFSchema,
+) -> DFResult<datafusion_expr::planner::PlannerResult<datafusion_expr::planner::RawBinaryExpr>> {
+    use datafusion_expr::planner::{ExprPlanner, PlannerResult};
+    let list = |t: &DataType| {
+        matches!(
+            t,
+            DataType::List(_) | DataType::LargeList(_) | DataType::FixedSizeList(..)
+        )
+    };
+    let (Ok(lt), Ok(rt)) = (e.left.get_type(schema), e.right.get_type(schema)) else {
+        return Ok(PlannerResult::Original(e));
+    };
+    if !((list(&lt) && (list(&rt) || rt.is_null())) || (list(&rt) && lt.is_null())) {
+        return Ok(PlannerResult::Original(e));
+    }
+    let (l, r) = (e.left.clone(), e.right.clone());
+    match datafusion_functions_nested::planner::NestedFunctionPlanner.plan_binary_op(e, schema)? {
+        PlannerResult::Planned(concat) => {
+            let t = if list(&lt) { lt } else { rt };
+            Ok(PlannerResult::Planned(Expr::Case(
+                datafusion_expr::expr::Case {
+                    expr: None,
+                    when_then_expr: vec![(
+                        Box::new(l.is_null().or(r.is_null())),
+                        Box::new(Expr::Literal(ScalarValue::try_from(&t)?, None)),
+                    )],
+                    else_expr: Some(Box::new(concat)),
+                },
+            )))
+        }
+        original => Ok(original),
     }
 }
 
