@@ -1,8 +1,8 @@
 # Changelog
 
 Nuthatch pins a git revision of burrmill. Each revision it adopts is tagged `vX.Y.Z` and gets an
-entry here, newest first, naming what changed since the last tag. A tag is also what goes to
-crates.io, with `burrmill-parquet-source` first when it has changed. The README says what a
+entry here, newest first, naming what changed since the last tag. A tag makes a GitHub
+Release with prebuilt binaries and nothing else (`docs/releasing.md`). The README says what a
 version number promises.
 
 A release that changes any receipt in `corpus/receipts/receipts.jsonl` says which, and why, in its
@@ -18,6 +18,16 @@ Engine (`burrmill`, feature `datafusion`)
   decides only when it leaves one side under an eighth of the other; a join it decides that way is
   also collected, if inner. TPC-H Q12 at SF10 built its table on all 15M orders, 930 MB, and now on
   the 310.8K `lineitem` rows it keeps, 15.6 MB, and no other TPC-H plan changes.
+
+## 0.4.0 - 2026-11-25
+
+Prebuilt `burrmill` binaries for five targets, as a GitHub Release. What changed since 0.3.0:
+
+A receipt still verifies only on the release that made it. `corpus/receipts` and `demo/receipt.json`
+are regenerated for 0.4.0; every statement, input and answer is unchanged.
+
+Engine (`burrmill`, feature `datafusion`)
+
 - Answers as DuckDB 2.0.1 does where DuckDB's sqllogictest suite found small differences (#430):
   `//` and `%` over integers, HUGEINT and DECIMAL raise `Division by zero` where they were NULL,
   except under `CASE`, `AND`, `OR`, `COALESCE`, `TRY` or a window function's arguments, which
@@ -30,6 +40,14 @@ Engine (`burrmill`, feature `datafusion`)
   refused, where it answered with both columns. Of the suite's 79719 records, 12168 pass where
   12088 did and 665 are wrong where 718 were; `docs/bench/sqllogictest-baseline.tsv` holds the new
   counts.
+- An aggregate joined on one of its group keys computes only the groups the join can keep, where
+  every row on the other side has a key a filtered scan holds: its input becomes a semi join on
+  that scan's keys (`JoinedGroups`, #433). Decorrelating TPC-H Q17's subquery averaged all 2M
+  parts over 60M rows at SF10 to keep 2,040. Where the keys read at most a sixteenth of what the
+  semi join filters, it is collected, so the dynamic filter on the scan it probes is not a `CASE`
+  over each row's repartition hash. Q17 at SF10 went from 1,469 to 1,553 ms to 756 to 838 against
+  DuckDB 2.0.1's 276 to 296, and at SF1 from 141 to 147 to 113 to 118. Q2 and Q20 also take the
+  semi join; every TPC-H answer is still DuckDB's.
 - Under a budget with a spill directory, a hash join whose build side's files hold more than half
   the statement pool, or cannot be measured, is planned as a sort-merge join, whose sorts and key
   buffer can spill where a hash join's build side cannot. TPC-H Q21, refused at SF10 under 2 GiB,
