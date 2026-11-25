@@ -1992,18 +1992,33 @@ impl VisitorMut for Rewriter {
 }
 
 /// `burrmill_intdiv(a, b)`: DuckDB's `//`, exact and truncating, checked. Integers stay BIGINT;
-/// anything decimal is `DECIMAL(38,0)`, as `HUGEINT` is.
+/// anything decimal is `DECIMAL(38,0)`, as `HUGEINT` is. An exact divisor of zero raises DuckDB's
+/// `Division by zero`; in DOUBLE it is NULL, unless the operands were DuckDB DECIMALs
+/// ([`decimal_intdiv`]).
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct IntDiv {
     sig: Signature,
+    /// The operands are DuckDB DECIMALs divided in DOUBLE: a zero divisor raises.
+    decimal: bool,
 }
 
 impl IntDiv {
     pub fn udf() -> Arc<ScalarUDF> {
+        Self::with(false)
+    }
+
+    fn with(decimal: bool) -> Arc<ScalarUDF> {
         Arc::new(ScalarUDF::from(Self {
             sig: Signature::user_defined(Volatility::Immutable),
+            decimal,
         }))
     }
+}
+
+/// What DuckDB raises for an exact `//` or `%` by zero, as Arrow's kernels raise it, so
+/// [`super::errors`] restates both alike.
+fn division_by_zero() -> datafusion_common::DataFusionError {
+    arrow::error::ArrowError::DivideByZero.into()
 }
 
 impl ScalarUDFImpl for IntDiv {
@@ -2067,6 +2082,9 @@ impl ScalarUDFImpl for IntDiv {
                 );
                 let mut o = arrow::array::Float64Builder::with_capacity(n);
                 for i in 0..n {
+                    if !a.is_null(i) && !b.is_null(i) && b.value(i) == 0.0 && self.decimal {
+                        return Err(division_by_zero());
+                    }
                     if a.is_null(i) || b.is_null(i) || b.value(i) == 0.0 {
                         o.append_null();
                     } else {
@@ -2082,8 +2100,10 @@ impl ScalarUDFImpl for IntDiv {
                 );
                 let mut o = arrow::array::UInt64Builder::with_capacity(n);
                 for i in 0..n {
-                    if a.is_null(i) || b.is_null(i) || b.value(i) == 0 {
+                    if a.is_null(i) || b.is_null(i) {
                         o.append_null();
+                    } else if b.value(i) == 0 {
+                        return Err(division_by_zero());
                     } else {
                         o.append_value(a.value(i) / b.value(i));
                     }
@@ -2094,8 +2114,10 @@ impl ScalarUDFImpl for IntDiv {
                 let (a, b) = (a.as_primitive::<Int64Type>(), b.as_primitive::<Int64Type>());
                 let mut o = Int64Builder::with_capacity(n);
                 for i in 0..n {
-                    if a.is_null(i) || b.is_null(i) || b.value(i) == 0 {
+                    if a.is_null(i) || b.is_null(i) {
                         o.append_null();
+                    } else if b.value(i) == 0 {
+                        return Err(division_by_zero());
                     } else {
                         match a.value(i).checked_div(b.value(i)) {
                             Some(v) => o.append_value(v),
@@ -2118,8 +2140,10 @@ impl ScalarUDFImpl for IntDiv {
                 );
                 let mut o = Decimal128Builder::with_capacity(n);
                 for i in 0..n {
-                    if a.is_null(i) || b.is_null(i) || b.value(i) == 0 {
+                    if a.is_null(i) || b.is_null(i) {
                         o.append_null();
+                    } else if b.value(i) == 0 {
+                        return Err(division_by_zero());
                     } else {
                         match a.value(i).checked_div(b.value(i)) {
                             Some(v) => o.append_value(v),
@@ -2148,7 +2172,8 @@ impl ScalarUDFImpl for IntDiv {
 
 /// `a // b` beside a DuckDB DECIMAL, of any scale, is division in DOUBLE: DuckDB's `//` takes
 /// integers and HUGEINT only. Both are `DECIMAL(38,0)` here, so which one an operand is comes from
-/// what was written, read before coercion adds casts of its own.
+/// what was written, read before coercion adds casts of its own. With no float beside it, a zero
+/// divisor raises `Division by zero`, as DuckDB's DECIMAL does.
 fn decimal_intdiv(
     e: Expr,
     schema: &DFSchema,
@@ -2157,7 +2182,20 @@ fn decimal_intdiv(
     let Expr::ScalarFunction(f) = &e else {
         return Ok(Transformed::no(e));
     };
-    if f.func.name() != "burrmill_intdiv" || !f.args.iter().any(|a| duck_decimal(a, schema, inputs))
+    if f.func.name() != "burrmill_intdiv" || f.args.len() != 2 {
+        return Ok(Transformed::no(e));
+    }
+    let types = f
+        .args
+        .iter()
+        .map(|a| a.get_type(schema))
+        .collect::<DFResult<Vec<_>>>()?;
+    let scaled = |t: &DataType| matches!(t, DataType::Decimal128(_, s) if *s != 0);
+    if !f
+        .args
+        .iter()
+        .zip(&types)
+        .any(|(a, t)| scaled(t) || duck_decimal(a, schema, inputs))
     {
         return Ok(Transformed::no(e));
     }
@@ -2166,8 +2204,16 @@ fn decimal_intdiv(
         .iter()
         .map(|a| a.clone().cast_to(&DataType::Float64, schema))
         .collect::<DFResult<Vec<_>>>()?;
+    let exact = types
+        .iter()
+        .all(|t| t.is_integer() || t.is_null() || matches!(t, DataType::Decimal128(..)));
+    let func = if exact {
+        IntDiv::with(true)
+    } else {
+        Arc::clone(&f.func)
+    };
     Ok(Transformed::yes(Expr::ScalarFunction(
-        datafusion_expr::expr::ScalarFunction::new_udf(Arc::clone(&f.func), args),
+        datafusion_expr::expr::ScalarFunction::new_udf(func, args),
     )))
 }
 
@@ -2708,8 +2754,9 @@ fn numeric(t: &DataType) -> bool {
         || matches!(t, DataType::Decimal128(..) | DataType::Decimal256(..))
 }
 
-/// `x % 0` is NULL in DuckDB, where Arrow's kernel refuses the statement; the divisor becomes
-/// `nullif(y, 0)`, which the kernel skips. A non-zero literal divisor is left as written.
+/// `x % 0` beside a float is NULL here, where Arrow's kernel refuses the statement; the divisor
+/// becomes `nullif(y, 0)`, which the kernel skips. A non-zero literal divisor is left as written.
+/// Between exact types the kernel's refusal stands: DuckDB raises `Division by zero` too.
 fn modulo_by_zero(e: Expr, schema: &DFSchema) -> DFResult<Transformed<Expr>> {
     let Expr::BinaryExpr(BinaryExpr {
         left,
@@ -2720,7 +2767,8 @@ fn modulo_by_zero(e: Expr, schema: &DFSchema) -> DFResult<Transformed<Expr>> {
         return Ok(Transformed::no(e));
     };
     let rt = right.get_type(schema)?;
-    let zero = numeric(&rt)
+    let float = rt.is_floating() || left.get_type(schema)?.is_floating();
+    let zero = (float && numeric(&rt))
         .then(|| ScalarValue::new_zero(&rt))
         .transpose()?;
     let Some(zero) = zero.filter(|z| !matches!(right.as_ref(), Expr::Literal(v, _) if v != z))

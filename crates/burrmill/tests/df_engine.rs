@@ -734,16 +734,31 @@ fn order_by_an_expression_over_an_output_alias_reads_the_alias() {
 }
 
 #[test]
-fn modulo_by_zero_is_null_as_duckdb_has_it() {
-    // DuckDB 1.5's answers, a row at a time; Arrow's kernel refused the whole statement.
+fn modulo_by_zero_beside_a_float_is_null_and_between_exact_types_raises() {
+    // Arrow's kernel refused the whole statement; beside a float `% 0` is NULL a row at a time.
+    // DuckDB 2.0.1 raises `Division by zero` between exact types (#430).
     assert_eq!(
         value(
-            "SELECT x, x % y AS a, 7 % 0 AS b, 7.5 % 0 AS d, CAST(7 AS HUGEINT) % 0 AS e, \
-             CAST(x AS UBIGINT) % CAST(y AS UBIGINT) AS f, -7 % y AS g, 7.5::DOUBLE % y AS h \
-             FROM (VALUES (7, 0), (7, 2), (8, NULL)) t(x, y) ORDER BY y NULLS LAST"
+            "SELECT x, x % y AS a, -7 % y AS g, 7.5::DOUBLE % y AS h \
+             FROM (VALUES (7, 2), (8, NULL)) t(x, y) ORDER BY y NULLS LAST"
         ),
-        r#"[{"x":7,"a":null,"b":null,"d":null,"e":null,"f":null,"g":null,"h":null},{"x":7,"a":1,"b":null,"d":null,"e":null,"f":1,"g":-1,"h":1.5},{"x":8,"a":null,"b":null,"d":null,"e":null,"f":null,"g":null,"h":null}]"#
+        r#"[{"x":7,"a":1,"g":-1,"h":1.5},{"x":8,"a":null,"g":null,"h":null}]"#
     );
+    assert_eq!(
+        value("SELECT 7.5::DOUBLE % y AS h FROM (VALUES (0)) t(y)"),
+        r#"[{"h":null}]"#
+    );
+    let e = Engine::open_empty().unwrap();
+    for sql in [
+        "SELECT x % y FROM (VALUES (7, 0)) t(x, y)",
+        "SELECT 7 % 0",
+        "SELECT 7.5 % 0",
+        "SELECT CAST(7 AS HUGEINT) % 0",
+        "SELECT CAST(x AS UBIGINT) % CAST(y AS UBIGINT) FROM (VALUES (7, 0)) t(x, y)",
+    ] {
+        let m = e.sql(sql).expect_err(sql).to_string();
+        assert!(m.contains("Division by zero"), "{sql}: {m}");
+    }
 }
 
 #[test]

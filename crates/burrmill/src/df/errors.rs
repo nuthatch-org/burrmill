@@ -161,6 +161,10 @@ fn identifiers(s: &str) -> Vec<String> {
 
 /// DuckDB's first line for a DataFusion error, if it is one nuthatch keys a hint on.
 pub fn duckdb_phrase(msg: &str) -> Option<String> {
+    // Arrow's `%` kernels and `burrmill_intdiv` over exact types, and the simplifier's `x % 0`.
+    if msg.contains("Divide by zero error") {
+        return Some("Division by zero".into());
+    }
     if let Some(rest) = after(msg, "no table ") {
         let name = rest.split_whitespace().next()?;
         return Some(format!(
@@ -473,7 +477,7 @@ mod tests {
 
     #[test]
     fn unrecognised_text_passes_and_the_kept_text_trips_nothing() {
-        assert_eq!(p("Arrow error: Divide by zero error"), None);
+        assert_eq!(p("Arrow error: Cast error: no"), None);
         let r = super::restate(
             "No function matches the given name and argument types 'coalesce(Utf8View, Boolean)'."
                 .into(),
