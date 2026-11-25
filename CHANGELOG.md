@@ -33,6 +33,9 @@ Engine (`burrmill`, feature `datafusion`)
   the same at any thread count. The 1 GB file of `burrmill-bench json-ingest` reads at the CLI's
   default `--memory` of 4 GiB, in 1.43 s at 8 threads with a peak of 1.43 GiB, where it peaked at
   3.32 GiB before (docs/bench/json-ingest.md) (#413).
+- TPC-H Q17 at SF10 is within 1.5x datafusion-cli at 8 threads (0.98x to 1.30x over five rounds),
+  with its answer DuckDB's. No code changed since #399 fixed the cause, which
+  `docs/bench/tpch.md` now names (#381).
 
 CLI (`burrmill`)
 
