@@ -177,6 +177,40 @@ pub fn duckdb_type(t: &DataType) -> String {
         Binary | BinaryView | LargeBinary | FixedSizeBinary(_) => "BLOB".into(),
         Date32 | Date64 => "DATE".into(),
         Timestamp(TimeUnit::Microsecond, None) => "TIMESTAMP".into(),
+        // Only a TIMESTAMP_S or TIMESTAMP_MS gives these here. Nanoseconds are left as Arrow names
+        // them: a plain `TIMESTAMP '...'` literal has them too, where DuckDB's is microseconds.
+        Timestamp(TimeUnit::Second, None) => "TIMESTAMP_S".into(),
+        Timestamp(TimeUnit::Millisecond, None) => "TIMESTAMP_MS".into(),
+        Interval(_) => "INTERVAL".into(),
+        Struct(fields) if !fields.is_empty() => {
+            let fields: Vec<String> = fields
+                .iter()
+                .map(|f| {
+                    let n = f.name();
+                    let plain = n
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+                        && n.chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+                    let n = if plain {
+                        n.clone()
+                    } else {
+                        format!("\"{}\"", n.replace('"', "\"\""))
+                    };
+                    format!("{n} {}", duckdb_type(f.data_type()))
+                })
+                .collect();
+            format!("STRUCT({})", fields.join(", "))
+        }
+        Map(entries, _) => match entries.data_type() {
+            Struct(kv) if kv.len() == 2 => format!(
+                "MAP({}, {})",
+                duckdb_type(kv[0].data_type()),
+                duckdb_type(kv[1].data_type())
+            ),
+            other => other.to_string(),
+        },
         Timestamp(_, Some(_)) => "TIMESTAMP WITH TIME ZONE".into(),
         Decimal128(p, s) | Decimal256(p, s) => format!("DECIMAL({p},{s})"),
         Null => "NULL".into(),
