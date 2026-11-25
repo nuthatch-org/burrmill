@@ -18,6 +18,12 @@ Engine (`burrmill`, feature `datafusion`)
   decides only when it leaves one side under an eighth of the other; a join it decides that way is
   also collected, if inner. TPC-H Q12 at SF10 built its table on all 15M orders, 930 MB, and now on
   the 310.8K `lineitem` rows it keeps, 15.6 MB, and no other TPC-H plan changes.
+- A semi join whose build side is guessed, as above, to keep at most an eighth of what its probe
+  side reads is collected rather than partitioned (#433), so the dynamic filter it puts in the
+  probe's scan is one hash lookup and not a `CASE` over each row's repartition hash. TPC-H Q4 at
+  SF10 builds on 573.7K orders and probes 60M `lineitem` rows; that filter's CPU went from 1.77 s to
+  0.39 s and Q4 from 493–635 ms to 418–425 ms. Q2 and Q20 take it too, and no other TPC-H plan
+  changes.
 
 ## 0.4.0 - 2026-11-25
 
