@@ -902,11 +902,15 @@ fn rewrite(stmt: &mut DfStatement, known: &Known, names: &mut [Option<String>]) 
     let _ = crate::walk::walk(s.as_ref(), &mut CteNames(&mut ctes));
     let mut rw = Rewriter {
         refused: None,
+        binder: None,
         lambda: vec![],
         known,
         ctes,
     };
     let _ = crate::walk::walk_mut(s.as_mut(), &mut rw);
+    if let Some(why) = rw.binder {
+        return Err(BurrmillError::Plan(why));
+    }
     match rw.refused {
         Some(why) => Err(BurrmillError::NotAllowed(why)),
         None => Ok(()),
@@ -915,6 +919,8 @@ fn rewrite(stmt: &mut DfStatement, known: &Known, names: &mut [Option<String>]) 
 
 struct Rewriter {
     refused: Option<String>,
+    /// An error DuckDB's binder raises, as DuckDB words it.
+    binder: Option<String>,
     /// Parameters of the lambdas the walk is inside.
     lambda: Vec<String>,
     known: Known,
@@ -1846,6 +1852,18 @@ impl VisitorMut for Rewriter {
         if let Some(why) = natural_join_case(&q.body, &self.known, &self.ctes) {
             self.refused = Some(why);
             return ControlFlow::Break(());
+        }
+        let scope = super::usingjoins::Scope::of(q, &self.known, &self.ctes);
+        match super::usingjoins::rewrite_query(q, &scope) {
+            Ok(()) => {}
+            Err(super::usingjoins::Failed::Refused(why)) => {
+                self.refused = Some(why);
+                return ControlFlow::Break(());
+            }
+            Err(super::usingjoins::Failed::Binder(why)) => {
+                self.binder = Some(why);
+                return ControlFlow::Break(());
+            }
         }
         for cte in q.with.iter().flat_map(|w| &w.cte_tables) {
             let cols = &cte.alias.columns;

@@ -103,6 +103,7 @@ mod tojson;
 mod topkfilter;
 mod topn;
 mod unionorder;
+mod usingjoins;
 mod wide;
 
 #[path = "generated/physical_planner.rs"]
