@@ -44,6 +44,18 @@ Build and CI
 - The `burrmill` job frees runner disk before it builds. A Cargo.lock change misses most of the
   build cache, and the full debug build then failed with "No space left on device".
 
+Dependencies
+
+- Every DataFusion crate is 55.3.0, where it was 55.2.0, for branch-55's fixes to LEAD/LAG IGNORE
+  NULLS, outer joins with deferred filters, NULL-padded rows in sort-merge join filters and integer
+  interval propagation (#452). Both vendored copies are rebased on it; upstream's sources for those
+  two crates are the same in both releases, so each change carries over as it was. `arrow` and
+  `parquet` do not move. A receipt names the DataFusion it was made on, so one made on 0.4.0 does
+  not verify on this revision; `demo/receipt.json` is regenerated, its answer unchanged, and every
+  answer in `corpus/receipts` is unchanged. Every sqllogictest record keeps its class.
+- Dependabot no longer opens DataFusion bumps; they move by hand, all crates at once, as
+  `vendor/README.md` describes (#452).
+
 ## 0.4.0 - 2026-11-25
 
 Prebuilt `burrmill` binaries for five targets, as a GitHub Release. What changed since 0.3.0:

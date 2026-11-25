@@ -1,8 +1,12 @@
 # Vendored crates
 
-## burrmill-parquet-source 55.2.0
+Both copies moved from 55.2.0 to 55.3.0 in #452. Upstream's sources are byte for byte the same in
+the two releases for both crates, only the manifests' versions moved, so each change carries over
+as it was.
 
-DataFusion's `datafusion-datasource-parquet` 55.2.0 from crates.io, unchanged except for the
+## burrmill-parquet-source 55.3.0
+
+DataFusion's `datafusion-datasource-parquet` 55.3.0 from crates.io, unchanged except for the
 per-file metrics in `src/opener/mod.rs` and one field in `src/source.rs`. It has its own package
 name, and `burrmill` takes it as `datafusion-datasource-parquet` by renaming the dependency, so
 nuthatch gets the change without a `[patch]` of its own. Nothing else in
@@ -35,9 +39,9 @@ shows only the last file's value, and `scan_efficiency_ratio` adds the partition
 The `filename` label now reads `(every file)`, and the baseline metrics' `end_time` is the
 partition's, not the last file's.
 
-## datafusion-expr 55.2.0
+## datafusion-expr 55.3.0
 
-DataFusion's `datafusion-expr` 55.2.0 from crates.io, unchanged except for `src/expr_schema.rs`.
+DataFusion's `datafusion-expr` 55.3.0 from crates.io, unchanged except for `src/expr_schema.rs`.
 Every DataFusion crate depends on it, so it cannot be renamed like the parquet source and is taken
 by a `[patch.crates-io]` in the workspace manifest instead. That reaches this workspace only: nuthatch
 gets upstream's crate unless it carries the same patch. The bench's stock DataFusion arm
@@ -53,6 +57,6 @@ outermost field once. Window functions still get their name, through `WindowUDFF
 
 What a function sees that differs: argument fields reach `return_field` and `return_field_from_args`
 with an empty name, where before each carried its own schema name. No function in DataFusion 55.2
-keeps an argument's logical name past the outer rename. With it, fresh statements under 1,000 rows
-plan about 11% faster on the dialect corpus (geomean 1.78x DuckDB's p50 to 1.62x, Mac, three
-interleaved pairs), and dialect parity is unchanged at 370 cases.
+or 55.3 keeps an argument's logical name past the outer rename. With it, fresh statements under
+1,000 rows plan about 11% faster on the dialect corpus (geomean 1.78x DuckDB's p50 to 1.62x, Mac,
+three interleaved pairs, at 55.2.0), and dialect parity is unchanged at 370 cases.

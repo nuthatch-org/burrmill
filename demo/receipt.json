@@ -1,5 +1,5 @@
 {
   "csv": "posted,merchant,amount\n2024-01-02,SHOP1,-1.50\n2024-01-03,SHOP2,12.25\n2024-01-03,SHOP1,-3.00\n2024-02-01,,7\n",
   "sql": "SELECT merchant, SUM(amount) AS total, COUNT(*) AS n FROM t GROUP BY merchant",
-  "receipt": "{\"receipt\":\"burrmill-receipt/1\",\"engine\":\"burrmill 0.4.0, datafusion 55.2.0\",\"settings\":{\"strict_decimals\":false},\"statement\":\"SELECT merchant, SUM(amount) AS total, COUNT(*) AS n FROM t GROUP BY merchant\",\"inputs\":[\"rows:3b3a4c363ddd53bb0c7cbcb4707402b5349b3577d0c334dc75261e8814a9f8bd:4\"],\"answer\":\"3b023fb24c44507f8368ab93e4e41c912ebf636bd11dbd3757cfa779d37271a5:3\",\"digest\":\"0675c010093a81ca62e7494d4355f7a94c2fc1fd11c3e2b4c78b612063b6b0b1\"}"
+  "receipt": "{\"receipt\":\"burrmill-receipt/1\",\"engine\":\"burrmill 0.4.0, datafusion 55.3.0\",\"settings\":{\"strict_decimals\":false},\"statement\":\"SELECT merchant, SUM(amount) AS total, COUNT(*) AS n FROM t GROUP BY merchant\",\"inputs\":[\"rows:3b3a4c363ddd53bb0c7cbcb4707402b5349b3577d0c334dc75261e8814a9f8bd:4\"],\"answer\":\"3b023fb24c44507f8368ab93e4e41c912ebf636bd11dbd3757cfa779d37271a5:3\",\"digest\":\"ab8fac11bc2324662eab4d70b743e385a4e49273a7c303338131a22f16e6efb4\"}"
 }
