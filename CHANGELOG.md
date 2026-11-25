@@ -21,7 +21,9 @@ Engine (`burrmill`, feature `datafusion`)
   `DECIMAL` or `NUMERIC` is DECIMAL(18,3), within a list, struct or map too, as DuckDB's type names
   there are now renamed as they are at the top. `typeof` names TIMESTAMP_S, TIMESTAMP_MS,
   INTERVAL, STRUCT and MAP as DuckDB does. A NATURAL JOIN on columns named alike but for case is
-  refused, where it answered with both columns.
+  refused, where it answered with both columns. Of the suite's 79719 records, 12168 pass where
+  12088 did and 665 are wrong where 718 were; `docs/bench/sqllogictest-baseline.tsv` holds the new
+  counts.
 - Under a budget with a spill directory, a hash join whose build side's files hold more than half
   the statement pool, or cannot be measured, is planned as a sort-merge join, whose sorts and key
   buffer can spill where a hash join's build side cannot. TPC-H Q21, refused at SF10 under 2 GiB,
