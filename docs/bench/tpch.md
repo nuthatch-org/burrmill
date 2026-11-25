@@ -191,12 +191,60 @@ under 2 GiB with a spill directory:** in the first process of three runs (load 7
 held 316 MB each. Its `EXPLAIN ANALYZE` in the same process answered, and so did all 12 runs after
 it in eight more processes (14,157 to 15,491 ms each a single run or a best of three, loads 10.9 to
 12.9); the SF30 row is the best of three in one of those, its pool peak and spilled in all from the
-process that was refused once. Why it is refused sometimes is not found. **At SF100 the same
+process that was refused once. Why is [below](#why-a-sort-was-refused-sometimes-434). **At SF100 the same
 happened to the `EXPLAIN ANALYZE`:** the three timed runs answered, and the fourth run in that
 process, the `EXPLAIN ANALYZE`, was refused over the 1,792 MB, so its spilled-in-all is missing; the
 run that compared the answers took 102,440 ms at load 13.5, faster than the best of the three. At
 SF10 the load rose to 23.3 by the end, and the run that compared the answers, one run each, took 881
 ms on DuckDB 2.0.1 and 3,555 on Burrmill.
+
+### Why a sort was refused sometimes (#434)
+
+A sort that holds nothing, starting or having just spilled, has nothing to spill, so DataFusion's
+`ExternalSorter` refused the statement when the pool refused its batch: `Not enough memory to
+continue external sort`. The pool's sorts borrow past their fair share, and a loan leaves the reserve
+and one fair share free: one share for every consumer under its share, not one each. A trace of the
+pool's refusals in Q21 at SF30, on 2d44933 with a debug print, three processes of 10 runs, every run
+answering, had 55 to 96 spillers registered and 42 to 187 MB held by consumers that cannot spill.
+At 96 spillers and 119 MB a share was about 18 MB, (1,792 MiB less 119 MB) / 96, while the largest
+holders held up to 983 MB and the pool sat at all but the reserve and about that share.
+Repartitions under their shares took from it as they refilled after spilling (411,057 refusals in
+one process), and what a spilling sort gave back was lent again to the others before it asked for
+its next batch, which the sorts reserved at 64 KB to 6 MB. One that found less than that free
+refused, the reserve's 112 MiB beside it. The 30 traced runs at 8 threads did not hit it; at 16
+threads, with more spillers and so a smaller share, the engine without the fix hit it in every
+process (below), and the test below hits it every time.
+
+A spiller holding nothing may now take the reserve too, within its share; a repartition still
+spills the batch. `sorters_share::a_sort_holding_nothing_gets_its_batch` in
+`crates/burrmill/src/df/session.rs` runs 16 of DataFusion's sorts on one such pool, fed a batch at
+a time on one thread: before, a sort starting while four others held loans was refused at 0 bytes
+held, with that error; now every sort answers, in order.
+
+Measured 2026-11-25 with the fix (0bfdd36) and, beside it, the same tree without it, against the
+bench's bundled DuckDB v1.5.4 (no DuckDB CLI on this host), 2 GiB, spill directory on the same disk,
+on the shared host: the 1-minute load at the start of each is given.
+
+| SF | threads | engine | runs | answered | Burrmill best ms | DuckDB ms | peak RSS MiB, Burrmill alone | load at start |
+|---|---:|---|---:|---|---:|---:|---:|---:|
+| 30 | 8 | fixed | 10, compared | 10, same | 14,889 | 5,505 | | 13.3 |
+| 30 | 8 | fixed | 10, alone | 10 | 15,756 | | 2,274 | 28.3 |
+| 100 | 8 | fixed | 5, compared, and `EXPLAIN ANALYZE` | 5, same; the `EXPLAIN ANALYZE` too | 121,260 | 22,638 | | 12.7 |
+| 30 | 16 | without | 4 processes of up to 5 | refused in all 4 | | | | 10.4 |
+| 30 | 16 | fixed | 5 alone, then 10 compared | 15, same | 11,336 alone, 11,911 compared | 4,257 | 2,545 | 11.1 |
+
+"Same" is the kept run's answer against DuckDB's; the bench compares that one. Each refusal at
+16 threads was the one above, `Failed to allocate additional 5.8 MB for ExternalSorter[n] with 0.0
+B already allocated`, 0.0 B available; in the first, five other sorts held 126 to 242 MB. At SF100 the operators spilled 45,023 MiB in all. With a spill directory at SF10, Q1, 3,
+5, 9, 10, 12, 13, 17, 18 and 21 all answered as DuckDB did, one run each.
+
+**Peak RSS at SF100 is still above the budget plus 1 GiB at times, with the fix or without.** One
+run each, Burrmill alone, alternating: with the fix 3,347, 3,375, 3,298, 3,081 and 3,210 MiB;
+without, 3,068, 3,087, 3,019 and 3,140. The pool peaked at 1,675 to 1,684 MiB in all of them. The
+fix only grants what the pool would otherwise refuse when the total passes the pool less its
+reserve, 1,680 MiB, so in the four fixed runs whose pool stayed under that it granted nothing the
+old rule would not. Those runs still peaked at 3,081 to 3,375 MiB, so the spread is outside the
+pool (see below) and not from the fix.
 
 **Peak RSS is the budget plus up to 1,095 MiB** (3,143 MiB at SF100; on 2026-11-24 it was up to
 926). The pool stays under its 1,792 MB at every scale factor; what is above it is the process
