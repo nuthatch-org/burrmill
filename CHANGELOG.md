@@ -42,8 +42,8 @@ Engine (`burrmill`, feature `datafusion`)
   with no groups, as TPC-H Q11 does, now sums the groups for that total, and the groups are computed
   once and read by both (#433). Q11's subquery joined `partsupp`, `supplier` and `nation` again, so
   `partsupp` was scanned twice; at SF10 Q11 went from 189–208 ms to 101–120 ms. Only exact sums are
-  taken apart this way, so the total is the same; a sum of doubles, a subquery over other rows, and
-  anything correlated or volatile are left alone. No other TPC-H plan changes.
+  taken apart this way, so the total is the same; a sum of doubles, a subquery over other rows,
+  grouping sets, and anything correlated or volatile are left alone. No other TPC-H plan changes.
 
 Build and CI
 

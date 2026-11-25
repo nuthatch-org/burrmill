@@ -14,6 +14,7 @@
 //! A float's sum would change with the order of its terms, and is left alone. The subquery must be
 //! an aggregate with no groups over a plan equal to the one the `HAVING`'s aggregate groups, with
 //! no outer reference and nothing volatile, every one of its aggregates one of the `HAVING`'s.
+//! Grouping sets are left alone: a rollup's groups hold its total too, so they sum to more.
 
 use std::sync::Arc;
 
@@ -64,7 +65,15 @@ fn rewrite(n: LogicalPlan, defs: &mut Definitions) -> Result<Transformed<Logical
     let LogicalPlan::Aggregate(groups) = f.input.as_ref() else {
         return Ok(Transformed::no(n));
     };
-    if groups.group_expr.is_empty() || !computed_once(&groups.input) {
+    // Grouping sets hold rows of several groupings, a rollup's total among them, so their sum is
+    // not the total of the rows.
+    if groups.group_expr.is_empty()
+        || groups
+            .group_expr
+            .iter()
+            .any(|e| matches!(e, Expr::GroupingSet(_)))
+        || !computed_once(&f.input)
+    {
         return Ok(Transformed::no(n));
     }
     // Each subquery of the predicate that totals the same rows, rewritten over `reference`, which
@@ -190,7 +199,7 @@ fn position(groups: &Aggregate, aggregate: &Expr) -> Option<usize> {
         .aggr_expr
         .iter()
         .position(|a| unalias(a) == want)
-        .map(|i| groups.group_expr.len() + i)
+        .map(|i| groups.schema.fields().len() - groups.aggr_expr.len() + i)
 }
 
 /// The total's plan with each of its sums taken over `groups`' column for that sum, read from

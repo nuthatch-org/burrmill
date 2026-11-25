@@ -163,3 +163,19 @@ fn a_total_over_other_rows_is_left_alone() {
     assert_eq!(answer(&e, &sql), answer(&e, &reference));
     assert_eq!(item_scans(&e, &sql), 2, "{sql}");
 }
+
+#[test]
+fn a_rollups_groups_hold_their_total_and_are_left_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let e = engine(tmp.path());
+    let rollup = |inner: &str| {
+        format!(
+            "SELECT k, sum(cost * qty) AS value FROM items, sup WHERE items.s = sup.s AND sup.n = 2 \
+             GROUP BY ROLLUP (k) HAVING sum(cost * qty) > (SELECT sum(cost * qty) * 0.004 {inner}) \
+             ORDER BY value DESC, k"
+        )
+    };
+    let sql = rollup(&inner(SAME, 2));
+    assert_eq!(answer(&e, &sql), answer(&e, &rollup(&inner(SWAPPED, 2))));
+    assert_eq!(item_scans(&e, &sql), 2, "{sql}");
+}

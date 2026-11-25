@@ -503,12 +503,16 @@ no groups over a plan equal to the one the `HAVING`'s aggregate groups, and each
 is one of that aggregate's `checked_sum`s, the subquery sums the aggregate's columns instead, and the
 aggregate is defined once and read by both. `checked_sum` is exact and wide enough that no partial
 sum overflows, so the sum of the groups' sums is the sum of the rows, of the same type. A sum of
-doubles, a subquery over other rows, and anything correlated, volatile or recursive are left alone.
+doubles, a subquery over other rows, grouping sets (a rollup's groups hold its total too), and
+anything correlated, volatile or recursive are left alone.
 After it, the `EXPLAIN ANALYZE` at SF10 has one `partsupp` scan, 323.9K rows out of it (load 10.27,
 21:24:30). The `EXPLAIN` of all 22 before and after differs in Q11 alone, at SF1 and at SF10.
 `a_q11_shaped_total_sums_the_groups_and_scans_once` (`crates/burrmill/tests/df_grouptotal.rs`)
 fails if the table goes back to being scanned twice; with the rule off it and the test of a total
-over no rows fail, and the tests of a sum of doubles and of a total over other rows still pass.
+over no rows fail, and the tests of a sum of doubles, of a total over other rows and of a rollup
+still pass. The rollup's test was added after the measurements below, with the guard that leaves
+grouping sets alone: without it the rule took the rollup's grouping id for its sum and the query was
+refused. The guard does not change Q11's plan.
 
 **Measured** 2026-11-25 on 271900c (built before rustfmt, which moved only layout) against 03ed088,
 on the ThinkPad as above, 8 threads, 2 GiB, no spill directory: three rounds per scale factor,
