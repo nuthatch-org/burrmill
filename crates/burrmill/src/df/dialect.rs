@@ -46,6 +46,7 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
     // Before the parser: sqlparser rejects `[expr FOR x IN list]`, which the views still write.
     let expanded = crate::listcomp::before_parse(sql);
     super::depth::refuse_set_op_tokens(&expanded)?;
+    refuse_positional(&expanded)?;
     let (expanded, asof_at) = super::asof::blank(&expanded);
     let parsed = DFParser::parse_sql_with_dialect(expanded.as_str(), &Duck).map_err(|e| {
         let text = parser_text(&e);
@@ -69,6 +70,30 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
         }
     }
     Ok(parsed)
+}
+
+/// DuckDB's `POSITIONAL JOIN`, refused by name. sqlparser does not know it: it reads `POSITIONAL`
+/// as the left relation's alias and the bare `JOIN` as a cross join, every row against every row.
+fn refuse_positional(sql: &str) -> Result<()> {
+    use sqlparser::keywords::Keyword;
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    if !may_hold_keyword(sql, &["positional"]) {
+        return Ok(());
+    }
+    let Ok(tokens) = Tokenizer::new(&Duck, sql).tokenize() else {
+        return Ok(());
+    };
+    let mut positional = false;
+    for t in tokens.iter().filter(|t| !matches!(t, Token::Whitespace(_))) {
+        if positional && matches!(t, Token::Word(w) if w.keyword == Keyword::JOIN) {
+            return Err(BurrmillError::Parse(
+                "POSITIONAL JOIN is not supported here".into(),
+            ));
+        }
+        positional = matches!(t, Token::Word(w)
+            if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("positional"));
+    }
+    Ok(())
 }
 
 /// Whether `sql` may hold one of `words` as a keyword: false only for ASCII text that does not

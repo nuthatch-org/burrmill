@@ -46,3 +46,28 @@ fn a_null_inside_a_struct_or_list_orders_last() {
         ]
     );
 }
+
+/// `POSITIONAL JOIN` is refused by name; sqlparser read `POSITIONAL` as an alias and the `JOIN` as
+/// a cross join, and answered 9,006 rows where DuckDB pairs 3,002
+/// (test/sql/join/positional/test_positional_join.test:59).
+#[test]
+fn a_positional_join_is_refused_by_name() {
+    let e = Engine::open_empty().unwrap();
+    for sql in [
+        "WITH a(x) AS (VALUES (1), (2), (3)), b(y) AS (VALUES (1), (2)) \
+         SELECT count(x), count(y) FROM a POSITIONAL JOIN b",
+        "WITH a(x) AS (VALUES (1)) SELECT * FROM a t1 positional join a t2",
+    ] {
+        let err = e.sql(sql).unwrap_err().to_string();
+        assert!(
+            err.contains("POSITIONAL JOIN is not supported"),
+            "{sql}: {err}"
+        );
+    }
+    // A column or a quoted alias of that name is no join.
+    let got = rows(
+        &e,
+        "WITH a(positional) AS (VALUES (1)) SELECT b.positional FROM a \"positional\" JOIN a b ON true",
+    );
+    assert_eq!(got, vec![json!({"positional": 1})]);
+}
