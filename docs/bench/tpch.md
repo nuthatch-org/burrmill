@@ -89,7 +89,8 @@ and 254 ms at SF10, 6.2 times the time for ten times the rows, and Q17 235 ms an
 
 **Q21 is refused at SF10 without a spill directory:** it needs more than the 1,792 MB of the 2 GiB
 budget a statement may use, which DuckDB and datafusion-cli answer without one. With a spill
-directory it answers at SF10, SF30 and SF100 under 2 GiB, as DuckDB does (#383,
+directory it answers at SF10, SF30 and SF100 under 2 GiB, as DuckDB does, though one run in a
+process was refused at SF30 and one at SF100, below (#383,
 [Spilling](#spilling-q21-under-2-gib-383)).
 
 **Every answer given agrees with DuckDB 2.0.1:** 22 of 22 at SF1, 21 of 22 at SF10 with Q21
@@ -166,10 +167,9 @@ without. Under a budget with a spill directory the engine now plans a hash join 
 may not fit as a sort-merge join, whose sorts and key buffer spill
 (`crates/burrmill/src/df/spillingjoins.rs` says when).
 
-The SF10 row was measured 2026-11-25 on 2d44933 against **DuckDB 2.0.1** on CPU (the CLI, as above);
-the SF30 and SF100 rows on 2026-11-24 against the bundled DuckDB 1.5.4. All on the ThinkPad, **a
-shared host under other work**: the 1-minute load is given beside every timing, and DuckDB ran in
-the same few minutes, so the ratio is fairer than the absolute times. Burrmill and DuckDB ran in
+Measured 2026-11-25 on 2d44933 against **DuckDB 2.0.1** on CPU (the CLI, as above), on the ThinkPad,
+**a shared host under other work**: the 1-minute load is given beside every timing, and DuckDB ran
+in the same few minutes, so the ratio is fairer than the absolute times. Burrmill and DuckDB ran in
 separate processes so that neither's allocator counts against the other's peak RSS (DuckDB 2.0.1's
 is its CLI process's, from `wait4`); a third run of both compared the answers. Budget 2 GiB, 8
 threads, spill directory on the same disk. Best of 3 at SF10 and SF30; at SF100 too, each run being
@@ -182,20 +182,29 @@ larger; why is not measured.
 | SF | DuckDB | DuckDB ms | DuckDB peak RSS MiB | Burrmill ms | ratio | Burrmill peak RSS MiB | pool peak MiB | most spilled MiB | spilled in all MiB | load at start | answer |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | 10 | 2.0.1 | 1,556 | 2,384 | 3,903 | 2.51x | 2,261 | 1,652 | 636 | 563 | 11.3 / 9.0 | same |
-| 30 | 1.5.4 | 5,505 | 1,941 | 13,955 | 2.54x | 2,278 | 1,676 | 6,496 | 12,238 | 8.4 / 10.1 | same |
-| 100 | 1.5.4 | 20,503 | 5,483 | 96,993 | 4.73x | 2,974 | 1,678 | 21,659 | 42,910 | 3.5 / 3.6 | same |
+| 30 | 2.0.1 | 1,839 | 1,577 | 14,157 | 7.70x | 2,336 | 1,681 | 6,367 | 12,024 | 11.6 / 9.3 | same |
+| 100 | 2.0.1 | 6,354 | 4,252 | 147,454 | 23.21x | 3,143 | 1,678 | 21,657 | refused | 6.8 / 11.8 | same |
 
-The two loads are at the start of Burrmill's runs and of DuckDB's. At SF10 the load rose to 23.3 by
-the end, and the run that compared the answers, one run each, took 881 ms on DuckDB 2.0.1 and
-3,555 on Burrmill. The SF100 row is from the build before Q18's exception below, which does not
-change Q21's plan (its build sides group nothing).
+The two loads are at the start of Burrmill's runs and of DuckDB's. **At SF30 Q21 was refused once
+under 2 GiB with a spill directory:** in the first process of three runs (load 7.5), one run ended
+`Not enough memory to continue external sort`, an `ExternalSorter` refused more while four others
+held 316 MB each. Its `EXPLAIN ANALYZE` in the same process answered, and so did all 12 runs after
+it in eight more processes (14,157 to 15,491 ms each a single run or a best of three, loads 10.9 to
+12.9); the SF30 row is the best of three in one of those, its pool peak and spilled in all from the
+process that was refused once. Why it is refused sometimes is not found. **At SF100 the same
+happened to the `EXPLAIN ANALYZE`:** the three timed runs answered, and the fourth run in that
+process, the `EXPLAIN ANALYZE`, was refused over the 1,792 MB, so its spilled-in-all is missing; the
+run that compared the answers took 102,440 ms at load 13.5, faster than the best of the three. At
+SF10 the load rose to 23.3 by the end, and the run that compared the answers, one run each, took 881
+ms on DuckDB 2.0.1 and 3,555 on Burrmill.
 
-**Peak RSS is the budget plus up to 926 MiB** (2026-11-24's runs). The pool stays under its 1,792 MB
-at every scale factor; what is above it is the process before the query (about 225 MiB: the binary,
-the tables' footers), Parquet decoding outside the pool, and pages the allocator freed and kept. At
-SF100 a build with the system allocator in place of jemalloc (`--features alloc-stats`, 1 run, 284 s
-under its counting) peaked at 2,533 MiB, so jemalloc's retention is about 440 MiB of it. A host that
-budgets 2 GiB should allow 3 GiB resident for such a statement.
+**Peak RSS is the budget plus up to 1,095 MiB** (3,143 MiB at SF100; on 2026-11-24 it was up to
+926). The pool stays under its 1,792 MB at every scale factor; what is above it is the process
+before the query (about 225 MiB: the binary, the tables' footers), Parquet decoding outside the
+pool, and pages the allocator freed and kept. On 2026-11-24, at SF100 a build with the system
+allocator in place of jemalloc (`--features alloc-stats`, 1 run, 284 s under its counting) peaked at
+2,533 MiB, so jemalloc's retention is about 440 MiB of it. A host that budgets 2 GiB should allow
+more than 3 GiB resident for such a statement: 3,143 MiB here.
 
 **Without a spill directory nothing changes:** Q21 at SF10 is refused with the same error, the pool
 at 1,791 MiB, and plans are as before.

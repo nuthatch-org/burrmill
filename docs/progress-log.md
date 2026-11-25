@@ -34,6 +34,12 @@ What is left of Q2's gap is not in its operators, whose CPU is below datafusion-
 dynamic filters decoded as row filters in the `partsupp` scans (1.18 s of scan CPU against 0.70)
 and joins all partitioned for want of statistics are the candidates, not measured apart.
 
+Q21 with a spill directory under 2 GiB, against DuckDB 2.0.1 alone in its own process: 2.51x DuckDB
+2.0.1 at SF10, 7.70x at SF30 and 23.21x at SF100 (147 s against 6.4 s), every answer the same. Two
+runs were refused over the budget, which 2026-11-24's runs did not record: one at SF30 (an
+`ExternalSorter` could not continue its merge) and the `EXPLAIN ANALYZE` after three answered runs
+at SF100. The other runs answered; the cause is not found.
+
 Sirius, DuckDB 2.0.1's GPU extension, was not measured: it needs CUDA 12.8 or newer, and this
 machine's RTX 2000 Ada laptop GPU has a driver for 12.4.
 
