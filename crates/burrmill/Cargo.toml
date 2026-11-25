@@ -90,13 +90,13 @@ serde_json = { version = "1", features = ["preserve_order"], optional = true }
 tokio = { version = "1", features = ["sync"], optional = true }
 arrow-schema = { version = "59", default-features = false, optional = true }
 datafusion-catalog = { version = "=55.2.0", default-features = false, optional = true }
-datafusion-common = { version = "=55.2.0", default-features = false, features = ["recursive_protection"], optional = true }
+datafusion-common = { version = "=55.3.0", default-features = false, features = ["recursive_protection"], optional = true }
 datafusion-datasource = { version = "=55.2.0", default-features = false, optional = true }
 # DataFusion's, with one change (vendor/README.md). A dependency rather than a [patch], so that
 # nuthatch and crates.io consumers get the change too.
 datafusion-datasource-parquet = { package = "burrmill-parquet-source", path = "../../vendor/burrmill-parquet-source", version = "=55.2.0", default-features = false, optional = true }
 datafusion-execution = { version = "=55.2.0", default-features = false, optional = true }
-datafusion-expr = { version = "=55.2.0", default-features = false, features = ["recursive_protection"], optional = true }
+datafusion-expr = { version = "=55.3.0", default-features = false, features = ["recursive_protection"], optional = true }
 datafusion-functions = { version = "=55.2.0", default-features = false, features = ["datetime_expressions", "encoding_expressions", "math_expressions", "regex_expressions", "string_expressions", "unicode_expressions"], optional = true }
 datafusion-functions-aggregate = { version = "=55.2.0", default-features = false, optional = true }
 datafusion-functions-nested = { version = "=55.2.0", default-features = false, optional = true }
