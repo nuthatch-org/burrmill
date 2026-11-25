@@ -38,6 +38,12 @@ Engine (`burrmill`, feature `datafusion`)
   Q6's `lineitem` scan at SF10 took 3.27 s of CPU that way, against 1.84 s read whole and filtered
   above, and Q6 went from 404–442 ms to 268–296 ms. The predicate still prunes row groups and pages.
   Scans in Q7, 9, 12, 15, 16, 19, 20, 21 and 22 take it too.
+- A `HAVING` that compares each group's `sum` with an uncorrelated subquery summing the same rows
+  with no groups, as TPC-H Q11 does, now sums the groups for that total, and the groups are computed
+  once and read by both (#433). Q11's subquery joined `partsupp`, `supplier` and `nation` again, so
+  `partsupp` was scanned twice; at SF10 Q11 went from 189–208 ms to 101–120 ms. Only exact sums are
+  taken apart this way, so the total is the same; a sum of doubles, a subquery over other rows,
+  grouping sets, and anything correlated or volatile are left alone. No other TPC-H plan changes.
 
 Build and CI
 
