@@ -667,6 +667,9 @@ impl MiniSession {
                     Arc::new(super::coercion::Again(Arc::new(
                         super::sharing::OverShared(Arc::new(super::coercion::Coercion)),
                     ))),
+                    // After sharing and the checked sums' types, so the total it defines once is
+                    // read where it was written and sums the groups' checked sums.
+                    Arc::new(super::grouptotal::TotalOfGroups),
                 ]
                 .into_iter()
                 .chain(
