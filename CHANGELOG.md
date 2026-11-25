@@ -32,6 +32,11 @@ Engine (`burrmill`, feature `datafusion`)
   join or a sort the plan does not change, and TPC-H's plans are the same. Of the sqllogictest
   suite's records, 12199 pass where 12168 did and 634 are wrong where 665 were.
 
+Build and CI
+
+- The `burrmill` job frees runner disk before it builds. A Cargo.lock change misses most of the
+  build cache, and the full debug build then failed with "No space left on device".
+
 ## 0.4.0 - 2026-11-25
 
 Prebuilt `burrmill` binaries for five targets, as a GitHub Release. What changed since 0.3.0:
