@@ -24,6 +24,28 @@ use super::smallinputs::bytes_read;
 #[derive(Debug, Default)]
 pub struct BuildOnSmaller;
 
+/// The semi join [`super::joinedgroups`] adds, collected on its keys where they read at most a
+/// sixteenth of what it filters. Partitioned, the dynamic filter it gives its probe's scan is a
+/// `CASE` over the repartition hash of every row: in TPC-H Q17 at SF10, 3.19 s of the scan's CPU
+/// over 60M rows, against 0.32 s for the collected filter.
+fn collect_keys(j: &HashJoinExec) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    if *j.partition_mode() != PartitionMode::Partitioned
+        || *j.join_type() != JoinType::RightSemi
+        || j.left().schema().fields().len() != 1
+        || j.left().schema().field(0).name() != super::joinedgroups::KEY
+    {
+        return Ok(None);
+    }
+    match (bytes_read(j.left()), bytes_read(j.right())) {
+        (Some(keys), Some(probe)) if keys.saturating_mul(16) <= probe => Ok(Some(Arc::new(
+            j.builder()
+                .with_partition_mode(PartitionMode::CollectLeft)
+                .build()?,
+        ))),
+        _ => Ok(None),
+    }
+}
+
 impl PhysicalOptimizerRule for BuildOnSmaller {
     fn optimize(
         &self,
@@ -57,6 +79,9 @@ impl PhysicalOptimizerRule for BuildOnSmaller {
                     return Ok(Transformed::yes(j.swap_inputs(PartitionMode::CollectLeft)?));
                 }
                 _ => {}
+            }
+            if let Some(collected) = collect_keys(j)? {
+                return Ok(Transformed::yes(collected));
             }
             if !swappable {
                 return Ok(Transformed::no(p));

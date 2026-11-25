@@ -122,7 +122,7 @@ pub(super) fn small_statement(plan: &LogicalPlan, below: u64) -> bool {
     measured && bytes < below
 }
 
-fn table_bytes(t: &Arc<dyn TableProvider>) -> Option<u64> {
+pub(super) fn table_bytes(t: &Arc<dyn TableProvider>) -> Option<u64> {
     if let Some(s) = t.downcast_ref::<SegmentTable>() {
         return Some(s.located().1.map(|f| f.object_meta.size).sum());
     }

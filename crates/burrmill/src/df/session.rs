@@ -717,8 +717,11 @@ impl MiniSession {
                     })
                     // Last in each pass, so the next pass optimizes what it cut.
                     .chain([
-                        Arc::new(super::bound::BoundValues(Arc::clone(&limits)))
+                        // After the subqueries are joins and the filters are down, and before a
+                        // pass that pushes projections and filters into the semi join it adds.
+                        Arc::new(super::joinedgroups::JoinedGroups)
                             as Arc<dyn datafusion_optimizer::OptimizerRule + Send + Sync>,
+                        Arc::new(super::bound::BoundValues(Arc::clone(&limits))),
                         Arc::new(super::sharing::PruneShared),
                     ])
                     .map(|r| {

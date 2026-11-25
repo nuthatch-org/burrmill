@@ -3,6 +3,10 @@
 //! DataFusion 55's ordered aggregate emits its groups at a cost quadratic in their number: Q17 took
 //! 26 s at SF10, 0.3 s at SF1.
 
+// In this binary rather than its own: TPC-H Q17's subquery too, and CI's runner is short of disk.
+#[path = "df_literalkeys/joinedgroups.rs"]
+mod joinedgroups;
+
 use std::path::Path;
 use std::sync::Arc;
 
