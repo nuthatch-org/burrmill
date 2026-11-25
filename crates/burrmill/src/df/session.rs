@@ -242,6 +242,14 @@ impl Loans {
         let fair = spill_available / self.spillers.max(1);
         let held = self.held.get(&id).copied().unwrap_or(0);
         if held + additional <= fair {
+            // One holding nothing has nothing to spill, so refused it refuses its statement: a sort
+            // starting, or asking for its next batch after it spilled. A loan leaves one share free
+            // for every consumer under its share, not one each, and Q21's 96 spillers made that
+            // 17 MB; so within its share it may take the reserve too (#434). A repartition spills
+            // the batch instead.
+            if held == 0 && borrows {
+                return pool_size.saturating_sub(self.spillable + self.unspillable);
+            }
             return free;
         }
         if !borrows {
@@ -1716,5 +1724,189 @@ mod lending_pool {
             t.join().unwrap();
         }
         assert_eq!(p.reserved(), 0);
+    }
+}
+
+/// DataFusion's own sorts under a spilling budget's pool, fed a batch at a time from a channel on
+/// one thread, so which sort asks for what, and when, is the test's and not a scheduler's (#434).
+#[cfg(test)]
+mod sorters_share {
+    use std::task::Poll;
+
+    use arrow::array::{Array, Int64Array, RecordBatch};
+    use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use datafusion_physical_expr::expressions::col;
+    use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
+    use datafusion_physical_plan::SendableRecordBatchStream;
+    use datafusion_physical_plan::sorts::sort::SortExec;
+    use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
+    use datafusion_physical_plan::streaming::{PartitionStream, StreamingTableExec};
+    use futures::StreamExt;
+    use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+
+    use super::*;
+
+    const ROWS: i64 = 2048;
+
+    #[derive(Debug)]
+    struct Fed {
+        schema: SchemaRef,
+        rx: Mutex<Option<UnboundedReceiver<DFResult<RecordBatch>>>>,
+    }
+
+    impl PartitionStream for Fed {
+        fn schema(&self) -> &SchemaRef {
+            &self.schema
+        }
+        fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
+            let rx = self.rx.lock().unwrap().take().expect("executed once");
+            Box::pin(RecordBatchStreamAdapter::new(Arc::clone(&self.schema), rx))
+        }
+    }
+
+    /// One sort, its input and what it has answered.
+    struct Sorter {
+        tx: Option<UnboundedSender<DFResult<RecordBatch>>>,
+        out: SendableRecordBatchStream,
+        fed: i64,
+        rows: Vec<i64>,
+    }
+
+    struct Sorts {
+        schema: SchemaRef,
+        sorters: Vec<Sorter>,
+        _spill: tempfile::TempDir,
+    }
+
+    impl Sorts {
+        /// `n` sorts registered on one pool of a `memory_bytes` budget with a spill directory, as a
+        /// plan's are when it starts.
+        fn new(n: usize, memory_bytes: usize) -> Self {
+            let spill = tempfile::tempdir().unwrap();
+            let runtime = RuntimeEnvBuilder::new()
+                .with_memory_pool(budget_pool(memory_bytes, true))
+                .with_disk_manager_builder(
+                    DiskManagerBuilder::default()
+                        .with_mode(DiskManagerMode::Directories(vec![spill.path().into()])),
+                )
+                .build_arc()
+                .unwrap();
+            let mut config = SessionConfig::new().with_batch_size(ROWS as usize);
+            config.options_mut().execution.sort_spill_reservation_bytes = 256 << 10;
+            let ctx = Arc::new(
+                TaskContext::default()
+                    .with_session_config(config)
+                    .with_runtime(runtime),
+            );
+            let schema: SchemaRef =
+                Arc::new(Schema::new(vec![Field::new("k", DataType::Int64, false)]));
+            let order = LexOrdering::new(vec![PhysicalSortExpr::new_default(
+                col("k", &schema).unwrap(),
+            )])
+            .unwrap();
+            let sorters = (0..n)
+                .map(|_| {
+                    let (tx, rx) = unbounded();
+                    let fed = Arc::new(Fed {
+                        schema: Arc::clone(&schema),
+                        rx: Mutex::new(Some(rx)),
+                    });
+                    let input = StreamingTableExec::try_new(
+                        Arc::clone(&schema),
+                        vec![fed as _],
+                        None,
+                        vec![],
+                        false,
+                        None,
+                    )
+                    .unwrap();
+                    let sort = SortExec::new(order.clone(), Arc::new(input));
+                    Sorter {
+                        tx: Some(tx),
+                        out: sort.execute(0, Arc::clone(&ctx)).unwrap(),
+                        fed: 0,
+                        rows: Vec::new(),
+                    }
+                })
+                .collect();
+            Self {
+                schema,
+                sorters,
+                _spill: spill,
+            }
+        }
+
+        /// Polls sort `i` until it waits on its input or has answered; a sort's own tasks, which
+        /// sort its runs, get their turns between polls.
+        async fn settle(&mut self, i: usize) -> DFResult<()> {
+            let s = &mut self.sorters[i];
+            for _ in 0..64 {
+                match futures::poll!(s.out.next()) {
+                    Poll::Ready(Some(b)) => {
+                        let b = b?;
+                        let k = b.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+                        s.rows.extend(k.values().iter());
+                    }
+                    Poll::Ready(None) => return Ok(()),
+                    Poll::Pending => tokio::task::yield_now().await,
+                }
+            }
+            Ok(())
+        }
+
+        /// Gives sort `i` its next batch, keys descending so that sorting has work to do.
+        async fn feed(&mut self, i: usize) -> DFResult<()> {
+            let s = &mut self.sorters[i];
+            let from = s.fed * ROWS;
+            s.fed += 1;
+            let keys = Int64Array::from_iter_values((from..from + ROWS).rev());
+            let b = RecordBatch::try_new(Arc::clone(&self.schema), vec![Arc::new(keys)]).unwrap();
+            s.tx.as_ref().unwrap().unbounded_send(Ok(b)).unwrap();
+            self.settle(i).await
+        }
+
+        /// Ends sort `i`'s input and reads all it answers.
+        async fn finish(&mut self, i: usize) -> DFResult<()> {
+            self.sorters[i].tx = None;
+            for _ in 0..10_000 {
+                self.settle(i).await?;
+                let s = &self.sorters[i];
+                if s.rows.len() as i64 == s.fed * ROWS {
+                    let want: Vec<i64> = (0..s.fed * ROWS).collect();
+                    assert_eq!(s.rows, want, "sort {i}");
+                    return Ok(());
+                }
+            }
+            panic!("sort {i} never answered all its rows");
+        }
+    }
+
+    /// Four sorts borrow what the others leave, as Q21's did at SF30 under 2 GiB, and the other
+    /// twelve start one at a time, each fed a batch in turn and spilling at what it may hold. Those
+    /// running take the one share the loans left free, and a sort that starts then holds nothing,
+    /// so it has nothing to spill to make room for its first batch: refused it, it refused its
+    /// statement, `Not enough memory to continue external sort`, most of the reserve free. A
+    /// sort that has just spilled holds nothing too. Every sort must answer, in order.
+    #[test]
+    fn a_sort_holding_nothing_gets_its_batch() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut s = Sorts::new(16, 16 << 20);
+            for _ in 0..200 {
+                for i in 0..4 {
+                    s.feed(i).await.unwrap();
+                }
+            }
+            for round in 0..240 {
+                for i in 4..(5 + round / 20).min(16) {
+                    s.feed(i).await.unwrap();
+                }
+            }
+            for i in 0..16 {
+                s.finish(i).await.unwrap();
+            }
+        });
     }
 }
