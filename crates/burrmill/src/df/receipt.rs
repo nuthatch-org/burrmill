@@ -23,8 +23,8 @@ use crate::error::{BurrmillError, Result};
 /// The format, which a release that changes how any field is made must bump.
 pub const FORMAT: &str = "burrmill-receipt/1";
 
-/// Kept with the `=55.2.0` pins in Cargo.toml; a unit test holds them together.
-const DATAFUSION: &str = "55.2.0";
+/// Kept with the `=55.3.0` pins in Cargo.toml; a unit test holds them together.
+const DATAFUSION: &str = "55.3.0";
 
 /// A receipt as [`Receipt::to_json`] writes it and [`Receipt::parse`] reads it back.
 #[derive(Debug, Clone, PartialEq, Eq)]
