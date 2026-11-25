@@ -150,7 +150,11 @@ fn an_arm_of_several_partitions_comes_between_its_neighbours() {
         assert_eq!(w.len(), 4002);
         assert_eq!(w[0], "first");
         assert_eq!(w[4001], "last");
-        assert!(w[1..4001].iter().all(|v| v.as_str().unwrap().starts_with('w')));
+        assert!(
+            w[1..4001]
+                .iter()
+                .all(|v| v.as_str().unwrap().starts_with('w'))
+        );
     }
 }
 
