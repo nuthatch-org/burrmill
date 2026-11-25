@@ -26,6 +26,10 @@ datafusion-cli is computed from the rounded figures.
 bundled DuckDB 1.5.4 that #346 measured took 17.0 s, 1.8x to 3.4x as long a query; that run was on
 another day, under a load it did not record.
 
+**Q17, the widest gap, is now 2.56x to 3.00x DuckDB 2.0.1 at SF10, from 4.96x to 5.63x**, measured after
+the tables below were: its subquery averages only the 2,040 parts the query keeps, not all 2M
+([below](#q17-only-the-parts-the-query-keeps-433)). The tables below are from before that change.
+
 **Against datafusion-cli it is faster on four at SF10** (7, 15, 18, 19) and within 1.5x on 13 of
 the 21 it answers. It is the same DataFusion underneath, so that gap is Burrmill's own. Where it
 goes is not measured yet; the candidates are the checked arithmetic, the exact sums and averages,
@@ -157,6 +161,68 @@ splits it, so the 16 parts are not what makes the scans parallel.
 | 20 | 276 | 570 | 2.07x | 537 | 1.06x | same |
 | 21 | 744 | refused | | 2,060 | | refused under 2 GiB with no spill directory |
 | 22 | 177 | 634 | 3.58x | 191 | 3.32x | same |
+
+## Q17: only the parts the query keeps (#433)
+
+Q17 had the widest ratio at SF10 in the table above (5.26x), and in a run of all 22 on 62ec1e8
+(load 26.8 at the start, 10:26:43) it was still the widest, 4.90x, with Q12 next at 4.77x.
+
+**The cause.** Decorrelating `l_quantity < (SELECT 0.2 * avg(l_quantity) ... WHERE l_partkey =
+p_partkey)` groups all of `lineitem` by `l_partkey`, and only then joins the averages to the
+outer query's parts. `EXPLAIN ANALYZE` at SF10 on 62ec1e8 (load 25.5): 59.97M rows into the final
+aggregate, 9.72 s of its CPU and 1.14 s of the partial one's, 2.00M averages out, and a semi join
+that built its table on those 2M (113.8 MB) to keep the 2,040 parts of `Brand#23` and `MED BOX`.
+The partial aggregate skipped aggregating 59.18M of the rows, since nearly every part is a group.
+
+**The A/B.** The same query written with the subquery's `lineitem` cut to those parts by hand,
+`WHERE l_partkey IN (SELECT p_partkey FROM part WHERE p_brand = 'Brand#23' AND p_container = 'MED
+BOX')`, gave the same answer as DuckDB 2.0.1 and took 2,097 ms against Q17's 3,282, best of 3 at a
+load of 26.2 (10:35:47); built only for this, not committed. In its `EXPLAIN ANALYZE` the aggregate
+saw 61.38K rows and took 1.6 ms. What was left was the two `lineitem` scans, each with a join's
+dynamic filter: 5.04 s and 5.80 s of row-filter CPU over 60M rows each.
+
+**The fix.** `JoinedGroups` (`crates/burrmill/src/df/joinedgroups.rs`) does that rewrite. It
+applies to a join on a column that an aggregate on one side groups by, where every row on the other
+side has a key that a filtered table scan holds. The aggregate's input becomes a semi join on that
+scan's keys. A group outside them meets no row of the other side, and the groups are split by the
+key, so no group that is kept changes. It applies only where the join drops the aggregate's
+unmatched rows, never with NULL equal to NULL, and only when the scan reads at most a quarter of
+what the aggregate's input does. In TPC-H, Q2, Q17 and Q20 take it, one more hash join each.
+
+That semi join is also collected when its keys read at most a sixteenth of what it filters
+(`buildside.rs`). Partitioned, the dynamic filter it pushes into the scan is a `CASE` over each
+row's repartition hash. In one `EXPLAIN ANALYZE` at SF10, built with only the semi join collected,
+the scan under the still-partitioned outer join took 3.19 s of row-filter CPU and the collected
+semi join's 0.32 s, over the same 60M rows. Collecting every join whose build side reads a sixteenth
+of its probe or less, tried and not committed, made Q17 faster again but Q18, Q19, Q20 and Q22
+slower, at loads of 11 to 13.
+
+`tests/df_joinedgroups.rs` catches the slow plan. With the rule off, the Q17-shape test fails: the
+average is computed for all 50 parts instead of the 10 the query keeps.
+
+**Before and after.** 62ec1e8 (before) and 9adc6d8 (after), alternating, three rounds each, best of
+5 per round, DuckDB 2.0.1 in the same process run before each. Every answer was the same as DuckDB's.
+The 1-minute load was 10.7 to 13.2 at SF10 (11:28:50 to 11:30:18) and 10.4 to 11.0 at SF1 (11:30:18
+to 11:30:34). The host was over 8 for most of the hour: a wait from 11:12 ended at 11:14:50 at
+7.5, and it was back over 9 within the first round.
+
+| SF | round | Q17 DuckDB ms, before / after | Q17 Burrmill before ms | Q17 Burrmill after ms | Q2 before / after ms | Q20 before / after ms |
+|---|---:|---:|---:|---:|---:|---:|
+| 10 | 1 | 276 / 276 | 1,553 | 827 | 245 / 242 | 490 / 504 |
+| 10 | 2 | 296 / 295 | 1,469 | 756 | 227 / 186 | 507 / 471 |
+| 10 | 3 | 290 / 283 | 1,523 | 838 | 244 / 198 | 498 / 488 |
+| 1 | 1 | 33 / 37 | 146 | 116 | 34 / 32 | 58 / 52 |
+| 1 | 2 | 39 / 32 | 147 | 118 | 37 / 30 | 59 / 51 |
+| 1 | 3 | 29 / 37 | 141 | 113 | 35 / 29 | 52 / 55 |
+
+Against the DuckDB run beside each, Q17 at SF10 went from 4.96x to 5.63x to 2.56x to 3.00x, and
+at SF1 from 3.77x to 4.86x to 3.05x to 3.69x. What is left at SF10 is the two `lineitem` scans'
+dynamic filters, the outer join's still partitioned.
+
+**Next widest.** A run of all 22 after the change (9adc6d8, best of 3, load 9.5 at 11:30:40 and
+16.7 at 11:32:32) had Q18 at 6.01x, Q12 at 5.84x, Q1 at 5.46x and Q17 at 3.05x. Q18 was at
+2.61x in the run of all 22 before the change, and the rule does not change its plan, so its 6.01x
+is put down to the load. Q12 was second-widest in both runs.
 
 ## Spilling: Q21 under 2 GiB (#383)
 
