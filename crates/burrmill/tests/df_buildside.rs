@@ -162,9 +162,16 @@ fn not_in_keeps_its_answer() {
     assert_eq!(one(&e, sql), want, "{sql}");
 }
 
+struct Q12 {
+    _tmp: tempfile::TempDir,
+    e: Engine,
+    lines: Vec<[i64; 5]>,
+    ords: Vec<(i64, i64)>,
+}
+
 /// A table of `lines` larger on disk than `ords`, whose filter keeps a few of its rows: Q12's
 /// shape (#433). `k` is an order key, `mode` one of seven, `a`, `b`, `c` dates as day numbers.
-fn q12_fixture() -> (tempfile::TempDir, Engine, Vec<[i64; 5]>, Vec<(i64, i64)>) {
+fn q12_fixture() -> Q12 {
     let tmp = tempfile::tempdir().unwrap();
     let segs = tmp.path().join("segments");
     std::fs::create_dir(&segs).unwrap();
@@ -238,7 +245,12 @@ fn q12_fixture() -> (tempfile::TempDir, Engine, Vec<[i64; 5]>, Vec<(i64, i64)>) 
     let e = Engine::open_segments(&segs).unwrap();
     // Planned across threads, as a large statement is, so that a join can be partitioned.
     e.set_small_statement_bytes(0);
-    (tmp, e, lines, ords)
+    Q12 {
+        _tmp: tmp,
+        e,
+        lines,
+        ords,
+    }
 }
 
 /// Q12 at SF10 filters `lineitem` to 310.8K of its 60M rows and joined `orders` to them by building
@@ -246,7 +258,12 @@ fn q12_fixture() -> (tempfile::TempDir, Engine, Vec<[i64; 5]>, Vec<(i64, i64)>) 
 /// makes its side the build side, collected; one that keeps most, or might, does not.
 #[test]
 fn a_side_whose_filter_keeps_few_rows_is_built_on_and_collected() {
-    let (_tmp, e, lines, ords) = q12_fixture();
+    let Q12 {
+        _tmp,
+        e,
+        lines,
+        ords,
+    } = q12_fixture();
     let filter = "l.mode IN ('MAIL', 'SHIP') AND l.b < l.c AND l.a < l.b \
                   AND l.c >= 1000 AND l.c < 1100";
     let kept = |l: &[i64; 5]| {
