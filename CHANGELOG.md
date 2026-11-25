@@ -36,6 +36,10 @@ Engine (`burrmill`, feature `datafusion`)
 - TPC-H Q17 at SF10 is within 1.5x datafusion-cli at 8 threads (0.98x to 1.30x over five rounds),
   with its answer DuckDB's. No code changed since #399 fixed the cause, which
   `docs/bench/tpch.md` now names (#381).
+- TPC-H Q2 at SF10 is within 1.5x datafusion-cli at 8 threads once the load allows: 1.31x to 1.39x
+  over five rounds at a 1-minute load of 7.6 to 8.8, and 1.45x to 1.73x at 11 to 15. Its answer is
+  DuckDB 2.0.1's, and no aggregate in its plan is ordered. No code changed: #399's
+  `LiteralGroupKeys` fixed it with Q17 (#382).
 
 CLI (`burrmill`)
 
@@ -48,6 +52,15 @@ CLI (`burrmill`)
   exits 1 if any failed. Line editing is rustyline, pure Rust; the wasm build does not reach it.
   `burrmill` alone used to print the usage and exit 2; `burrmill --help` still does. `q` and
   `verify` are unchanged (#390).
+
+Bench (`burrmill-bench`)
+
+- `DUCKDB=<path to the duckdb CLI>` makes `tpch` and `csv-ingest` compare against that CLI rather
+  than the bundled DuckDB (which reports v1.5.4): its answers come back through a Parquet file it
+  writes, its times from its `.timer`, its peak RSS from `wait4`, and the version it reports is
+  printed. `docs/bench/tpch.md`, `docs/bench/csv-ingest.md` and the README's TPC-H and CSV figures
+  are re-measured against DuckDB 2.0.1 on CPU, with Burrmill and datafusion-cli in the same window;
+  the README says what Sirius is and that no Sirius numbers were measured (#414).
 
 Build and CI
 
