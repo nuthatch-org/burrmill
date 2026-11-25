@@ -4,8 +4,9 @@
 //! With `pushdown_filters` the reader evaluates each conjunct of a scan's predicate in a pass of its
 //! own, over the rows the ones before it kept, and decodes the scan's other columns only for the rows
 //! all of them keep. TPC-H Q6 is five conjuncts on three columns over unclustered rows, with one other
-//! column to read: at SF10 its `lineitem` scan took 3.27 s of CPU, 0.19 s of it evaluating the
-//! conjuncts, where reading all four columns took 0.96 s and the `FilterExec` above 0.89 s (#433).
+//! column to read: at SF10 its `lineitem` scan took 3.27 s of CPU, 186.5 ms of it evaluating the
+//! conjuncts, where reading all four columns took 955.62 ms and the `FilterExec` above 886.97 ms
+//! (#433).
 //! Its 1.9% of rows are scattered through every page, so the reader saved nothing it did not then
 //! spend on the passes.
 //!

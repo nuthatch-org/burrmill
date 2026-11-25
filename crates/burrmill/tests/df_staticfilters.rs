@@ -1,7 +1,7 @@
 //! A Parquet scan evaluates its `WHERE` in the reader only where late materialization can spare
 //! something (`df/staticfilters.rs`). TPC-H Q6's five range conjuncts, over unclustered rows and
 //! with one fixed-width column besides, cost its `lineitem` scan 3.27 s of CPU at SF10 in the
-//! reader, against 1.85 s read whole and filtered above (#433).
+//! reader, against 1.84 s read whole and filtered above (#433).
 
 use std::sync::Arc;
 
