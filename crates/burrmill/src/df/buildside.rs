@@ -16,10 +16,15 @@
 //! ([`kept`]): a tenth for an equality, a third for a range on a column or a comparison of two, the
 //! two bounds of one column's range counted once. A predicate it cannot read keeps everything, so a
 //! side is never taken to be smaller than it reads on a guess it did not make. The guess overrides
-//! the bytes read only where it is decisive ([`builds_larger`]); Q12's is 36 times. Taking every filter
-//! to keep DataFusion's default 20% was tried and not kept: it built Q13's join on 15M orders under
-//! a `NOT LIKE` that keeps nearly all of them, rather than on 1.5M customers, and Q7's on the 18M
-//! `lineitem` rows of a two-year range rather than on 15M orders.
+//! the bytes read only where it is decisive ([`builds_larger`]); Q12's lineitem is guessed at a
+//! 36th of its orders at SF10. Taking every filter to keep DataFusion's default 20% was tried and
+//! not kept: it built Q13's join on the 15M orders of a `NOT LIKE` rather than on 1.5M customers,
+//! and Q7's on two years of `lineitem` rather than on the orders.
+//!
+//! Where the guess overrode the bytes, an inner join also collects its build side, being guessed
+//! small. Partitioned, its dynamic filter on the probe's scan is a `CASE` over each row's
+//! repartition hash: in Q12 at SF10 2.37 s of the `orders` scan's CPU against 0.30 s collected,
+//! one `EXPLAIN ANALYZE` each at a 1-minute load of 50.
 
 use std::sync::Arc;
 
