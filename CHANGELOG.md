@@ -8,6 +8,17 @@ version number promises.
 A release that changes any receipt in `corpus/receipts/receipts.jsonl` says which, and why, in its
 entry: a receipt someone kept stops verifying on that release (`tests/receipt_corpus.rs`).
 
+## Unreleased
+
+Engine (`burrmill`, feature `datafusion`)
+
+- A hash join builds on the side its filter plainly cuts below the other, where it built on the
+  side that reads fewer bytes (#433). Statistics being off, a filter's share is guessed from its
+  predicate, a tenth for an equality and a third for a range or a comparison of two columns, and
+  decides only when it leaves one side under an eighth of the other; a join it decides that way is
+  also collected, if inner. TPC-H Q12 at SF10 built its table on all 15M orders, 930 MB, and now on
+  the 310.8K `lineitem` rows it keeps, 15.6 MB, and no other TPC-H plan changes.
+
 ## 0.4.0 - 2026-11-25
 
 Prebuilt `burrmill` binaries for five targets, as a GitHub Release. What changed since 0.3.0:

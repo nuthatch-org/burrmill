@@ -8,13 +8,37 @@
 //! `swap_inputs`, which `JoinSelection` uses, so no answer changes; it runs straight after that
 //! rule, before repartitions and dynamic filters are placed on the join's children. Semi and anti
 //! joins hold their build side the same way, so they swap too; a null-aware anti join cannot.
+//!
+//! A filter keeps part of what its scan reads, and the build side holds only what it keeps: Q12
+//! filters `lineitem` to 310.8K of its 60M rows at SF10 and joins `orders` to them, and on bytes
+//! read alone the join built on all 15M orders, a 930 MB table, where DuckDB builds on the lineitem
+//! rows (#433). Without statistics a filter's share is guessed from its predicate as System R did
+//! ([`kept`]): a tenth for an equality, a third for a range on a column or a comparison of two, the
+//! two bounds of one column's range counted once. A predicate it cannot read keeps everything, so a
+//! side is never taken to be smaller than it reads on a guess it did not make. The guess overrides
+//! the bytes read only where it is decisive ([`builds_larger`]); Q12's lineitem is guessed at a
+//! 36th of its orders at SF10. Taking every filter to keep DataFusion's default 20% was tried and
+//! not kept: it built Q13's join on the 15M orders of a `NOT LIKE` rather than on 1.5M customers,
+//! and Q7's on two years of `lineitem` rather than on the orders.
+//!
+//! Where the guess overrode the bytes, an inner join also collects its build side, being guessed
+//! small. Partitioned, its dynamic filter on the probe's scan is a `CASE` over each row's
+//! repartition hash: in Q12 at SF10 2.37 s of the `orders` scan's CPU against 0.30 s collected,
+//! one `EXPLAIN ANALYZE` each at a 1-minute load of 50.
 
 use std::sync::Arc;
 
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{JoinType, Result};
+use datafusion_expr::Operator;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::expressions::{
+    BinaryExpr, CastExpr, Column, InListExpr, IsNotNullExpr, IsNullExpr, LikeExpr, Literal,
+    NotExpr, TryCastExpr,
+};
 use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_plan::filter::FilterExec;
 use datafusion_physical_plan::joins::{HashJoinExec, PartitionMode};
 use datafusion_session::PhysicalOptimizerRule;
 
@@ -43,6 +67,149 @@ fn collect_keys(j: &HashJoinExec) -> Result<Option<Arc<dyn ExecutionPlan>>> {
                 .build()?,
         ))),
         _ => Ok(None),
+    }
+}
+
+/// How many times smaller a side's guessed share must leave it for the guess to decide.
+const DECISIVE: f64 = 8.0;
+
+/// Whether `build` is the larger side, and whether a guess said so against the bytes read: by the
+/// bytes each reads, unless [`bytes_kept`] guesses one under an eighth of the other. One constant
+/// can be five times off, `o_orderstatus = 'F'` keeping half the orders and not a tenth; with the
+/// guess deciding at any margin, Q10 built on the 15M `lineitem` rows of `l_returnflag = 'R'`, a
+/// quarter of them, rather than on 570K joined orders.
+fn builds_larger(build: &Arc<dyn ExecutionPlan>, probe: &Arc<dyn ExecutionPlan>) -> (bool, bool) {
+    let (Some(b), Some(p)) = (bytes_read(build), bytes_read(probe)) else {
+        return (false, false);
+    };
+    let by_bytes = b > p;
+    let (Some(kb), Some(kp)) = (bytes_kept(build), bytes_kept(probe)) else {
+        return (by_bytes, false);
+    };
+    let (kb, kp) = (kb as f64, kp as f64);
+    let larger = if kp >= DECISIVE * kb {
+        false
+    } else if kb >= DECISIVE * kp {
+        true
+    } else {
+        by_bytes
+    };
+    (larger, larger != by_bytes)
+}
+
+/// The bytes `p` reads, [`bytes_read`], cut by each filter between it and its scans to the share
+/// [`kept`] guesses that filter keeps; `None` if a scan cannot be measured.
+fn bytes_kept(p: &Arc<dyn ExecutionPlan>) -> Option<u64> {
+    if let Some(f) = p.downcast_ref::<FilterExec>() {
+        return bytes_kept(f.input()).map(|b| (b as f64 * kept(f.predicate())) as u64);
+    }
+    if let Some(definition) = super::sharing::definition(p) {
+        return bytes_kept(&definition);
+    }
+    let children = p.children();
+    if children.is_empty() {
+        return bytes_read(p);
+    }
+    children.into_iter().map(bytes_kept).sum()
+}
+
+/// The share of rows a predicate is guessed to keep, 0 to 1: the product of its conjuncts', where
+/// the range comparisons of one column with constants count as one range and a conjunct it cannot
+/// read keeps everything.
+pub(super) fn kept(predicate: &Arc<dyn PhysicalExpr>) -> f64 {
+    let mut conjuncts = Vec::new();
+    split_and(predicate, &mut conjuncts);
+    let mut ranged: Vec<&Column> = Vec::new();
+    let mut share = 1.0;
+    for c in conjuncts {
+        if let Some(col) = ranged_column(c) {
+            if ranged.contains(&col) {
+                continue;
+            }
+            ranged.push(col);
+        }
+        share *= kept_one(c).unwrap_or(1.0);
+    }
+    share
+}
+
+fn split_and<'a>(e: &'a Arc<dyn PhysicalExpr>, out: &mut Vec<&'a Arc<dyn PhysicalExpr>>) {
+    match e.as_ref().downcast_ref::<BinaryExpr>() {
+        Some(b) if *b.op() == Operator::And => {
+            split_and(b.left(), out);
+            split_and(b.right(), out);
+        }
+        _ => out.push(e),
+    }
+}
+
+/// The column a range comparison bounds by a constant: `col < 3`, `CAST(col AS t) >= '1994-01-01'`.
+fn ranged_column(e: &Arc<dyn PhysicalExpr>) -> Option<&Column> {
+    let b = e.as_ref().downcast_ref::<BinaryExpr>()?;
+    if !matches!(
+        b.op(),
+        Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq
+    ) {
+        return None;
+    }
+    match (column(b.left()), column(b.right())) {
+        (Some(c), None) if constant(b.right()) => Some(c),
+        (None, Some(c)) if constant(b.left()) => Some(c),
+        _ => None,
+    }
+}
+
+fn column(e: &Arc<dyn PhysicalExpr>) -> Option<&Column> {
+    if let Some(c) = e.as_ref().downcast_ref::<CastExpr>() {
+        return column(c.expr());
+    }
+    if let Some(c) = e.as_ref().downcast_ref::<TryCastExpr>() {
+        return column(c.expr());
+    }
+    e.as_ref().downcast_ref::<Column>()
+}
+
+fn constant(e: &Arc<dyn PhysicalExpr>) -> bool {
+    if let Some(c) = e.as_ref().downcast_ref::<CastExpr>() {
+        return constant(c.expr());
+    }
+    e.as_ref().is::<Literal>()
+}
+
+const EQUAL: f64 = 0.1;
+const RANGE: f64 = 1.0 / 3.0;
+
+/// The share one conjunct is guessed to keep, or `None` where it cannot say.
+fn kept_one(e: &Arc<dyn PhysicalExpr>) -> Option<f64> {
+    if let Some(b) = e.as_ref().downcast_ref::<BinaryExpr>() {
+        return match b.op() {
+            Operator::And => Some(kept(e)),
+            Operator::Or => Some((kept(b.left()) + kept(b.right())).min(1.0)),
+            Operator::Eq => Some(EQUAL),
+            Operator::NotEq => Some(1.0 - EQUAL),
+            Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq => Some(RANGE),
+            _ => None,
+        };
+    }
+    if let Some(l) = e.as_ref().downcast_ref::<LikeExpr>() {
+        return Some(if l.negated() { 1.0 - EQUAL } else { EQUAL });
+    }
+    if let Some(i) = e.as_ref().downcast_ref::<InListExpr>() {
+        let any = (EQUAL * i.list().len() as f64).min(1.0);
+        return Some(if i.negated() { 1.0 - any } else { any });
+    }
+    if e.as_ref().is::<IsNullExpr>() {
+        return Some(EQUAL);
+    }
+    if e.as_ref().is::<IsNotNullExpr>() {
+        return Some(1.0 - EQUAL);
+    }
+    // Only a single comparison is negated: the share of `NOT (a AND b)` is not one less a guess
+    // that may be too large.
+    let n = e.as_ref().downcast_ref::<NotExpr>()?;
+    match n.arg().as_ref().downcast_ref::<BinaryExpr>() {
+        Some(b) if matches!(b.op(), Operator::And | Operator::Or) => None,
+        _ => kept_one(n.arg()).map(|s| 1.0 - s),
     }
 }
 
@@ -86,11 +253,21 @@ impl PhysicalOptimizerRule for BuildOnSmaller {
             if !swappable {
                 return Ok(Transformed::no(p));
             }
-            match (bytes_read(j.left()), bytes_read(j.right())) {
-                (Some(build), Some(probe)) if build > probe => {
-                    Ok(Transformed::yes(j.swap_inputs(*j.partition_mode())?))
+            let (swap, guessed) = builds_larger(j.left(), j.right());
+            let mode = match j.partition_mode() {
+                PartitionMode::Partitioned if guessed && *j.join_type() == JoinType::Inner => {
+                    PartitionMode::CollectLeft
                 }
-                _ => Ok(Transformed::no(p)),
+                m => *m,
+            };
+            if swap {
+                Ok(Transformed::yes(j.swap_inputs(mode)?))
+            } else if mode != *j.partition_mode() {
+                Ok(Transformed::yes(Arc::new(
+                    j.builder().with_partition_mode(mode).build()?,
+                )))
+            } else {
+                Ok(Transformed::no(p))
             }
         })
         .map(|t| t.data)

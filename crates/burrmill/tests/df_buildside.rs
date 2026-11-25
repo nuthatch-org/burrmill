@@ -161,3 +161,159 @@ fn not_in_keeps_its_answer() {
         "SELECT count(*), coalesce(sum(b.v), 0) FROM big b WHERE b.k NOT IN (SELECT k FROM small)";
     assert_eq!(one(&e, sql), want, "{sql}");
 }
+
+struct Q12 {
+    _tmp: tempfile::TempDir,
+    e: Engine,
+    lines: Vec<[i64; 5]>,
+    ords: Vec<(i64, i64)>,
+}
+
+/// A table of `lines` larger on disk than `ords`, whose filter keeps a few of its rows: Q12's
+/// shape (#433). `k` is an order key, `mode` one of seven, `a`, `b`, `c` dates as day numbers.
+fn q12_fixture() -> Q12 {
+    let tmp = tempfile::tempdir().unwrap();
+    let segs = tmp.path().join("segments");
+    std::fs::create_dir(&segs).unwrap();
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = |m: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % m) as i64
+    };
+    let orders = 10_000i64;
+    let ords: Vec<(i64, i64)> = (0..orders).map(|k| (k, next(1 << 40))).collect();
+    let lines: Vec<[i64; 5]> = (0..4 * orders)
+        .map(|_| {
+            let a = next(2_500);
+            [next(orders as u64), next(7), a, a + next(30), a + next(60)]
+        })
+        .collect();
+    let modes = ["AIR", "FOB", "MAIL", "RAIL", "REG AIR", "SHIP", "TRUCK"];
+    let int = |name: &str| Field::new(name, DataType::Int64, false);
+    let put = |name: &str, fields: Vec<Field>, arrays: Vec<ArrayRef>| {
+        let schema = Arc::new(Schema::new(fields));
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let f = std::fs::File::create(segs.join(format!("{name}-{:064x}.parquet", 1))).unwrap();
+        let mut w = parquet::arrow::ArrowWriter::try_new(f, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+    };
+    let col = |i: usize| -> ArrayRef {
+        Arc::new(Int64Array::from_iter_values(lines.iter().map(|l| l[i])))
+    };
+    put(
+        "lines",
+        vec![
+            int("k"),
+            Field::new("mode", DataType::Utf8, false),
+            int("a"),
+            int("b"),
+            int("c"),
+        ],
+        vec![
+            col(0),
+            Arc::new(StringArray::from_iter_values(
+                lines.iter().map(|l| modes[l[1] as usize]),
+            )),
+            col(2),
+            col(3),
+            col(4),
+        ],
+    );
+    put(
+        "ords",
+        vec![int("k"), int("v")],
+        vec![
+            Arc::new(Int64Array::from_iter_values(ords.iter().map(|o| o.0))),
+            Arc::new(Int64Array::from_iter_values(ords.iter().map(|o| o.1))),
+        ],
+    );
+    let size = |name: &str| {
+        std::fs::metadata(segs.join(format!("{name}-{:064x}.parquet", 1)))
+            .unwrap()
+            .len()
+    };
+    // On the bytes read alone the join would build on `ords`.
+    assert!(
+        size("lines") > size("ords"),
+        "{} {}",
+        size("lines"),
+        size("ords")
+    );
+    let e = Engine::open_segments(&segs).unwrap();
+    // Planned across threads, as a large statement is, so that a join can be partitioned.
+    e.set_small_statement_bytes(0);
+    Q12 {
+        _tmp: tmp,
+        e,
+        lines,
+        ords,
+    }
+}
+
+/// Q12 at SF10 filters `lineitem` to 310.8K of its 60M rows and joined `orders` to them by building
+/// on all 15M orders, the side that reads fewer bytes. A filter that plainly keeps a few rows now
+/// makes its side the build side, collected; one that keeps most, or might, does not.
+#[test]
+fn a_side_whose_filter_keeps_few_rows_is_built_on_and_collected() {
+    let Q12 {
+        _tmp,
+        e,
+        lines,
+        ords,
+    } = q12_fixture();
+    let filter = "l.mode IN ('MAIL', 'SHIP') AND l.b < l.c AND l.a < l.b \
+                  AND l.c >= 1000 AND l.c < 1100";
+    let kept = |l: &[i64; 5]| {
+        (l[1] == 2 || l[1] == 5) && l[3] < l[4] && l[2] < l[3] && (1000..1100).contains(&l[4])
+    };
+    for (from, on) in [
+        ("lines l JOIN ords o", "l.k = o.k"),
+        ("ords o JOIN lines l", "o.k = l.k"),
+    ] {
+        let sql = format!(
+            "SELECT count(*), coalesce(sum(o.v % 1000), 0) FROM {from} ON {on} WHERE {filter}"
+        );
+        assert_eq!(build_side(&e, &sql), "lines", "{sql}");
+        assert!(
+            plan(&e, &sql).contains("HashJoinExec: mode=CollectLeft"),
+            "{sql}"
+        );
+        let rows: Vec<i64> = lines
+            .iter()
+            .filter(|l| kept(l))
+            .map(|l| ords[l[0] as usize].1 % 1000)
+            .collect();
+        assert!(
+            !rows.is_empty() && rows.len() < lines.len() / 100,
+            "{}",
+            rows.len()
+        );
+        let want = (rows.len().to_string(), rows.iter().sum::<i64>().to_string());
+        assert_eq!(one(&e, &sql), want, "{sql}");
+    }
+    // A filter that keeps most rows, an equality that might, or one it cannot read, leaves the
+    // build on the smaller read.
+    for weak in [
+        "l.mode NOT LIKE 'R%'",
+        "l.mode = 'MAIL'",
+        "starts_with(l.mode, 'M')",
+    ] {
+        let sql = format!("SELECT count(*), 0 FROM lines l JOIN ords o ON l.k = o.k WHERE {weak}");
+        assert_eq!(build_side(&e, &sql), "ords", "{sql}");
+        assert!(!plan(&e, &sql).contains("CollectLeft"), "{sql}");
+    }
+}
+
+fn plan(e: &Engine, sql: &str) -> String {
+    let mut out = String::new();
+    for b in e.sql(&format!("EXPLAIN {sql}")).unwrap() {
+        let plans = b.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        for i in 0..plans.len() {
+            out.push_str(plans.value(i));
+        }
+    }
+    out
+}

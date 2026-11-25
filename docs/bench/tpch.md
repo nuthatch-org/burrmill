@@ -224,6 +224,81 @@ dynamic filters, the outer join's still partitioned.
 2.61x in the run of all 22 before the change, and the rule does not change its plan, so its 6.01x
 is put down to the load. Q12 was second-widest in both runs.
 
+## Q12: building on the lineitem rows its filter keeps (#433)
+
+**The cause.** A hash join built on the side whose files hold fewer bytes, whatever its filter kept
+(`BuildOnSmaller`, `crates/burrmill/src/df/buildside.rs`). Q12's `lineitem` files hold 2.55 GB at
+SF10 and `orders`' 678 MB, so the join built on every order. Its filter keeps 310.8K of
+`lineitem`'s 60M rows. On c0ff95b at SF10 the `EXPLAIN ANALYZE` showed a partitioned join with
+`build_input_rows=15.00 M`, `build_mem_used=930.2 MB` and `build_time=1.34s`, probed by those
+310.8K rows. The pool peaked at 931 MiB. The dynamic filter from all 15M orders cut nothing from
+`lineitem` and cost its scan 768 ms of row-filter CPU. DuckDB 2.0.1 builds on the `lineitem` rows.
+
+**The fix.** A filter's share is now guessed from its predicate, as System R did: a tenth for an
+equality, a third for a range or a comparison of two columns, the two bounds of one column counted
+once. A predicate it cannot read keeps everything. The guess decides only when it puts one side
+under an eighth of the other. Q12's `lineitem` is guessed at a 36th of `orders` at SF10. A join the
+guess decided is also collected, if inner. Partitioned, its dynamic filter on `orders` was a `CASE`
+over each row's repartition hash: 2.37 s of that scan's CPU against 0.30 s collected (one `EXPLAIN
+ANALYZE` each, load 50). After the fix, Q12 at SF10 builds on 310.8K rows, 15.6 MB, the `orders`
+scan gives 291.9K of 15M rows, and the pool peaks at 15 MiB (`EXPLAIN ANALYZE` on 9eaaa03, load
+28.3).
+
+**What was tried and not kept.** Two rules were tried before this one. Taking every filter to keep
+DataFusion's default 20% changed the plans of Q5, 7, 10, 12, 13 and 21. Q13 built on the 15M
+orders of a `NOT LIKE` rather than on 1.5M customers, and Q7 built on two years of `lineitem`.
+Letting the guess decide at any margin built Q10 on the `lineitem` rows of `l_returnflag = 'R'`
+rather than on the joined orders. With the rule kept, the `EXPLAIN` of all 22 before and after
+differs in Q12 alone, at SF1 and at SF10. `a_side_whose_filter_keeps_few_rows_is_built_on_and_collected`
+(`crates/burrmill/tests/df_buildside.rs`) fails if the join goes back to building on the side that
+reads fewer bytes.
+
+**Measured** 2026-11-25 on 9eaaa03 (9e98fab only adds the changelog) against c0ff95b, on the ThinkPad as above, 8 threads, 2 GiB, no
+spill directory. There were three rounds at each scale factor, alternating before and after. Each
+run is the best of 5 for Burrmill and for the DuckDB 2.0.1 CLI, in the same process, so both
+engines ran in the same window. The load was over 8 for 20 minutes before this, up to 139; it fell
+to 7.98 at 16:29:33 and rose again while these ran. Every answer was the same as DuckDB's.
+
+| SF | round | 1-minute load, start / end | DuckDB 2.0.1 ms | before ms | ratio | DuckDB 2.0.1 ms | after ms | ratio | Burrmill peak RSS MiB, before / after |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| 10 | 1 | 8.66 / 12.92 | 211 | 970 | 4.60x | 272 | 904 | 3.32x | 1,675 / 407 |
+| 10 | 2 | 12.92 / 13.82 | 221 | 1,318 | 5.96x | 209 | 654 | 3.13x | 1,678 / 424 |
+| 10 | 3 | 13.82 / 13.67 | 168 | 938 | 5.58x | 180 | 654 | 3.63x | 1,696 / 413 |
+| 1 | 1 | 13.67 / 13.67 | 23 | 85 | 3.69x | 22 | 62 | 2.82x | 510 / 378 |
+| 1 | 2 | 13.67 / 14.34 | 22 | 94 | 4.26x | 23 | 66 | 2.86x | 520 / 370 |
+| 1 | 3 | 14.34 / 14.34 | 24 | 84 | 3.49x | 23 | 58 | 2.51x | 506 / 375 |
+
+Q12 at SF10 went from 4.60x–5.96x DuckDB 2.0.1 to 3.13x–3.63x, and at SF1 from 3.49x–4.26x to
+2.51x–2.86x. What is left is in the scans. In that `EXPLAIN ANALYZE` at load 28.3, the
+`lineitem` scan, filtering all 60M rows, took 12.29 s of CPU, 2.25 s of it the row filter. The
+`orders` scan took 2.01 s. The join holds a 15.6 MB build. That load inflates CPU times, so these
+are not compared with the figures above.
+
+**All 22 after the fix**, at SF10 on 9eaaa03, best of 3, DuckDB 2.0.1 in the same process. The load
+was 17.76 at the start (16:30:42) and 17.83 at the end (16:32:33). All 21 answers given were the same
+as DuckDB's, and Q21 was refused as above. The widest ratios were Q17 at 5.33x (this tree does not
+have #438), Q4 at 4.46x, Q11 and Q22 at 3.92x, Q18 at 3.78x, and Q6 at 3.47x. Q12 was at 3.19x. At
+SF1, one run each at a load of 22.4, all 22 answers were the same as DuckDB's.
+
+**Again on main with #438**, the merge 6e70f64 against main at 6e79d8d. #438's `collect_keys` stands
+beside this rule. The `EXPLAIN` of all 22 differs in Q12 alone, at SF1 and at SF10, and all 22
+answers are the same as DuckDB 2.0.1's at SF1; at SF10 21 are, Q21 being refused as above. The
+rounds are as before, three of them alternating, each the best of 5, DuckDB 2.0.1 in the same
+process:
+
+| SF | round | 1-minute load, start / end | DuckDB 2.0.1 ms | main ms | ratio | DuckDB 2.0.1 ms | merge ms | ratio | Burrmill peak RSS MiB, main / merge |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| 10 | 1 | 10.01 / 9.77 | 158 | 715 | 4.52x | 167 | 492 | 2.95x | 1,717 / 416 |
+| 10 | 2 | 9.77 / 9.65 | 149 | 704 | 4.72x | 160 | 463 | 2.90x | 1,716 / 435 |
+| 10 | 3 | 9.65 / 9.32 | 165 | 777 | 4.71x | 153 | 468 | 3.06x | 1,714 / 433 |
+| 1 | 1 | 8.57 / 7.96 | 21 | 78 | 3.71x | 24 | 57 | 2.39x | 515 / 367 |
+| 1 | 2 | 7.96 / 7.96 | 22 | 75 | 3.40x | 22 | 57 | 2.59x | 525 / 372 |
+| 1 | 3 | 7.96 / 7.96 | 22 | 72 | 3.27x | 21 | 55 | 2.61x | 506 / 372 |
+
+The 22 at SF10 on the merge, best of 3, DuckDB 2.0.1 in the same process. The load was 7.96 at the
+start (17:30:02) and 9.74 at the end (17:31:16). The widest ratios were Q4 at 3.94x, Q6 at 3.74x,
+Q18 at 3.66x, Q22 at 3.37x and Q12 at 3.29x. Q17 was at 2.65x.
+
 ## Spilling: Q21 under 2 GiB (#383)
 
 Q21's `EXISTS` and `NOT EXISTS` are each a partitioned hash join that builds on all of `lineitem`.
