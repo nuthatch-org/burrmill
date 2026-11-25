@@ -85,7 +85,7 @@ is pinned exactly and its types are in the API (`register_scalar_udf`), so movin
 bump. A receipt names the version that made it, so it verifies on that release only; CHANGELOG
 says when a release also moves an answer in `corpus/receipts`. The minimum
 Rust is `rust-version` in `Cargo.toml`, 1.95 today; raising it is a minor bump too. The Parquet source
-is DataFusion's with one change, published as `burrmill-parquet-source` (`vendor/README.md`); nothing
+is DataFusion's with one change, vendored as `burrmill-parquet-source` (`vendor/README.md`); nothing
 needs a `[patch]` to get it.
 
 ## What it is

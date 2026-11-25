@@ -3,13 +3,13 @@
 ## burrmill-parquet-source 55.2.0
 
 DataFusion's `datafusion-datasource-parquet` 55.2.0 from crates.io, unchanged except for the
-per-file metrics in `src/opener/mod.rs` and one field in `src/source.rs`. Published under its own
+per-file metrics in `src/opener/mod.rs` and one field in `src/source.rs`. It has its own package
 name, and `burrmill` takes it as `datafusion-datasource-parquet` by renaming the dependency, so
-nuthatch and crates.io consumers get the change without a `[patch]` of their own. Nothing else in
+nuthatch gets the change without a `[patch]` of its own. Nothing else in
 DataFusion depends on the crate, so no second copy of its types enters burrmill's graph; the bench's
 stock arm, which pulls the umbrella `datafusion`, gets the upstream crate, as a control should.
 Package name, description, repository and lib name changed, upstream's benches dropped. A
-DataFusion bump must re-apply the change to the new release and publish it before `burrmill`, or
+DataFusion bump must re-apply the change to the new release, or
 drop this copy if upstream has an equivalent.
 
 Upstream, `ParquetMorselizer::prepare_open_file` registers a fresh `ParquetFileMetrics`, a
@@ -40,7 +40,7 @@ partition's, not the last file's.
 DataFusion's `datafusion-expr` 55.2.0 from crates.io, unchanged except for `src/expr_schema.rs`.
 Every DataFusion crate depends on it, so it cannot be renamed like the parquet source and is taken
 by a `[patch.crates-io]` in the workspace manifest instead. That reaches this workspace only: nuthatch
-and crates.io consumers get upstream's crate unless they carry the same patch. The bench's stock DataFusion arm
+gets upstream's crate unless it carries the same patch. The bench's stock DataFusion arm
 gets the change too. Drop this copy when
 upstream has the change, or re-apply it to the new release on a DataFusion bump.
 
