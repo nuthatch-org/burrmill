@@ -17,7 +17,7 @@
   under the License.
 -->
 
-> **This is not an Apache DataFusion release.** It is `datafusion-datasource-parquet` 55.2.0,
+> **This is not an Apache DataFusion release.** It is `datafusion-datasource-parquet` 55.3.0,
 > modified for [burrmill](https://github.com/nuthatch-org/burrmill): a scan registers its metrics
 > once per partition rather than once per file. The change is described in burrmill's
 > `vendor/README.md`. Use the upstream crate unless you are burrmill.
