@@ -119,6 +119,11 @@ fn q17_shape_averages_only_the_joined_parts() {
     let plan = analyzed(&e, sql);
     // The 10 parts the outer query keeps, not all 50.
     assert_eq!(groups_out(&plan, "checked_avg"), vec![10], "{plan}");
+    // Collected on the keys, so the scan's dynamic filter does not hash every row to a partition.
+    assert!(
+        plan.contains("mode=CollectLeft, join_type=RightSemi, on=[(__joined_group_key@0"),
+        "{plan}"
+    );
     // q < avg / 5, exactly: 5 q n < sum.
     let mut want = 0i64;
     for k in (0..KEYS).filter(|&k| KEPT(k)) {

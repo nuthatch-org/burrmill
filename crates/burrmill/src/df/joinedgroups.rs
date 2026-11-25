@@ -34,7 +34,7 @@ use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 
 /// The alias of an added semi join's keys, and its mark.
 const KEYS: &str = "__joined_groups";
-const KEY: &str = "__joined_group_key";
+pub(super) const KEY: &str = "__joined_group_key";
 
 #[derive(Debug, Default)]
 pub struct JoinedGroups;
