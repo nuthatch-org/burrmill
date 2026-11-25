@@ -286,7 +286,12 @@ fn least_integer_modulo_minus_one_refuses() {
     assert_eq!(one(&e, "SELECT v % -2 FROM t WHERE v > 0"), "1");
     assert_eq!(one(&e, "SELECT v % 4 FROM t WHERE v < 0"), "0");
     assert_eq!(one(&e, "SELECT CAST(-2147483647 AS INTEGER) % -1"), "0");
-    assert_eq!(one(&e, "SELECT v % 0 FROM t WHERE v > 0"), "NULL");
+    // DuckDB 2.0.1 raises (#430).
+    let m = e
+        .sql("SELECT v % 0 FROM t WHERE v > 0")
+        .unwrap_err()
+        .to_string();
+    assert!(m.contains("Division by zero"), "{m}");
     // #50: HUGEINT is DECIMAL(38,0), so its least value refuses at the cast (#42), not at the `%`.
     let m = refused(
         &e,

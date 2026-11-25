@@ -25,6 +25,7 @@ mod heldinput;
 pub use textfn::TextFunction;
 mod coercion;
 mod constants;
+mod corr;
 mod correlate;
 mod dag;
 mod depth;

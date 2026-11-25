@@ -920,3 +920,208 @@ fn asof_after_a_relation_named_by_a_keyword_is_the_join() {
     );
     assert_eq!(b.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
 }
+
+/// #430: DuckDB 2.0.1 raises `Division by zero` for `//` and `%` over integers, HUGEINT and
+/// DECIMAL, a constant divisor or a column's (`test_division_by_zero.test`). A float is left as it
+/// was: `//` and `%` by zero beside a DOUBLE are NULL here.
+#[test]
+fn exact_division_by_zero_raises_as_duckdb_does() {
+    let mut engine = Engine::open_empty().unwrap();
+    engine
+        .register_view(
+            "numbers",
+            "SELECT * FROM (VALUES (7), (0), (NULL), (2)) t(i)",
+        )
+        .unwrap();
+    for ty in [
+        "TINYINT",
+        "INTEGER",
+        "BIGINT",
+        "HUGEINT",
+        "UTINYINT",
+        "UBIGINT",
+        "DECIMAL(4,1)",
+        "DECIMAL(18,3)",
+        "DECIMAL(38,4)",
+    ] {
+        for op in ["//", "%"] {
+            for sql in [
+                format!("SELECT 7::{ty} {op} 0::{ty}"),
+                format!("SELECT 7::{ty} {op} i::{ty} FROM numbers"),
+            ] {
+                let e = engine.sql(&sql).expect_err(&sql).to_string();
+                assert!(e.contains("Division by zero"), "{sql}: {e}");
+            }
+        }
+    }
+    for sql in ["SELECT 7 // 0", "SELECT 7 % 0", "SELECT 7.5 % 0"] {
+        let e = engine.sql(sql).expect_err(sql).to_string();
+        assert!(e.contains("Division by zero"), "{sql}: {e}");
+    }
+    assert_eq!(
+        one_row(
+            &engine,
+            "SELECT 7.5::DOUBLE % 0 AS a, 7.5::DOUBLE // 0 AS b, 7 // 2 AS c, 7 % 2 AS d"
+        ),
+        vec![serde_json::json!({"a": null, "b": null, "c": 3, "d": 1})]
+    );
+    // Where DuckDB may never reach the division, it is not raised (`test_try_in_clause.test`):
+    // DataFusion would evaluate it for every row.
+    assert_eq!(
+        one_row(
+            &engine,
+            "SELECT i, CASE WHEN i = 0 THEN false ELSE (100 // i) IN (1, 3, 7) END AS a, \
+             CASE WHEN i <> 0 AND (100 % i) IN (1, 2) THEN 1 ELSE 0 END AS b, \
+             TRY(100 // i) AS c FROM numbers WHERE i IS NOT NULL ORDER BY i"
+        ),
+        vec![
+            serde_json::json!({"i": 0, "a": false, "b": 0, "c": null}),
+            serde_json::json!({"i": 2, "a": false, "b": 0, "c": 50}),
+            serde_json::json!({"i": 7, "a": false, "b": 1, "c": 14}),
+        ]
+    );
+    assert!(
+        one_row(
+            &engine,
+            "SELECT nth_value(i, 1 // 0) OVER () AS n FROM numbers WHERE i > 10"
+        )
+        .is_empty()
+    );
+}
+
+/// #430: a bare DECIMAL is DECIMAL(18,3), as DuckDB has it, within a list or a struct too
+/// (`struct_of_lists_where.test:33`).
+#[test]
+fn a_bare_decimal_is_eighteen_three() {
+    let engine = Engine::open_empty().unwrap();
+    assert_eq!(
+        one_row(
+            &engine,
+            "SELECT typeof(CAST(1 AS DECIMAL)) AS a, typeof(CAST(1 AS NUMERIC)) AS b, \
+             typeof(CAST([1.5] AS DECIMAL[])) AS c, CAST('1.23456' AS DECIMAL) AS d, \
+             typeof(CAST(NULL AS STRUCT(v DECIMAL[]))) AS e, typeof(CAST(1 AS DECIMAL(10))) AS f"
+        ),
+        vec![serde_json::json!({
+            "a": "DECIMAL(18,3)", "b": "DECIMAL(18,3)", "c": "DECIMAL(18,3)[]", "d": "1.235",
+            "e": "STRUCT(v DECIMAL(18,3)[])", "f": "DECIMAL(10,0)"
+        })]
+    );
+}
+
+/// #430: `typeof` names a type as DuckDB does where the engine's type is DuckDB's
+/// (`type_literal.test:45`).
+#[test]
+fn typeof_names_types_as_duckdb_does() {
+    let engine = Engine::open_empty().unwrap();
+    assert_eq!(
+        one_row(
+            &engine,
+            "SELECT typeof(TIMESTAMP(3) '2024-01-01 00:00:00') AS a, \
+             typeof(CAST('2024-01-01' AS TIMESTAMP)) AS b, typeof(INTERVAL '1 day') AS c, \
+             typeof({'a': 1::INTEGER, 'B c': 'x'}) AS d, typeof(MAP {'k': 1::INTEGER}) AS e"
+        ),
+        vec![serde_json::json!({
+            "a": "TIMESTAMP_MS", "b": "TIMESTAMP", "c": "INTERVAL",
+            "d": "STRUCT(a INTEGER, \"B c\" VARCHAR)", "e": "MAP(VARCHAR, INTEGER)"
+        })]
+    );
+}
+
+/// #430: `list_distinct` drops NULL (`list_distinct.test:62`), `[1, 2] || NULL` and a list `||`
+/// a NULL list are NULL (`list_concat.test:256`), and `array_to_string` with a NULL separator joins
+/// with `,` (`array_to_string.test:20`), as DuckDB 2.0.1 answers.
+#[test]
+fn list_functions_meet_null_as_duckdb_does() {
+    let engine = Engine::open_empty().unwrap();
+    assert_eq!(
+        one_row(
+            &engine,
+            "SELECT to_json(list_sort(list_distinct([1, 1, NULL, 2, 2, 2, 3, NULL, NULL]))) AS a, \
+             len(list_distinct([NULL, NULL])) AS b, list_distinct(NULL::INT[]) IS NULL AS c, \
+             ([1, 2] || NULL) IS NULL AS d, ([1, 2] || NULL::INT[]) IS NULL AS e, \
+             (NULL::INT[] || [1, 2]) IS NULL AS f, to_json([1, 2] || [3]) AS g, \
+             array_to_string([1, 2, 3], NULL) AS h, array_to_string([1, 2, 3], '-') AS i, \
+             array_to_string(NULL::INT[], '-') IS NULL AS j"
+        ),
+        vec![serde_json::json!({
+            "a": "[1,2,3]", "b": 0, "c": true, "d": true, "e": true, "f": true, "g": "[1,2,3]",
+            "h": "1,2,3", "i": "1-2-3", "j": true
+        })]
+    );
+    assert_eq!(
+        one_row(
+            &engine,
+            "SELECT to_json(list_sort(list_distinct(l))) AS a, to_json(l || m) AS b, \
+             array_to_string(l, s) AS c FROM (VALUES ([2, NULL, 2, 1], NULL::INT[], NULL), \
+             ([NULL], [4], '+')) t(l, m, s) ORDER BY c DESC"
+        ),
+        vec![
+            serde_json::json!({"a": "[1,2]", "b": null, "c": "2,2,1"}),
+            serde_json::json!({"a": "[]", "b": "[null,4]", "c": ""}),
+        ]
+    );
+}
+
+/// #430: `corr` over pairs with no spread is NaN in DuckDB, a single pair included
+/// (`test_corr.test:15`), and NULL only over no pair at all.
+#[test]
+fn corr_without_spread_is_nan_as_duckdb_has_it() {
+    let engine = Engine::open_empty().unwrap();
+    let row = one_row(
+        &engine,
+        "SELECT isnan(corr(1, 1)) AS a, corr(NULL, NULL) IS NULL AS b, \
+         isnan((SELECT corr(a, b) FROM (VALUES (1e301, 0), (-1e301, 0)) t(a, b))) AS c",
+    );
+    assert_eq!(
+        row,
+        vec![serde_json::json!({"a": true, "b": true, "c": true})]
+    );
+    let rows = one_row(
+        &engine,
+        "SELECT k, CASE WHEN isnan(corr(v, w)) THEN 'nan' ELSE CAST(round(corr(v, w), 8) AS VARCHAR) \
+         END AS r, isnan(corr(v, v * 0)) AS z FROM \
+         (VALUES (1, 10, NULL), (2, 10, 11), (2, 20, 22), (2, 25, NULL), (2, 30, 35), (3, 5, 5)) \
+         t(k, v, w) GROUP BY k ORDER BY k",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            serde_json::json!({"k": 1, "r": null, "z": true}),
+            serde_json::json!({"k": 2, "r": "0.9988446", "z": true}),
+            serde_json::json!({"k": 3, "r": "nan", "z": true}),
+        ]
+    );
+}
+
+/// #430: DuckDB joins a NATURAL JOIN on columns named alike but for case
+/// (`case_insensitive_using.test:123`); DataFusion matched names exactly and kept both, so it is
+/// refused by name. Names alike in case still join.
+#[test]
+fn a_natural_join_on_names_alike_but_for_case_is_refused() {
+    let mut engine = Engine::open_empty().unwrap();
+    engine
+        .register_view("a", "SELECT 1 AS hello, 2 AS x")
+        .unwrap();
+    engine
+        .register_view("b", "SELECT 1 AS \"HELLO\", 3 AS y")
+        .unwrap();
+    engine
+        .register_view("c", "SELECT 1 AS hello, 4 AS z")
+        .unwrap();
+    let e = engine
+        .sql("SELECT * FROM a NATURAL JOIN b")
+        .expect_err("refused")
+        .to_string();
+    assert!(
+        e.contains("NATURAL JOIN") && e.contains("not supported"),
+        "{e}"
+    );
+    assert!(matches!(
+        engine.sql("SELECT * FROM c NATURAL JOIN b"),
+        Err(BurrmillError::NotAllowed(_))
+    ));
+    assert_eq!(
+        one_row(&engine, "SELECT * FROM a NATURAL JOIN c"),
+        vec![serde_json::json!({"hello": 1, "x": 2, "z": 4})]
+    );
+}
