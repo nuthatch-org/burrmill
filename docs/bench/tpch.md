@@ -280,6 +280,25 @@ as DuckDB's, and Q21 was refused as above. The widest ratios were Q17 at 5.33x (
 have #438), Q4 at 4.46x, Q11 and Q22 at 3.92x, Q18 at 3.78x, and Q6 at 3.47x. Q12 was at 3.19x. At
 SF1, one run each at a load of 22.4, all 22 answers were the same as DuckDB's.
 
+**Again on main with #438**, the merge 6e70f64 against main at 6e79d8d. #438's `collect_keys` stands
+beside this rule. The `EXPLAIN` of all 22 differs in Q12 alone, at SF1 and at SF10, and all 22
+answers are the same as DuckDB 2.0.1's at SF1; at SF10 21 are, Q21 being refused as above. The
+rounds are as before, three of them alternating, each the best of 5, DuckDB 2.0.1 in the same
+process:
+
+| SF | round | 1-minute load, start / end | DuckDB 2.0.1 ms | main ms | ratio | DuckDB 2.0.1 ms | merge ms | ratio | Burrmill peak RSS MiB, main / merge |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| 10 | 1 | 10.01 / 9.77 | 158 | 715 | 4.52x | 167 | 492 | 2.95x | 1,717 / 416 |
+| 10 | 2 | 9.77 / 9.65 | 149 | 704 | 4.72x | 160 | 463 | 2.90x | 1,716 / 435 |
+| 10 | 3 | 9.65 / 9.32 | 165 | 777 | 4.71x | 153 | 468 | 3.06x | 1,714 / 433 |
+| 1 | 1 | 8.57 / 7.96 | 21 | 78 | 3.71x | 24 | 57 | 2.39x | 515 / 367 |
+| 1 | 2 | 7.96 / 7.96 | 22 | 75 | 3.40x | 22 | 57 | 2.59x | 525 / 372 |
+| 1 | 3 | 7.96 / 7.96 | 22 | 72 | 3.27x | 21 | 55 | 2.61x | 506 / 372 |
+
+The 22 at SF10 on the merge, best of 3, DuckDB 2.0.1 in the same process. The load was 7.96 at the
+start (17:30:02) and 9.74 at the end (17:31:16). The widest ratios were Q4 at 3.94x, Q6 at 3.74x,
+Q18 at 3.66x, Q22 at 3.37x and Q12 at 3.29x. Q17 was at 2.65x.
+
 ## Spilling: Q21 under 2 GiB (#383)
 
 Q21's `EXISTS` and `NOT EXISTS` are each a partitioned hash join that builds on all of `lineitem`.
