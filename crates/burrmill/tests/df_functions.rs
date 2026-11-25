@@ -920,3 +920,49 @@ fn asof_after_a_relation_named_by_a_keyword_is_the_join() {
     );
     assert_eq!(b.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
 }
+
+/// #430: DuckDB 2.0.1 raises `Division by zero` for `//` and `%` over integers, HUGEINT and
+/// DECIMAL, a constant divisor or a column's (`test_division_by_zero.test`). A float is left as it
+/// was: `//` and `%` by zero beside a DOUBLE are NULL here.
+#[test]
+fn exact_division_by_zero_raises_as_duckdb_does() {
+    let mut engine = Engine::open_empty().unwrap();
+    engine
+        .register_view(
+            "numbers",
+            "SELECT * FROM (VALUES (7), (0), (NULL), (2)) t(i)",
+        )
+        .unwrap();
+    for ty in [
+        "TINYINT",
+        "INTEGER",
+        "BIGINT",
+        "HUGEINT",
+        "UTINYINT",
+        "UBIGINT",
+        "DECIMAL(4,1)",
+        "DECIMAL(18,3)",
+        "DECIMAL(38,4)",
+    ] {
+        for op in ["//", "%"] {
+            for sql in [
+                format!("SELECT 7::{ty} {op} 0::{ty}"),
+                format!("SELECT 7::{ty} {op} i::{ty} FROM numbers"),
+            ] {
+                let e = engine.sql(&sql).expect_err(&sql).to_string();
+                assert!(e.contains("Division by zero"), "{sql}: {e}");
+            }
+        }
+    }
+    for sql in ["SELECT 7 // 0", "SELECT 7 % 0", "SELECT 7.5 % 0"] {
+        let e = engine.sql(sql).expect_err(sql).to_string();
+        assert!(e.contains("Division by zero"), "{sql}: {e}");
+    }
+    assert_eq!(
+        one_row(
+            &engine,
+            "SELECT 7.5::DOUBLE % 0 AS a, 7.5::DOUBLE // 0 AS b, 7 // 2 AS c, 7 % 2 AS d"
+        ),
+        vec![serde_json::json!({"a": null, "b": null, "c": 3, "d": 1})]
+    );
+}
