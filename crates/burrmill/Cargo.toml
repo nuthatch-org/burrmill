@@ -364,6 +364,11 @@ path = "tests/df_outerorder.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_unionorder"
+path = "tests/df_unionorder.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "generated_planner"
 path = "tests/generated_planner.rs"
 required-features = ["datafusion"]

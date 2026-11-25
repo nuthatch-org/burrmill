@@ -784,6 +784,8 @@ impl MiniSession {
                 Arc::new(super::cancel::Cancellable)
                     as Arc<dyn PhysicalOptimizerRule + Send + Sync>,
                 Arc::new(super::sharing::PublishShared),
+                // Last of the rewrites, so no rule after it meets an operator it does not know.
+                Arc::new(super::unionorder::UnionOrder),
             ])
             // A tab cannot spawn the task each partition would be coalesced on.
             .chain(cfg!(target_arch = "wasm32").then(|| {
