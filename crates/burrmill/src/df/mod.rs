@@ -100,6 +100,7 @@ mod textfn;
 mod tojson;
 mod topkfilter;
 mod topn;
+mod unionorder;
 mod wide;
 
 #[path = "generated/physical_planner.rs"]
@@ -1210,6 +1211,7 @@ fn scans(p: &Arc<dyn datafusion_physical_plan::ExecutionPlan>) -> Result<u64> {
         | "GlobalLimitExec"
         | "LocalLimitExec"
         | "UnionExec"
+        | "OrderedUnionExec"
         | "InterleaveExec"
         | "BoundedWindowAggExec"
         | "WindowAggExec"
