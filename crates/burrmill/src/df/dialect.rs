@@ -1640,9 +1640,28 @@ fn tuple_cmp(a: &[SqlExpr], b: &[SqlExpr], op: &BinaryOperator) -> SqlExpr {
     binop(head, Or, SqlExpr::Nested(Box::new(binop(eq, And, tail))))
 }
 
-/// DuckDB's type names DataFusion does not plan, renamed in place; `Some` is a refusal.
+/// DuckDB's type names DataFusion does not plan, renamed in place, within a list, struct or map as
+/// at the top; `Some` is a refusal.
 fn retype(t: &mut SqlType) -> Option<String> {
+    match t {
+        SqlType::Array(
+            sq::ArrayElemTypeDef::AngleBracket(e)
+            | sq::ArrayElemTypeDef::SquareBracket(e, _)
+            | sq::ArrayElemTypeDef::Parenthesis(e),
+        ) => return retype(e),
+        SqlType::Struct(fields, _) => {
+            return fields.iter_mut().find_map(|f| retype(&mut f.field_type));
+        }
+        SqlType::Map(k, v) => return retype(k).or_else(|| retype(v)),
+        _ => {}
+    }
     *t = match t {
+        // A bare DECIMAL is DECIMAL(18,3) in DuckDB; DataFusion's is DECIMAL(38,10).
+        SqlType::Decimal(ExactNumberInfo::None)
+        | SqlType::Numeric(ExactNumberInfo::None)
+        | SqlType::Dec(ExactNumberInfo::None) => {
+            SqlType::Decimal(ExactNumberInfo::PrecisionAndScale(18, 3))
+        }
         SqlType::HugeInt => SqlType::Decimal(ExactNumberInfo::PrecisionAndScale(38, 0)),
         SqlType::UBigInt => SqlType::BigIntUnsigned(None),
         SqlType::UTinyInt => SqlType::TinyIntUnsigned(None),
@@ -1994,24 +2013,38 @@ impl VisitorMut for Rewriter {
 /// `burrmill_intdiv(a, b)`: DuckDB's `//`, exact and truncating, checked. Integers stay BIGINT;
 /// anything decimal is `DECIMAL(38,0)`, as `HUGEINT` is. An exact divisor of zero raises DuckDB's
 /// `Division by zero`; in DOUBLE it is NULL, unless the operands were DuckDB DECIMALs
-/// ([`decimal_intdiv`]).
+/// ([`decimal_intdiv`]). Where DuckDB might never reach the division it is NULL ([`guard_zero`]).
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct IntDiv {
     sig: Signature,
     /// The operands are DuckDB DECIMALs divided in DOUBLE: a zero divisor raises.
     decimal: bool,
+    /// The division sits where DuckDB evaluates lazily and DataFusion eagerly: a zero divisor is
+    /// NULL, as it was before DuckDB raised.
+    guarded: bool,
 }
 
 impl IntDiv {
     pub fn udf() -> Arc<ScalarUDF> {
-        Self::with(false)
+        Self::with(false, false)
     }
 
-    fn with(decimal: bool) -> Arc<ScalarUDF> {
+    fn with(decimal: bool, guarded: bool) -> Arc<ScalarUDF> {
         Arc::new(ScalarUDF::from(Self {
             sig: Signature::user_defined(Volatility::Immutable),
             decimal,
+            guarded,
         }))
+    }
+
+    /// `f` as this UDF, if it is.
+    fn of(f: &ScalarUDF) -> Option<&Self> {
+        let any: &dyn std::any::Any = super::bound::unwrapped(f).inner().as_ref();
+        any.downcast_ref::<Self>()
+    }
+
+    fn raises(&self, exact: bool) -> bool {
+        !self.guarded && (exact || self.decimal)
     }
 }
 
@@ -2082,7 +2115,7 @@ impl ScalarUDFImpl for IntDiv {
                 );
                 let mut o = arrow::array::Float64Builder::with_capacity(n);
                 for i in 0..n {
-                    if !a.is_null(i) && !b.is_null(i) && b.value(i) == 0.0 && self.decimal {
+                    if !a.is_null(i) && !b.is_null(i) && b.value(i) == 0.0 && self.raises(false) {
                         return Err(division_by_zero());
                     }
                     if a.is_null(i) || b.is_null(i) || b.value(i) == 0.0 {
@@ -2100,7 +2133,7 @@ impl ScalarUDFImpl for IntDiv {
                 );
                 let mut o = arrow::array::UInt64Builder::with_capacity(n);
                 for i in 0..n {
-                    if a.is_null(i) || b.is_null(i) {
+                    if a.is_null(i) || b.is_null(i) || (b.value(i) == 0 && !self.raises(true)) {
                         o.append_null();
                     } else if b.value(i) == 0 {
                         return Err(division_by_zero());
@@ -2114,7 +2147,7 @@ impl ScalarUDFImpl for IntDiv {
                 let (a, b) = (a.as_primitive::<Int64Type>(), b.as_primitive::<Int64Type>());
                 let mut o = Int64Builder::with_capacity(n);
                 for i in 0..n {
-                    if a.is_null(i) || b.is_null(i) {
+                    if a.is_null(i) || b.is_null(i) || (b.value(i) == 0 && !self.raises(true)) {
                         o.append_null();
                     } else if b.value(i) == 0 {
                         return Err(division_by_zero());
@@ -2140,7 +2173,7 @@ impl ScalarUDFImpl for IntDiv {
                 );
                 let mut o = Decimal128Builder::with_capacity(n);
                 for i in 0..n {
-                    if a.is_null(i) || b.is_null(i) {
+                    if a.is_null(i) || b.is_null(i) || (b.value(i) == 0 && !self.raises(true)) {
                         o.append_null();
                     } else if b.value(i) == 0 {
                         return Err(division_by_zero());
@@ -2208,7 +2241,7 @@ fn decimal_intdiv(
         .iter()
         .all(|t| t.is_integer() || t.is_null() || matches!(t, DataType::Decimal128(..)));
     let func = if exact {
-        IntDiv::with(true)
+        IntDiv::with(true, IntDiv::of(&f.func).is_some_and(|d| d.guarded))
     } else {
         Arc::clone(&f.func)
     };
@@ -2439,18 +2472,22 @@ impl AnalyzerRule for DuckSemantics {
             );
             let t = p.map_expressions(|e| {
                 super::dag::keeping_name(e, names_matter, |e| {
-                    e.transform_up(|e| {
-                        let t = divide_as_double(e, &schema)?;
-                        let t = t.transform_data(|e| modulo_by_zero(e, &schema))?;
-                        let t = t.transform_data(|e| timestamp_as_duckdb(e, &schema))?;
-                        let t =
-                            t.transform_data(|e| round_before_int_cast(e, &schema, &self.round))?;
-                        let t = t.transform_data(|e| timestamp_as_text(e, &schema))?;
-                        let t = t.transform_data(|e| dates_as_duckdb(e, &schema))?;
-                        let t = t.transform_data(|e| case_nullability(e, &schema))?;
-                        let t = t.transform_data(try_as_duckdb)?;
-                        let t = t.transform_data(|e| hugeint_rounding(e, &schema, &self.round))?;
-                        t.transform_data(hugeint_null_test)
+                    guard_zero(e, false, &schema)?.transform_data(|e| {
+                        e.transform_up(|e| {
+                            let t = divide_as_double(e, &schema)?;
+                            let t = t.transform_data(|e| modulo_by_zero(e, &schema))?;
+                            let t = t.transform_data(|e| timestamp_as_duckdb(e, &schema))?;
+                            let t = t.transform_data(|e| {
+                                round_before_int_cast(e, &schema, &self.round)
+                            })?;
+                            let t = t.transform_data(|e| timestamp_as_text(e, &schema))?;
+                            let t = t.transform_data(|e| dates_as_duckdb(e, &schema))?;
+                            let t = t.transform_data(|e| case_nullability(e, &schema))?;
+                            let t = t.transform_data(try_as_duckdb)?;
+                            let t =
+                                t.transform_data(|e| hugeint_rounding(e, &schema, &self.round))?;
+                            t.transform_data(hugeint_null_test)
+                        })
                     })
                 })
             })?;
@@ -2475,9 +2512,10 @@ fn semantics_may_rewrite(e: &Expr) -> bool {
             Operator::Divide | Operator::Modulo | Operator::Plus | Operator::Minus
         ),
         // `timestamp_as_duckdb`, `dates_as_duckdb`, `try_as_duckdb` and `hugeint_rounding`.
+        // ... and `guard_zero`.
         Expr::ScalarFunction(f) => matches!(
             f.func.name(),
-            "to_timestamp" | "date_trunc" | "try" | "burrmill_hugeint"
+            "to_timestamp" | "date_trunc" | "try" | "burrmill_hugeint" | "burrmill_intdiv"
         ),
         // `round_before_int_cast`, `timestamp_as_text`, `case_nullability`, `hugeint_null_test`.
         Expr::Cast(_) | Expr::TryCast(_) | Expr::Case(_) | Expr::IsNull(_) | Expr::IsNotNull(_) => {
@@ -2752,6 +2790,64 @@ fn numeric(t: &DataType) -> bool {
     t.is_integer()
         || t.is_floating()
         || matches!(t, DataType::Decimal128(..) | DataType::Decimal256(..))
+}
+
+/// `//` and `%` by zero where DuckDB might not evaluate them, left NULL as they were before DuckDB
+/// raised: under `CASE`, `AND`, `OR`, `COALESCE` and the like, or `TRY`, which DuckDB evaluates
+/// lazily and DataFusion eagerly (its simplifier turns a boolean `CASE` into `AND` and `OR`, which
+/// evaluate both sides), and in a window function's arguments, which DuckDB evaluates only for the
+/// rows that reach the window. Elsewhere an exact `//` or `%` by zero raises.
+fn guard_zero(e: Expr, guarded: bool, schema: &DFSchema) -> DFResult<Transformed<Expr>> {
+    let lazy = match &e {
+        Expr::Case(_) | Expr::WindowFunction(_) => true,
+        Expr::BinaryExpr(b) => matches!(b.op, Operator::And | Operator::Or),
+        Expr::ScalarFunction(f) => matches!(
+            f.func.name(),
+            "coalesce" | "ifnull" | "nvl" | "nvl2" | "nullif" | "try"
+        ),
+        // A subquery's plan is a node of its own.
+        Expr::ScalarSubquery(_) | Expr::Exists(_) | Expr::InSubquery(_) => {
+            return Ok(Transformed::no(e));
+        }
+        _ => false,
+    };
+    let t = e.map_children(|c| guard_zero(c, guarded || lazy, schema))?;
+    if !guarded {
+        return Ok(t);
+    }
+    t.transform_data(|e| match e {
+        Expr::ScalarFunction(f) if IntDiv::of(&f.func).is_some_and(|d| !d.guarded) => {
+            let decimal = IntDiv::of(&f.func).is_some_and(|d| d.decimal);
+            Ok(Transformed::yes(Expr::ScalarFunction(
+                datafusion_expr::expr::ScalarFunction::new_udf(IntDiv::with(decimal, true), f.args),
+            )))
+        }
+        Expr::BinaryExpr(BinaryExpr {
+            left,
+            op: Operator::Modulo,
+            right,
+        }) => {
+            let rt = right.get_type(schema)?;
+            let exact = |t: &DataType| numeric(t) && !t.is_floating();
+            if !exact(&rt) || !exact(&left.get_type(schema)?) {
+                return Ok(Transformed::no(Expr::BinaryExpr(BinaryExpr {
+                    left,
+                    op: Operator::Modulo,
+                    right,
+                })));
+            }
+            let divisor = Expr::ScalarFunction(datafusion_expr::expr::ScalarFunction::new_udf(
+                datafusion_functions::core::nullif(),
+                vec![*right, Expr::Literal(ScalarValue::new_zero(&rt)?, None)],
+            ));
+            Ok(Transformed::yes(Expr::BinaryExpr(BinaryExpr::new(
+                left,
+                Operator::Modulo,
+                Box::new(divisor),
+            ))))
+        }
+        e => Ok(Transformed::no(e)),
+    })
 }
 
 /// `x % 0` beside a float is NULL here, where Arrow's kernel refuses the statement; the divisor
