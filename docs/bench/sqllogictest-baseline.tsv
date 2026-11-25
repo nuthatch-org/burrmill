@@ -5,7 +5,7 @@ directory	pass	refused	wrong	error	skipped
 aggregate	826	693	43	309	1657
 alter	170	16	0	2	1448
 attach	2	4	0	0	1657
-binder	149	29	25	74	175
+binder	154	29	20	74	175
 cast	286	247	86	115	323
 catalog	204	68	0	19	3613
 collate	38	117	0	10	396
@@ -15,7 +15,7 @@ constraints	112	0	0	0	830
 copy	218	612	0	92	6205
 copy_database	0	0	0	0	169
 create	20	2	0	1	154
-cte	305	49	13	166	986
+cte	309	49	9	166	986
 delete	63	1	0	0	337
 detailed_profiler	8	1	0	0	5
 error	58	3	12	31	59
@@ -36,10 +36,10 @@ logging	1	4	0	6	367
 merge	68	0	0	3	209
 multi_file	0	0	0	0	89
 optimizer	666	108	19	80	2129
-order	93	25	8	19	214
+order	94	25	7	19	214
 ordinality	4	6	0	0	16
 overflow	93	10	3	66	13
-parallelism	30	5	2	1	131
+parallelism	31	5	1	1	131
 parser	198	162	21	143	609
 peg_parser	61	13	3	64	477
 pg_catalog	5	19	0	24	99
@@ -54,13 +54,13 @@ sample	10	2	2	39	99
 secrets	0	1	0	0	194
 select	17	4	2	30	53
 serialization	25	6	0	2	20
-setops	142	18	20	11	195
+setops	159	18	3	11	195
 settings	15	39	0	7	638
 show_select	21	22	0	37	72
 sql_export	443	203	5	153	1649
 storage	51	27	0	4	6742
 storage_version	0	0	0	0	19
-subquery	320	210	23	258	843
+subquery	321	210	22	258	843
 table_function	51	78	0	32	619
 timezone	0	0	0	0	615
 topn	89	0	3	4	217
@@ -76,4 +76,4 @@ vacuum	0	0	0	0	28
 variables	0	0	0	0	61
 variant	0	0	0	0	29
 vector_types	0	17	0	0	0
-window	334	79	19	141	364
+window	336	79	17	141	364
