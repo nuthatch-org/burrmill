@@ -1,14 +1,19 @@
 # Changelog
 
 Nuthatch pins a git revision of burrmill. Each revision it adopts is tagged `vX.Y.Z` and gets an
-entry here, newest first, naming what changed since the last tag. A tag is also what goes to
-crates.io, with `burrmill-parquet-source` first when it has changed. The README says what a
+entry here, newest first, naming what changed since the last tag. A tag makes a GitHub
+Release with prebuilt binaries and nothing else (`docs/releasing.md`). The README says what a
 version number promises.
 
 A release that changes any receipt in `corpus/receipts/receipts.jsonl` says which, and why, in its
 entry: a receipt someone kept stops verifying on that release (`tests/receipt_corpus.rs`).
 
-## Unreleased
+## 0.4.0 - 2026-11-25
+
+Prebuilt `burrmill` binaries for five targets, as a GitHub Release. What changed since 0.3.0:
+
+A receipt still verifies only on the release that made it. `corpus/receipts` and `demo/receipt.json`
+are regenerated for 0.4.0; every statement, input and answer is unchanged.
 
 Engine (`burrmill`, feature `datafusion`)
 
