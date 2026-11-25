@@ -22,6 +22,12 @@ Engine (`burrmill`, feature `datafusion`)
 - A spilling budget's spillers leave a sixteenth of the pool free for consumers that cannot spill,
   such as a sort's merge, and a repartition spills past its fair share rather than borrowing; both
   had starved Q21 at SF30 (#383).
+- A sort that holds nothing, starting or just spilled, may take its batch from that reserve, within
+  its fair share. It has nothing to spill, so refused it refused the statement, `Not enough memory
+  to continue external sort`: what spilling sorts gave back was lent again to the ones borrowing,
+  whose loans leave one fair share free for every consumer under its share, 18 MB in all with
+  Q21's 96 spillers. Q21 at SF30 under 2 GiB was refused once in at least 14 runs, and its `EXPLAIN
+  ANALYZE` at SF100 once (#434).
 - JSON and NDJSON are read as CSV is since #407: on the budget's threads, a batch every 4 MiB of
   text, never held as rows before the columns are typed, and the 1 GiB cap on a JSON file is gone.
   Objects one after another are cut at record starts; a JSON array is cut the same way, at the

@@ -200,6 +200,10 @@ pub(super) fn budget_pool(memory_bytes: usize, spills: bool) -> Arc<dyn MemoryPo
 /// borrow: what it holds is batches for a partition whose reader has not started, as a sort-merge
 /// join's second input waits for its first to be sorted, and Q21's repartitions had borrowed 1.1 GB
 /// that way while a sort holding nothing could get no batch to sort. Past its share it spills.
+///
+/// A spiller holding nothing, which has nothing to spill, may also take the reserve, within its
+/// share (#434): a sort starting or just spilled was refused its batch while the others' loans held
+/// all but one share, and refused its statement.
 #[derive(Debug)]
 pub(super) struct LendingSpillPool {
     pool_size: usize,
@@ -245,7 +249,7 @@ impl Loans {
             // One holding nothing has nothing to spill, so refused it refuses its statement: a sort
             // starting, or asking for its next batch after it spilled. A loan leaves one share free
             // for every consumer under its share, not one each, and Q21's 96 spillers made that
-            // 17 MB; so within its share it may take the reserve too (#434). A repartition spills
+            // 18 MB; so within its share it may take the reserve too (#434). A repartition spills
             // the batch instead.
             if held == 0 && borrows {
                 return pool_size.saturating_sub(self.spillable + self.unspillable);
