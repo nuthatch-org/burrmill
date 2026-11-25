@@ -89,6 +89,7 @@ mod session;
 mod sharing;
 mod smallinputs;
 mod spillingjoins;
+mod staticfilters;
 mod strict;
 mod tables;
 mod textfiles;

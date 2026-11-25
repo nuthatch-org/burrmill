@@ -31,6 +31,8 @@ the tables below were: its subquery averages only the 2,040 parts the query keep
 ([below](#q17-only-the-parts-the-query-keeps-433)). The tables below are from before that change.
 Q4 is now 2.76x to 3.14x at SF10, from 3.40x to 4.35x, its semi join collected
 ([below](#q4-one-hash-table-for-the-lineitem-scans-filter-433)).
+Q6 is now 2.25x to 2.64x at SF10, from 3.78x to 3.99x, its `WHERE` evaluated above the Parquet
+reader and not in it ([below](#q6-its-filter-above-the-reader-433)).
 
 **Against datafusion-cli it is faster on four at SF10** (7, 15, 18, 19) and within 1.5x on 13 of
 the 21 it answers. It is the same DataFusion underneath, so that gap is Burrmill's own. Where it
@@ -368,6 +370,106 @@ was 8.76 at the start (18:27:41) and 12.91 at the end (18:29:03). All 21 answers
 as DuckDB's, and Q21 was refused as above. The widest ratios were Q6 at 5.07x, Q4 at 3.64x (510 ms),
 Q18 at 3.52x, Q22 at 3.34x, Q11 at 3.11x and Q12 at 3.07x. At SF1, one run each at a load of 11.88,
 all 22 answers were the same as DuckDB's.
+
+## Q6: its filter above the reader (#433)
+
+Q6 was the widest ratio at SF10 in the run of all 22 after #443, 5.07x. On f1b227a, with the DuckDB
+2.0.1 CLI downloaded for this, four runs of Q6 alone, best of 5, gave 415 to 460 ms against DuckDB's
+110 to 130, 3.32x to 3.77x, at loads of 16.25 down to 13.74 (19:38:43 to 19:39:01). At loads of
+4.87 to 6.83, in the rounds below, it was 3.78x to 3.99x. So the gap is about 3.3x to 4x, and the 5.07x
+included the load.
+
+**The cause.** Burrmill reads Parquet with `pushdown_filters` on, so the reader evaluates a scan's
+`WHERE` as a row filter: one pass per conjunct, each over the rows the passes before it kept, then
+the other columns decoded for the rows all of them keep. Q6's `WHERE` is five conjuncts on three
+columns, and the 1.9% of `lineitem` it keeps is scattered through every page, so no decoding is
+saved. In an `EXPLAIN ANALYZE` at SF10 (load 9.07) the scan took 3.27 s of CPU, and only 186.5 ms
+of it evaluated the conjuncts. The `FilterExec` above it, which checks the same `WHERE` again, took
+18.35 ms and the partial aggregate 19.68 ms. DuckDB 2.0.1's `EXPLAIN ANALYZE` has the same three
+filters in its scan, 1,139,264 rows out, and 1.21 s for the scan.
+
+**The A/B.** The same tree with `pushdown_filters` off for every scan, built only for this and not
+committed: the scan read all 59.99M rows in 955.62 ms of CPU and the `FilterExec` took 886.97 ms, at
+the same load. Q6 took 291 and 290 ms against 422 and 402 with the row filter (loads 9.47 to 9.74,
+19:41:46 to 19:42:00). The other things tried left the row filter in place and were not kept:
+
+| tried (Q6 at SF10, best of 5, two runs, loads 8.84 to 10.89) | ms |
+|---|---:|
+| as on main | 447, 403 |
+| `pushdown_filters` off | 281, 282 |
+| conjuncts on the same columns as one predicate | 355, 359 |
+| the whole `WHERE` as one predicate | 398, 367 |
+| `reorder_filters` | 576, 480 |
+| `force_filter_selections` | 347, 348 |
+| `max_predicate_cache_size` 0 | 378, 387 |
+
+The 2,048-row batch a budgeted session runs at is not the cause: at 8,192 rows Q6 took 380 and
+400 ms with the row filter, 255 and 243 without. The cast in `CAST(l_shipdate AS Timestamp(ns)) <
+788918400000000000`, which is how `date '1994-01-01' + interval '1' year` arrives, is not the cause
+either. With the row filter, Q6 with `date '1995-01-01'` written in took 393 to 426 ms against 397
+to 415 (loads 10.47 to 11.18). With the fix below it is 15 to 20 ms: 263 to 273 ms against 278 to 290
+(loads 7.08 to 7.39). It is left as it is.
+
+**Off for every scan is not the fix.** With all of TPC-H's scans filtering above the reader, 19 of
+the 21 queries answered were faster at SF10, but Q7 and Q18 were slower (650 and 1,401 ms before,
+921 and 1,664 after, Burrmill alone, best of 3, loads 12.12 to 12.87). Their small builds put
+`IN (SET)` filters in the scans below, and evaluated in the reader those cut the rows that reach
+the joins above: 117.0K of Q7's `lineitem` rows reached its join, not 18.23M, and Q18's `orders` gave 624, not
+15.00M. With only the joins' filters in the row filter and the `WHERE` above, most queries were
+slower than with both (Q3 809 ms, Q14 799). A row filter also pays where the rows it keeps are few or come
+in runs, and where the columns it spares are text. Over `lineitem` at SF10, best of 3, two runs,
+loads 6.26 to 7.85:
+
+| probe | with the row filter, ms | filtered above, ms |
+|---|---:|---:|
+| `l_orderkey % 50 = 7`, with `max(l_comment)` | 358, 369 | 458, 436 |
+| `l_shipdate = date '1995-03-01'`, three fixed-width columns summed | 206, 203 | 248, 250 |
+| Q6's `WHERE`, with `max(l_comment)` and `max(l_shipinstruct)` | 649, 648 | 602, 592 |
+
+**The fix.** `StaticRowFilters` (`crates/burrmill/src/df/staticfilters.rs`) switches the row
+filter off for a Parquet scan whose predicate holds no dynamic filter, from a join or a top-k, and
+no equality with a literal, and that reads no column besides the predicate's that is not
+fixed-width. The predicate still prunes row groups and pages. Nothing is lost: a table's `WHERE`
+reaches the scan as `Inexact`, so the `FilterExec` above it stays, and `CancelExec` does not pass a
+`WHERE` down again. With it, of the scans of all 22 at SF1, the ones that lose their row filter are
+in Q6, 7, 9, 12, 15, 16, 19, 20, 21 and 22: `lineitem` in Q6, 12, 15 and one of Q21's two, `part`
+in Q9, 16, 19 and one of Q20's two, both of Q7's `nation`, Q16's `supplier` and both of Q22's
+`customer`. All three probes above keep their row filter.
+`a_q6_shaped_scan_filters_above_the_reader` (`crates/burrmill/tests/df_staticfilters.rs`) fails if a
+Q6-shaped scan goes back to filtering in the reader; with the rule off its reader dropped 19.87K
+rows. Three more tests there check that an equality, a text column and a join's filter each keep the
+row filter.
+
+**Measured** 2026-11-25 on 9c2dd97 (built before one expression in it was rewritten for clippy,
+the same logic) against f1b227a, on the ThinkPad as above, 8 threads, 2 GiB, no
+spill directory: three rounds per scale factor, before then after, each the best of 5 for Burrmill
+and for the DuckDB 2.0.1 CLI in the same process. The load was under 8 throughout, 4.87 at the
+start (20:17:25) and 6.76 at the end (20:17:46). Every answer was the same as DuckDB's.
+
+| SF | round | 1-minute load, start / end | DuckDB 2.0.1 ms | before ms | ratio | DuckDB 2.0.1 ms | after ms | ratio | Burrmill peak RSS MiB, before / after |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| 10 | 1 | 4.87 / 5.44 | 105 | 404 | 3.85x | 125 | 282 | 2.25x | 460 / 395 |
+| 10 | 2 | 5.44 / 6.38 | 117 | 442 | 3.78x | 102 | 268 | 2.63x | 461 / 396 |
+| 10 | 3 | 6.38 / 6.83 | 105 | 419 | 3.99x | 112 | 296 | 2.64x | 462 / 396 |
+| 1 | 1 | 6.83 / 6.83 | 18 | 46 | 2.55x | 18 | 32 | 1.75x | 427 / 343 |
+| 1 | 2 | 6.83 / 6.83 | 18 | 52 | 2.90x | 19 | 33 | 1.73x | 426 / 344 |
+| 1 | 3 | 6.83 / 6.76 | 16 | 46 | 2.88x | 16 | 30 | 1.87x | 427 / 342 |
+
+Q6 at SF10 went from 3.78x–3.99x DuckDB 2.0.1 to 2.25x–2.64x, and at SF1 from 2.55x–2.90x to
+1.73x–1.87x. What is left is the scan and the `FilterExec` over all 60M rows, 992.68 ms and 914.44 ms
+of CPU in an `EXPLAIN ANALYZE` after the fix (load 8.49), where DuckDB's scan takes 1.21 s.
+
+The other plans that change, in two rounds of all 22 at SF10 before and after, alternating, Burrmill
+alone, best of 3, loads 4.91 to 12.54 (20:09:01 to 20:11:49): Q12 took 512 and 458 ms before and 301
+and 378 after, and Q15 359 and 411 before and 315 and 328 after. Q7, 9, 19, 20 and 22 were within
+the spread of the two runs before, and Q16 took 131 and 169 ms against 139 and 151. Q21 was refused
+in all four, as above.
+
+**All 22 after the fix**, at SF10 on 9c2dd97, best of 3, DuckDB 2.0.1 in the same process. The load
+was 6.22 at the start (20:17:56) and 7.89 at the end (20:19:09). All 21 answers given were the same
+as DuckDB's, and Q21 was refused as above. The widest ratios were Q11 at 3.89x (233 ms against 60),
+Q18 at 3.77x, Q1 at 3.48x, Q5 at 3.08x and Q8 at 3.06x. Q6 was at 2.65x, Q12 at 1.99x and Q15 at
+1.56x. At SF1, one run each at a load of 7.89, all 22 answers were the same as DuckDB's.
 
 ## Spilling: Q21 under 2 GiB (#383)
 

@@ -770,6 +770,8 @@ impl MiniSession {
                 Arc::new(super::rangejoin::RangeJoin),
                 Arc::new(super::rangebounds::RangeBounds),
                 Arc::new(super::joinfilters::ComputedKeyFilters),
+                // Once every filter a scan will hold has reached it.
+                Arc::new(super::staticfilters::StaticRowFilters),
                 Arc::new(super::smallinputs::SmallInputs),
                 Arc::new(super::heldinput::HeldInput),
             ])

@@ -31,6 +31,13 @@ Engine (`burrmill`, feature `datafusion`)
   reads them in turn; an arm of several partitions is coalesced as before. Under an aggregate, a
   join or a sort the plan does not change, and TPC-H's plans are the same. Of the sqllogictest
   suite's records, 12199 pass where 12168 did and 634 are wrong where 665 were.
+- A Parquet scan evaluates its `WHERE` in the `FilterExec` above it, not in the reader's row
+  filter, where the predicate holds no join or top-k filter and no equality with a literal and the
+  scan reads no text or nested column besides the predicate's (#433). The reader evaluated each
+  conjunct in a pass of its own and saved no decoding when the rows it kept were scattered. TPC-H
+  Q6's `lineitem` scan at SF10 took 3.27 s of CPU that way, against 1.84 s read whole and filtered
+  above, and Q6 went from 404–442 ms to 268–296 ms. The predicate still prunes row groups and pages.
+  Scans in Q7, 9, 12, 15, 16, 19, 20, 21 and 22 take it too.
 
 Build and CI
 

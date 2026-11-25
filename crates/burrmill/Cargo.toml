@@ -254,6 +254,11 @@ path = "tests/df_joinfilters.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_staticfilters"
+path = "tests/df_staticfilters.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_latest"
 path = "tests/df_latest.rs"
 required-features = ["datafusion"]
