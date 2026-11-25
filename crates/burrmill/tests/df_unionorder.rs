@@ -104,6 +104,15 @@ fn arms_answer_in_the_order_written() {
         assert_eq!(
             column(
                 &e,
+                "SELECT (SELECT NULL) AS b UNION ALL SELECT CAST(1 AS BOOLEAN)",
+                "b"
+            ),
+            [Value::Null, Value::from(true)],
+            "a scalar subquery above the union runs first and leaves its order"
+        );
+        assert_eq!(
+            column(
+                &e,
                 "SELECT CAST(count(*) AS INT) AS n FROM t WHERE block_number < 2000 UNION ALL \
                  SELECT CAST(count(*) AS INT) FROM t UNION ALL \
                  SELECT CAST(min(block_number) AS INT) FROM t",

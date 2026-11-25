@@ -7,12 +7,12 @@
 //! SELECT 999 LIMIT 5` answered `1, 999, 2, 3, 4`. DuckDB answers the first arm's rows, then the
 //! second's, and statements with a `LIMIT` or no `ORDER BY` rely on it.
 //!
-//! [`UnionOrder`] walks down from the root through the operators that hand on their one input's
-//! order (a projection, a filter, a limit, a window over no order), and there makes a union an
-//! [`OrderedUnionExec`]: every arm still starts at once, on a task of its own, and the answer reads
-//! the first to its end, then the next. An arm of several partitions is coalesced as before, so its
-//! own rows keep whatever order they had. Under an aggregate, a join or a sort the order of the
-//! union's rows cannot reach the answer, and nothing there changes.
+//! [`UnionOrder`] walks down from the root through the operators that hand on their input's order
+//! (a projection, a filter, a limit, a window over no order, a body below the subqueries it uses),
+//! and there makes a union an [`OrderedUnionExec`]: every arm still starts at once, on a task of
+//! its own, and the answer reads the first to its end, then the next. An arm of several partitions
+//! is coalesced as before, so its own rows keep whatever order they had. Under an aggregate, a join
+//! or a sort the order of the union's rows cannot reach the answer, and nothing there changes.
 
 use std::fmt;
 use std::sync::Arc;
@@ -220,10 +220,11 @@ fn ordered(plan: Arc<dyn ExecutionPlan>) -> Result<Arc<dyn ExecutionPlan>> {
     let children = plan.children();
     let maintains = plan.maintains_input_order();
     let required = plan.required_input_ordering();
-    // A statement's shared subqueries run before its body, whose rows are the answer.
+    // A statement's shared or scalar subqueries run before its body, whose rows are the answer.
     let body = match children.len() {
         1 => 0,
         n if plan.name() == "SharedDefsExec" => n - 1,
+        _ if plan.name() == "ScalarSubqueryExec" => 0,
         _ => return Ok(plan),
     };
     if !maintains.get(body).copied().unwrap_or(false)
