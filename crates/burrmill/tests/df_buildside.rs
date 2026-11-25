@@ -307,6 +307,110 @@ fn a_side_whose_filter_keeps_few_rows_is_built_on_and_collected() {
     }
 }
 
+/// Q4 at SF10 keeps the 573.7K orders of one quarter and asks which have a late `lineitem` row. The
+/// semi join built on those orders partitioned, so the dynamic filter it gave the `lineitem` scan
+/// was a `CASE` over each of its 60M rows' repartition hash: 1.77 s of row-filter CPU, against
+/// 0.39 s collected (#433). A semi join whose build side is guessed under an eighth of what its
+/// probe reads is now collected; one whose build side is not filtered is not.
+#[test]
+fn a_semi_join_on_a_few_filtered_rows_is_collected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let segs = tmp.path().join("segments");
+    std::fs::create_dir(&segs).unwrap();
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = |m: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % m) as i64
+    };
+    let orders = 10_000i64;
+    let ords: Vec<(i64, i64)> = (0..orders).map(|k| (k, next(1 << 40))).collect();
+    // `k`, `a`, `b`, `c` as in Q12's fixture; the note makes `lines` read about as many times
+    // `ords` as Q4's `lineitem` does its `orders`.
+    let lines: Vec<[i64; 5]> = (0..4 * orders)
+        .map(|_| {
+            let a = next(2_500);
+            [next(orders as u64), 0, a, a + next(30), a + next(60)]
+        })
+        .collect();
+    let notes: Vec<String> = (0..lines.len())
+        .map(|_| format!("{:010x}", next(1 << 40)))
+        .collect();
+    let int = |name: &str| Field::new(name, DataType::Int64, false);
+    let put = |name: &str, fields: Vec<Field>, arrays: Vec<ArrayRef>| {
+        let schema = Arc::new(Schema::new(fields));
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let path = segs.join(format!("{name}-{:064x}.parquet", 1));
+        let f = std::fs::File::create(&path).unwrap();
+        let mut w = parquet::arrow::ArrowWriter::try_new(f, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+        std::fs::metadata(&path).unwrap().len() as f64
+    };
+    let col = |i: usize| -> ArrayRef {
+        Arc::new(Int64Array::from_iter_values(lines.iter().map(|l| l[i])))
+    };
+    let line_bytes = put(
+        "lines",
+        vec![
+            int("k"),
+            int("b"),
+            int("c"),
+            Field::new("note", DataType::Utf8, false),
+        ],
+        vec![
+            col(0),
+            col(3),
+            col(4),
+            Arc::new(StringArray::from_iter_values(notes.iter())),
+        ],
+    );
+    let ord_bytes = put(
+        "ords",
+        vec![int("k"), int("v")],
+        vec![
+            Arc::new(Int64Array::from_iter_values(ords.iter().map(|o| o.0))),
+            Arc::new(Int64Array::from_iter_values(ords.iter().map(|o| o.1))),
+        ],
+    );
+    // Over an eighth of `lines` unfiltered, under it with a range's guessed third.
+    let ratio = line_bytes / ord_bytes;
+    assert!((8.0 / 3.0..8.0).contains(&ratio), "{ratio}");
+    let e = Engine::open_segments(&segs).unwrap();
+    e.set_small_statement_bytes(0);
+    let (lo, hi) = (1i64 << 38, 1i64 << 39);
+    let sql = format!(
+        "SELECT count(*), coalesce(sum(o.v % 1000), 0) FROM ords o \
+         WHERE o.v >= {lo} AND o.v < {hi} \
+         AND EXISTS (SELECT 1 FROM lines l WHERE l.k = o.k AND l.b < l.c)"
+    );
+    assert_eq!(build_side(&e, &sql), "ords", "{sql}");
+    assert!(
+        plan(&e, &sql).contains("HashJoinExec: mode=CollectLeft, join_type=LeftSemi"),
+        "{}",
+        plan(&e, &sql)
+    );
+    let late: std::collections::HashSet<i64> =
+        lines.iter().filter(|l| l[3] < l[4]).map(|l| l[0]).collect();
+    let rows: Vec<i64> = ords
+        .iter()
+        .filter(|o| (lo..hi).contains(&o.1) && late.contains(&o.0))
+        .map(|o| o.1 % 1000)
+        .collect();
+    assert!(
+        !rows.is_empty() && rows.len() < ords.len() / 2,
+        "{}",
+        rows.len()
+    );
+    let want = (rows.len().to_string(), rows.iter().sum::<i64>().to_string());
+    assert_eq!(one(&e, &sql), want, "{sql}");
+    // Every order, unfiltered, is not guessed small enough to collect.
+    let all = "SELECT count(*), 0 FROM ords o \
+               WHERE EXISTS (SELECT 1 FROM lines l WHERE l.k = o.k AND l.b < l.c)";
+    assert!(!plan(&e, all).contains("CollectLeft"), "{}", plan(&e, all));
+}
+
 fn plan(e: &Engine, sql: &str) -> String {
     let mut out = String::new();
     for b in e.sql(&format!("EXPLAIN {sql}")).unwrap() {

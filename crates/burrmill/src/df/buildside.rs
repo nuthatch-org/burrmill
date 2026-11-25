@@ -25,6 +25,12 @@
 //! small. Partitioned, its dynamic filter on the probe's scan is a `CASE` over each row's
 //! repartition hash: in Q12 at SF10 2.37 s of the `orders` scan's CPU against 0.30 s collected,
 //! one `EXPLAIN ANALYZE` each at a 1-minute load of 50.
+//!
+//! A semi join is collected too where its build side is guessed to keep at most an eighth of what
+//! its probe side reads ([`filters_probe`]). Q4 builds on the 573.7K orders of one quarter and
+//! probes all 60M `lineitem` rows; partitioned, the `CASE` its dynamic filter put in that scan cost
+//! 1.77 s of row-filter CPU at SF10, against 0.39 s collected (#433). A semi join holds only its
+//! build side's rows or keys, so collecting it moves no more into memory than partitioning did.
 
 use std::sync::Arc;
 
@@ -68,6 +74,15 @@ fn collect_keys(j: &HashJoinExec) -> Result<Option<Arc<dyn ExecutionPlan>>> {
         ))),
         _ => Ok(None),
     }
+}
+
+/// Whether a semi join building on `build` is collected: its build side is guessed to keep at most
+/// an eighth of what `probe` reads.
+fn filters_probe(build: &Arc<dyn ExecutionPlan>, probe: &Arc<dyn ExecutionPlan>) -> bool {
+    matches!(
+        (bytes_kept(build), bytes_read(probe)),
+        (Some(b), Some(p)) if b.saturating_mul(DECISIVE as u64) <= p
+    )
 }
 
 /// How many times smaller a side's guessed share must leave it for the guess to decide.
@@ -254,8 +269,16 @@ impl PhysicalOptimizerRule for BuildOnSmaller {
                 return Ok(Transformed::no(p));
             }
             let (swap, guessed) = builds_larger(j.left(), j.right());
+            let (build, probe) = if swap {
+                (j.right(), j.left())
+            } else {
+                (j.left(), j.right())
+            };
             let mode = match j.partition_mode() {
                 PartitionMode::Partitioned if guessed && *j.join_type() == JoinType::Inner => {
+                    PartitionMode::CollectLeft
+                }
+                PartitionMode::Partitioned if collect && filters_probe(build, probe) => {
                     PartitionMode::CollectLeft
                 }
                 m => *m,
