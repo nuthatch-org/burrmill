@@ -4,6 +4,41 @@ Newest first. One entry per RFC-0044 slice.
 
 ---
 
+## Re-measured against DuckDB 2.0.1; TPC-H Q2 at SF10 within 1.5x datafusion-cli (#414, #382) — 2026-11-25
+
+DuckDB 2.0.1 (2026-11-20) is the release now, and every DuckDB figure in `docs/bench/tpch.md`,
+`docs/bench/csv-ingest.md` and the README's TPC-H and CSV lines was against the bench's bundled
+crate, which reports v1.5.4 (the docs said 1.5.5). The bench gains `DUCKDB=<path to the duckdb
+CLI>` for `tpch` and `csv-ingest`: answers through a Parquet file the CLI writes, times from its
+`.timer`, peak RSS from `wait4`. The engine did not change.
+
+**Numbers.** On 2d44933 on the ThinkPad, shared and busy, the DuckDB 2.0.1 release CLI on CPU
+(`v2.0.1 (Cyanoptera) 8d78114e90`), datafusion-cli 55.2.0, 8 threads, best of 3, answers measured
+first:
+
+    DUCKDB=$D DFCLI=$(which datafusion-cli) DIR=sf10 THREADS=8 RUNS=3 target/release/burrmill-bench tpch
+
+- TPC-H: every answer the same as DuckDB 2.0.1's (22 of 22 at SF1, 21 of 22 at SF10 with Q21 refused
+  without a spill directory). Burrmill takes 1.18x to 4.80x DuckDB 2.0.1's time at SF1 and 1.74x to
+  5.26x at SF10, where it took 0.71x to 30.97x the bundled 1.5.4's in #346; DuckDB 2.0.1 runs SF10's
+  22 in 6.4 s against that run's 17.0. Loads 6.0 to 12.1.
+- The 1 GB CSV: 2.0x to 2.5x DuckDB 2.0.1 at 8 threads, 1.6x at one, leaving out a run where the
+  load reached 24.
+- Q2 at SF10, ten rounds: 1.31x to 1.39x datafusion-cli at loads 7.6 to 8.8, 1.45x to 1.73x at 11 to
+  15. Its `EXPLAIN ANALYZE` at SF1 and SF10 has no ordered aggregate; both group by `ps_partkey`
+  alone. #399 was the fix, as for Q17: with `LiteralGroupKeys` switched off by an early return
+  (built for the check, not committed), both aggregates group by `ps_partkey` and `__always_true`
+  in `PartiallySorted` mode, and Q2 at SF10 takes 2,117 ms against 260.
+
+What is left of Q2's gap is not in its operators, whose CPU is below datafusion-cli's: the
+dynamic filters decoded as row filters in the `partsupp` scans (1.18 s of scan CPU against 0.70)
+and joins all partitioned for want of statistics are the candidates, not measured apart.
+
+Sirius, DuckDB 2.0.1's GPU extension, was not measured: it needs CUDA 12.8 or newer, and this
+machine's RTX 2000 Ada laptop GPU has a driver for 12.4.
+
+---
+
 ## TPC-H Q17 at SF10 is within 1.5x datafusion-cli; #381's Done-when re-measured — 2026-11-24
 
 No code changed. The cause was found and fixed by #399, in the entry for 2026-11-22 below: a

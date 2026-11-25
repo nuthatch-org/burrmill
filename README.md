@@ -10,7 +10,7 @@ in it.**
 Status, 2026-10-02: **the migration is done.** nuthatch 4.1.0 ships with Burrmill as its only engine,
 DuckDB is out of its tree and its lockfile, and all six production nests run on it. Gate 1 of
 [RFC-0044 Amendment 2](docs/rfc/RFC-0044-burrmill.md) was taken as passed on 2026-09-26: every
-authored view of a real production nest byte-identical, the set at 0.65x DuckDB's time, the memory
+authored view of a real production nest byte-identical, the set at 0.65x DuckDB 1.5.4's time, the memory
 gate as nuthatch would run it, the larger build footprint accepted as the price of taking DuckDB's
 C++ out of nuthatch. Phase 2, the engine trait, shadow mode and the cutover, ran in nuthatch from
 2026-09-26 to 2026-10-02; its tick lists are in
@@ -52,9 +52,9 @@ everything beneath, `NAME=PATH` names one outright; `--format csv|json|parquet|a
 named on the command line ending `.csv` is read as CSV, and one ending `.json`, `.ndjson` or `.jsonl`
 as JSON (an array of objects, or one object after another), by the tab's reader, so each column is
 typed as the tab types it. Such a file is held in memory, out of `--memory`, a JSON file up to
-1 GiB. A CSV is read on `--threads`, a batch every 4 MiB: a 1 GB CSV reads in about 1.5 s on 8
-threads at the default `--memory`, where DuckDB's `read_csv` takes about 1 s
-([docs/bench/csv-ingest.md](docs/bench/csv-ingest.md)). A short row, a quote never closed, a cell
+1 GiB. A CSV is read on `--threads`, a batch every 4 MiB: a 1 GB CSV reads in 1.4 to 1.9 s on 8
+threads at the default `--memory`, where DuckDB 2.0.1's `read_csv` takes 0.8 to 1.1 s, on a busy
+machine ([docs/bench/csv-ingest.md](docs/bench/csv-ingest.md)). A short row, a quote never closed, a cell
 its column's type does not read, or JSON that does not parse is refused at its row (from 1, after the header) or line, and column. A receipt names the file
 by its bytes, as it does a Parquet file. Directories are still read for Parquet only.
 
@@ -141,17 +141,28 @@ directories as columns, pruned by statistics and partition values as segments ar
 
 ## The three claims
 
+**Against which DuckDB.** TPC-H and the 1 GB CSV were re-measured on 2026-11-25 against DuckDB
+2.0.1, the current release, on the same machine and at the same thread counts as before
+([docs/bench/tpch.md](docs/bench/tpch.md), [docs/bench/csv-ingest.md](docs/bench/csv-ingest.md)):
+at 8 threads Burrmill takes 1.74x (Q14) to 5.26x (Q17) DuckDB 2.0.1's time on TPC-H at SF10, and
+2.0x to 2.5x on the CSV. The nest figures below are against DuckDB 1.5.4, the version nuthatch
+carried, and are not re-measured: nuthatch no longer has DuckDB, and the nest harnesses run the
+bench's bundled 1.5.4. Sirius is DuckDB 2.0.1's extension that runs supported queries on NVIDIA
+GPUs, on Linux with CUDA 12.8 or newer only. Burrmill's comparison is CPU against CPU, on hardware
+a laptop has, and no Sirius numbers were measured: this machine's GPU, an RTX 2000 Ada laptop
+part, has a driver for CUDA 12.4.
+
 **Faster.** Measured 2026-09-24 and 25 on a 32-core ThinkPad against a 1,925-segment copy of the
-graph-allocations nest that Lodestar reads in production, DuckDB set up exactly as nuthatch sets it
-up, every view's whole output compared as a multiset of nuthatch-encoded rows before any timing was
+graph-allocations nest that Lodestar reads in production, DuckDB 1.5.4 set up exactly as nuthatch
+sets it up, every view's whole output compared as a multiset of nuthatch-encoded rows before any timing was
 printed (`burrmill-bench engine-views`, `docs/bench/phase1b-thinkpad.txt`,
 `docs/bench/rangejoin-thinkpad.txt`):
 
-| | DuckDB | Burrmill |
+| | DuckDB 1.5.4 | Burrmill |
 |---|---:|---:|
 | authored views byte-identical | | **22 of 22** |
 | time-weighted over the 22 | 39.6 s | **0.65x** |
-| views within 1.5x of DuckDB | | **22 of 22** |
+| views within 1.5x of DuckDB 1.5.4 | | **22 of 22** |
 | worst view | | `lodestar_disputes`, 8 rows, 0.80x |
 
 Re-run on 2026-09-27 with everything since in: 22 of 22 identical, **0.63x**, 22 of 22 within 1.5x
@@ -164,14 +175,14 @@ Serving the 12 views that were portable on 2026-09-24 to 1, 4, 16 and 32 concurr
 (`burrmill-bench serve-views`, `docs/bench/serve-views-thinkpad.txt`): **14.7 against 7.2 qps at
 one client and 32.9 against 15.1 at 32**, worst p99 1,350 ms against 7,424, fairness 0.90 against
 0.00, and 3.9 GB of process memory against 15.4, all at 32 clients with `ulimit -n` raised, since
-DuckDB fails outright at the default. Not re-run over the 22.
+DuckDB 1.5.4 fails outright at the default. Not re-run over the 22.
 
 **In production the sign is the other way.** Those are whole views, warm, on a bench harness.
 Through nuthatch's `/sql` on the allocations nest's real dashboard statements (`sql_sweep_over_a_nest`
 on a copy, 2026-10-01), Burrmill at two sessions of 2 GB and eight threads served 11, 26 and 28 qps at
-1, 4 and 8 clients where DuckDB at four sessions of 256 MB served 29, 112 and 123: **about 2.5x
-DuckDB's time a statement**, p99 about 620 ms against 128 to 184. On the QoS nest, Lodestar's eight
-one-day statements took 3.2 to 4.1 s against DuckDB's 0.6 to 0.7, because a date range arriving
+1, 4 and 8 clients where DuckDB 1.5.4 at four sessions of 256 MB served 29, 112 and 123: **about
+2.5x DuckDB 1.5.4's time a statement**, p99 about 620 ms against 128 to 184. On the QoS nest, Lodestar's eight
+one-day statements took 3.2 to 4.1 s against DuckDB 1.5.4's 0.6 to 0.7, because a date range arriving
 through a join was not pushed to the scan and Burrmill read every segment where DuckDB read the
 day's. `RangeBounds` (#68, 2026-10-04) now bounds the probe scan by the join's build-side extremes,
 and on a QoS copy the kittiwake one-day statements went from 7 to 11 s to 1.1 to 1.6 s, 47 of 5.32K
@@ -180,14 +191,14 @@ that nuthatch's README now quotes, and the swap was not made for speed.
 
 **Re-measured on 2026-11-11, in process.** Nuthatch no longer carries DuckDB, so the `/sql` sweep
 cannot be repeated. These are `engine-sql` over the ThinkPad's gate copies: one client, warm medians
-of five, DuckDB bound as nuthatch bound it and at eight threads, the box under a load average of 60
+of five, DuckDB 1.5.4 bound as nuthatch bound it and at eight threads, the box under a load average of 60
 to 110 (`docs/bench/host-scan-statements-thinkpad-2026-11-11.txt`). Over the allocations dashboard's
 75 statements (6,753 segments, Burrmill at 2 GB and eight threads) Burrmill's median is 555 ms
-against DuckDB's 1,616, the sum 102 s against 243, and it is the faster on 65. Over the QoS day
+against DuckDB 1.5.4's 1,616, the sum 102 s against 243, and it is the faster on 65. Over the QoS day
 set's nine (14,913 segments, four threads) Burrmill at 2 GB answers all nine, the six heavy ones in
-2.7 to 5.4 s against DuckDB's 4.1 to 5.4. At the nest's own 704 MB, with no spill directory, it
-refuses four of the nine, and the two heavy ones it answers take 6.2 and 7.1 s against DuckDB's 4.0
-and 4.7; before #269 charged a scan for the segments it holds, it refused two to four. Answers
+2.7 to 5.4 s against DuckDB 1.5.4's 4.1 to 5.4. At the nest's own 704 MB, with no spill directory, it
+refuses four of the nine, and the two heavy ones it answers take 6.2 and 7.1 s against DuckDB
+1.5.4's 4.0 and 4.7; before #269 charged a scan for the segments it holds, it refused two to four. Answers
 match but for float sums in the last digit, which DuckDB does not repeat between runs either.
 
 **Exact.** Integer overflow returns an error, never a wrapped number, on both layers. The owned fold
@@ -225,8 +236,8 @@ The confidence comes from running both engines on the same statements, not from 
   `reach-parity` 38/46 identical and 8 stricter, `rewrite-parity <nest> <views-dir>` for a rewritten
   view against its original.
 - **The memory gate**: `examples/hosted_fold`, the fold in a binary shaped like nuthatch after the
-  swap, **241 to 245 MB peak RSS at 989,690 groups** against the 256 MB gate, DuckDB at 572 to 598 MB
-  on the same fold (`docs/bench/memory-gate-thinkpad-2026-09-25.txt`). The bench binary reads 20 MB
+  swap, **241 to 245 MB peak RSS at 989,690 groups** against the 256 MB gate, DuckDB 1.5.4 at 572
+  to 598 MB on the same fold (`docs/bench/memory-gate-thinkpad-2026-09-25.txt`). The bench binary reads 20 MB
   higher because it links DuckDB and the umbrella crate as oracles, and their code pages count.
 - **The generated fold corpus** (`burrmill-bench gen`, `tests/generated_folds.rs`) and the `.slt`
   files, which run against Burrmill in `cargo test` and against DuckDB with `burrmill-bench slt`.
@@ -237,12 +248,12 @@ Said plainly, because a README that implies otherwise is the thing this project 
 
 - **The binary is bigger and the build is not faster.** On a nuthatch-shaped consumer, same machine,
   32 jobs (`docs/research/replacing-duckdb/probes/footprint6/results/burrmill.txt`): querying test
-  binary 495 MB against DuckDB's 162, release binary 112 MB against 41, `target/` 4.76 GB against
+  binary 495 MB against DuckDB 1.5.4's 162, release binary 112 MB against 41, `target/` 4.76 GB against
   3.27, clean test build 84 s against 77, incremental 1.8 s against 1.1. DuckDB is one C++ archive compiled once; DataFusion is
   dozens of crates whose generic operators are instantiated per type into every test binary. The
   footprint is accepted; the build time is [burrmill#7](https://github.com/nuthatch-org/burrmill/issues/7).
 - **Small queries.** An eight-row view runs eighteen DataFusion operators. `lodestar_disputes` is
-  0.80x DuckDB after the small-input rule, and the worst ratio on the nest.
+  0.80x DuckDB 1.5.4 after the small-input rule, and the worst ratio on the nest.
 - **`HUGEINT` stops at 38 digits.** `DECIMAL(38,0)` reaches 10^38 - 1 where DuckDB's reaches
   2^127 - 1, and widening it would change the type of every HUGEINT column nuthatch plans. A `CAST`
   of a value between refuses (#42), and so does a `TRY_CAST` whose value is read, from text (#44) or
@@ -255,16 +266,16 @@ Said plainly, because a README that implies otherwise is the thing this project 
   answers by dropping what did not fit. The fuzzer counts these separately and they are allowed.
 - **What Burrmill computes and DuckDB refuses**: `TIMESTAMPTZ + INTERVAL` and a `TIMESTAMPTZ` to
   `DATE` cast, which nuthatch's DuckDB, built without ICU, will not do.
-- **Slower per statement in production**, as measured on 2026-10-01 and 02: about 2.5x DuckDB's time
-  through `/sql` on the allocations nest, and 4.5 s against 0.7 for the QoS nest's eight one-day
+- **Slower per statement in production**, as measured on 2026-10-01 and 02: about 2.5x DuckDB 1.5.4's
+  time through `/sql` on the allocations nest, and 4.5 s against 0.7 for the QoS nest's eight one-day
   statements. The QoS cause, a day range through a join side not reaching the scan, is fixed by
   `RangeBounds` (#68) for a collect-left join that drops unmatched probe rows; a partitioned join,
   an outer probe side or a float comparison still reads every segment. Neither figure can be taken
   again as it was, since nuthatch has no DuckDB to serve beside. In process on 2026-11-11 Burrmill
-  was the faster on the allocations statements and level with DuckDB on the QoS day set at 2 GB
+  was the faster on the allocations statements and level with DuckDB 1.5.4 on the QoS day set at 2 GB
   (above). What QoS is owed now is memory rather than pruning: at 704 MB without a spill directory
   it refuses four of the nine day statements and runs the heavy ones it answers at about 1.5 times
-  DuckDB's time, and no session keeps a large table's footers between statements, since the nest's
+  DuckDB 1.5.4's time, and no session keeps a large table's footers between statements, since the nest's
   take 341 MB and a 704 MB budget's cache holds 88 (RFC-0047 §3).
 - **More memory per session.** The allocations nest's dashboard refuses 12 or 13 of its statements
   at 1 GB and 18 at 768 MB, so nuthatch runs it at two sessions of 2 GB and eight threads where

@@ -25,6 +25,7 @@
 mod csv_ingest;
 mod df_views;
 mod dialect_parity;
+mod duckcli;
 mod encode_parity;
 mod engine_views;
 mod error_parity;

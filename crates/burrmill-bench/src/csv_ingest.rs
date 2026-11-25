@@ -6,7 +6,8 @@
 //! many threads, DuckDB through `CREATE TABLE AS SELECT * FROM read_csv(...)`.
 //!
 //! `BYTES` of CSV (1,000,000,000), `THREADS` (8), `RUNS` (3), `BUDGET` in bytes (4 GiB, the CLI's
-//! default `--memory`).
+//! default `--memory`). `DUCKDB=<path to the duckdb CLI>` runs DuckDB as that CLI rather than the
+//! bundled library, for its answer and its times (`duckcli`, #414).
 
 use std::io::Write;
 use std::path::Path;
@@ -103,17 +104,37 @@ pub fn run() -> anyhow::Result<()> {
         .map(|f| format!("{} {}", f.name(), f.data_type()))
         .collect();
     drop((all, engine));
+    let duck_cli = std::env::var("DUCKDB").ok();
     let duck = duckdb::Connection::open_in_memory()?;
     duck.execute_batch(&format!("SET threads = {threads};"))?;
+    let duck_version = match &duck_cli {
+        Some(bin) => format!("CLI {bin}, {}", crate::duckcli::version(bin)?),
+        None => duck.query_row("SELECT version()", [], |r| r.get::<_, String>(0))?,
+    };
     // DuckDB reads the amount as DOUBLE; summed as the two-place decimal it was written as.
-    let theirs: Vec<String> = duck.query_row(
-        &statement(
-            &format!("read_csv('{shown}')"),
-            "CAST(amount AS DECIMAL(18,2))",
-        ),
-        [],
-        |r| (0..COLUMNS).map(|i| r.get::<_, String>(i)).collect(),
-    )?;
+    let parity = statement(
+        &format!("read_csv('{shown}')"),
+        "CAST(amount AS DECIMAL(18,2))",
+    );
+    let theirs: Vec<String> = match &duck_cli {
+        None => duck.query_row(&parity, [], |r| {
+            (0..COLUMNS).map(|i| r.get::<_, String>(i)).collect()
+        })?,
+        Some(bin) => {
+            // Named c0 to c6, so the row's columns can be taken in order.
+            let names: Vec<String> = (0..COLUMNS).map(|i| format!("c{i}")).collect();
+            let named = format!("SELECT * FROM ({parity}) AS s({})", names.join(", "));
+            let rows = crate::duckcli::rows(bin, &format!("SET threads = {threads};"), &named)
+                .map_err(|e| anyhow::anyhow!("DuckDB: {e}"))?;
+            anyhow::ensure!(rows.len() == 1, "DuckDB gave {} rows", rows.len());
+            let row: serde_json::Value = serde_json::from_str(&rows[0])?;
+            names
+                .iter()
+                .map(|c| row.get(c).and_then(|v| v.as_str()).map(str::to_string))
+                .collect::<Option<_>>()
+                .ok_or_else(|| anyhow::anyhow!("DuckDB's answer is not text: {}", rows[0]))?
+        }
+    };
     anyhow::ensure!(
         ours == theirs,
         "the answers differ: burrmill {ours:?}, duckdb {theirs:?}"
@@ -129,6 +150,19 @@ pub fn run() -> anyhow::Result<()> {
     let ours = ours_at(threads)?;
     let ours_one = ours_at(1)?;
     let duck_at = |n: usize| -> anyhow::Result<Duration> {
+        if let Some(bin) = &duck_cli {
+            return crate::duckcli::best(
+                bin,
+                &format!("SET threads = {n};"),
+                &[
+                    &format!("CREATE OR REPLACE TABLE t AS SELECT * FROM read_csv('{shown}')"),
+                    "DROP TABLE t",
+                ],
+                runs,
+            )
+            .map(|(d, _)| d)
+            .map_err(|e| anyhow::anyhow!("DuckDB: {e}"));
+        }
         duck.execute_batch(&format!("SET threads = {n};"))?;
         best(runs, || {
             duck.execute_batch(&format!(
@@ -152,6 +186,7 @@ pub fn run() -> anyhow::Result<()> {
         "CSV of {size} bytes, {rows} rows, best of {runs}; burrmill budget {} MiB",
         memory >> 20
     );
+    println!("duckdb: {duck_version}");
     println!("burrmill types: {}", types.join(", "));
     println!("answers agree: {answer:?}");
     line(

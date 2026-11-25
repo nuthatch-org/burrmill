@@ -13,6 +13,9 @@
 //! allocator kept would count against the other. `ANALYZE=1` prints Burrmill's `EXPLAIN ANALYZE`
 //! of each query after its runs, for the operators' memory and spill metrics; `ANALYZE=plan`, its
 //! `EXPLAIN`.
+//!
+//! `DUCKDB=<path to the duckdb CLI>` runs DuckDB as that CLI rather than the bundled library, for
+//! its answers and its times (`duckcli`); its peak RSS is then the timed CLI session's (#414).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -194,8 +197,10 @@ pub fn run() -> anyhow::Result<()> {
         Err(_) => (1..=22).collect(),
     };
 
+    let duck_cli = std::env::var("DUCKDB").ok();
     let duck = duckdb::Connection::open_in_memory()?;
     duck.execute_batch(&format!("SET threads = {threads};"))?;
+    let mut duck_setup = format!("SET threads = {threads};\n");
     let mut b = burrmill::Engine::builder().budget(burrmill::Budget {
         memory_bytes: budget,
         threads,
@@ -208,12 +213,20 @@ pub fn run() -> anyhow::Result<()> {
         } else {
             loc.display().to_string()
         };
-        duck.execute_batch(&format!(
-            "CREATE VIEW {t} AS SELECT * FROM read_parquet('{glob}');"
-        ))?;
+        let view = format!("CREATE VIEW {t} AS SELECT * FROM read_parquet('{glob}');");
+        duck_setup += &view;
+        duck_setup += "\n";
+        if duck_cli.is_none() {
+            duck.execute_batch(&view)?;
+        }
         b = b.parquet(&loc, t);
     }
     let engine = std::sync::Arc::new(std::thread::spawn(move || b.open()).join().expect("open")?);
+    let duck_version = match &duck_cli {
+        Some(bin) => format!("CLI {bin}, {}", crate::duckcli::version(bin)?),
+        None => duck.query_row("SELECT version()", [], |r| r.get::<_, String>(0))?,
+    };
+    println!("DuckDB: {duck_version}");
 
     println!(
         "TPC-H over {} at {threads} threads, budget {} MiB{}, best of {runs}, engines: {engine_only}",
@@ -232,13 +245,25 @@ pub fn run() -> anyhow::Result<()> {
     for n in which {
         let sql = query(n)?;
         reset_peak_rss();
-        let (dt, want) = if run_duck {
-            best(runs, || crate::fuzz::duck_rows(&duck, &sql))
-                .map_err(|e| anyhow::anyhow!("DuckDB on Q{n}: {e}"))?
-        } else {
-            (Duration::ZERO, Vec::new())
+        let mut cli_rss = None;
+        let (dt, want) = match (&duck_cli, run_duck) {
+            (_, false) => (Duration::ZERO, Vec::new()),
+            (None, true) => best(runs, || crate::fuzz::duck_rows(&duck, &sql))
+                .map_err(|e| anyhow::anyhow!("DuckDB on Q{n}: {e}"))?,
+            (Some(bin), true) => {
+                let want = crate::duckcli::rows(bin, &duck_setup, &sql)
+                    .map_err(|e| anyhow::anyhow!("DuckDB on Q{n}: {e}"))?;
+                let (dt, rss) = crate::duckcli::best(bin, &duck_setup, &[&sql], runs)
+                    .map_err(|e| anyhow::anyhow!("DuckDB on Q{n}: {e}"))?;
+                cli_rss = Some(rss);
+                (dt, want)
+            }
         };
-        let duck_rss = if run_duck { peak_rss_mib() } else { "-".into() };
+        let duck_rss = match cli_rss {
+            Some(rss) => rss.to_string(),
+            None if run_duck => peak_rss_mib(),
+            None => "-".into(),
+        };
         if !run_burr {
             println!("| {n} | {} | {duck_rss} | - | - | - | | - | - |", ms(dt));
             continue;
