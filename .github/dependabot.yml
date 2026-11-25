@@ -20,8 +20,9 @@ updates:
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: "object_store"
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      # Every DataFusion crate is pinned to one release and two are vendored at it, so a bump must
+      # move them all and re-apply the vendored changes: by hand, as vendor/README.md describes.
       - dependency-name: "datafusion*"
-        update-types: ["version-update:semver-major"]
       # The bench's oracle; moved by hand with a parity run.
       - dependency-name: "duckdb"
   - package-ecosystem: github-actions
