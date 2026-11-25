@@ -1092,3 +1092,36 @@ fn corr_without_spread_is_nan_as_duckdb_has_it() {
         ]
     );
 }
+
+/// #430: DuckDB joins a NATURAL JOIN on columns named alike but for case
+/// (`case_insensitive_using.test:123`); DataFusion matched names exactly and kept both, so it is
+/// refused by name. Names alike in case still join.
+#[test]
+fn a_natural_join_on_names_alike_but_for_case_is_refused() {
+    let mut engine = Engine::open_empty().unwrap();
+    engine
+        .register_view("a", "SELECT 1 AS hello, 2 AS x")
+        .unwrap();
+    engine
+        .register_view("b", "SELECT 1 AS \"HELLO\", 3 AS y")
+        .unwrap();
+    engine
+        .register_view("c", "SELECT 1 AS hello, 4 AS z")
+        .unwrap();
+    let e = engine
+        .sql("SELECT * FROM a NATURAL JOIN b")
+        .expect_err("refused")
+        .to_string();
+    assert!(
+        e.contains("NATURAL JOIN") && e.contains("not supported"),
+        "{e}"
+    );
+    assert!(matches!(
+        engine.sql("SELECT * FROM c NATURAL JOIN b"),
+        Err(BurrmillError::NotAllowed(_))
+    ));
+    assert_eq!(
+        one_row(&engine, "SELECT * FROM a NATURAL JOIN c"),
+        vec![serde_json::json!({"hello": 1, "x": 2, "z": 4})]
+    );
+}
