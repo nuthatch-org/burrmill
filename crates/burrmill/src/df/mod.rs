@@ -70,6 +70,7 @@ mod floatsum;
 mod fold;
 mod gate;
 mod host;
+mod joinedgroups;
 mod joinfilters;
 mod lastnonnull;
 mod lists;
