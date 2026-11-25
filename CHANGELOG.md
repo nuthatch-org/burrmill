@@ -24,6 +24,13 @@ Engine (`burrmill`, feature `datafusion`)
   SF10 builds on 573.7K orders and probes 60M `lineitem` rows; that filter's CPU went from 1.77 s to
   0.39 s and Q4 from 493–635 ms to 418–425 ms. Q2 and Q20 take it too, and no other TPC-H plan
   changes.
+- A `UNION ALL` answers its first arm's rows, then the second's, as DuckDB does, where nothing
+  above it reorders: `SELECT 1 UNION ALL SELECT * FROM range(2, 100) UNION ALL SELECT 999 LIMIT 5`
+  answered `1, 999, 2, 3, 4`, as the coalesce above the union passed on whichever arm's batch came
+  first (#430). Such a union is now an `OrderedUnionExec`, which still starts every arm at once and
+  reads them in turn; an arm of several partitions is coalesced as before. Under an aggregate, a
+  join or a sort the plan does not change, and TPC-H's plans are the same. Of the sqllogictest
+  suite's records, 12199 pass where 12168 did and 634 are wrong where 665 were.
 
 ## 0.4.0 - 2026-11-25
 
