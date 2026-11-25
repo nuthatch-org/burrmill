@@ -209,11 +209,6 @@ path = "tests/df_literalkeys.rs"
 required-features = ["datafusion"]
 
 [[test]]
-name = "df_joinedgroups"
-path = "tests/df_joinedgroups.rs"
-required-features = ["datafusion"]
-
-[[test]]
 name = "df_joinbuffers"
 path = "tests/df_joinbuffers.rs"
 required-features = ["datafusion"]

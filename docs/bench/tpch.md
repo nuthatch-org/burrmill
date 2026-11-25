@@ -197,7 +197,7 @@ semi join's 0.32 s, over the same 60M rows. Collecting every join whose build si
 of its probe or less, tried and not committed, made Q17 faster again but Q18, Q19, Q20 and Q22
 slower, at loads of 11 to 13.
 
-`tests/df_joinedgroups.rs` catches the slow plan. With the rule off, the Q17-shape test fails: the
+`tests/df_literalkeys/joinedgroups.rs` catches the slow plan. With the rule off, the Q17-shape test fails: the
 average is computed for all 50 parts instead of the 10 the query keeps.
 
 **Before and after.** 62ec1e8 (before) and 9adc6d8 (after), alternating, three rounds each, best of
