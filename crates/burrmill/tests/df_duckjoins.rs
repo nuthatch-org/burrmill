@@ -185,3 +185,44 @@ fn a_natural_join_without_shared_columns_is_an_error() {
         "{err}"
     );
 }
+
+/// DuckDB 2.0's explicit join types and nearest-neighbour joins are refused by name, not as a
+/// syntax error (test/sql/join/mark/constant_mark_join.test:17, join/nearest).
+#[test]
+fn explicit_join_types_and_nearest_joins_are_refused_by_name() {
+    let e = Engine::open_empty().unwrap();
+    for (sql, name) in [
+        (
+            "WITH p(i) AS (VALUES (1)), b(i) AS (VALUES (1)) \
+             SELECT p.i FROM p JOIN BY (TYPE MARK) b ON p.i = 1",
+            "JOIN BY (TYPE MARK) is not supported",
+        ),
+        (
+            "WITH p(i) AS (VALUES (1)), b(i) AS (VALUES (1)) \
+             SELECT p.i FROM p join by (type right_semi) b ON p.i = b.i",
+            "JOIN BY (TYPE RIGHT_SEMI) is not supported",
+        ),
+        (
+            "WITH q(x) AS (VALUES (1)), t(y) AS (VALUES (2)) \
+             SELECT q.x, t.y FROM q JOIN t NEAREST 1 BY DISTANCE abs(q.x - t.y)",
+            "NEAREST ... BY is not supported",
+        ),
+    ] {
+        let err = e.sql(sql).unwrap_err().to_string();
+        assert!(err.contains(name), "{sql}: {err}");
+    }
+    // DuckDB's syntax errors stay syntax errors.
+    for sql in [
+        "SELECT 1 FROM (VALUES (1)) q(x) JOIN (VALUES (2)) t(y) NEAREST 1 BY abs(q.x - t.y)",
+        "SELECT 1 FROM (VALUES (1)) a(x) JOIN BY (TYPE bogus) (VALUES (2)) b(y) ON true",
+    ] {
+        let err = e.sql(sql).unwrap_err().to_string();
+        assert!(!err.contains("not supported"), "{sql}: {err}");
+    }
+    // Columns and aliases of those names are no such join.
+    let got = rows(
+        &e,
+        "WITH t(nearest, type) AS (VALUES (1, 2)) SELECT nearest, type FROM t ORDER BY nearest",
+    );
+    assert_eq!(got, vec![json!({"nearest": 1, "type": 2})]);
+}

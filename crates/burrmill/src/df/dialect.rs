@@ -46,7 +46,7 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
     // Before the parser: sqlparser rejects `[expr FOR x IN list]`, which the views still write.
     let expanded = crate::listcomp::before_parse(sql);
     super::depth::refuse_set_op_tokens(&expanded)?;
-    refuse_positional(&expanded)?;
+    refuse_join_syntax(&expanded)?;
     let (expanded, asof_at) = super::asof::blank(&expanded);
     let parsed = DFParser::parse_sql_with_dialect(expanded.as_str(), &Duck).map_err(|e| {
         let text = parser_text(&e);
@@ -72,26 +72,67 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
     Ok(parsed)
 }
 
-/// DuckDB's `POSITIONAL JOIN`, refused by name. sqlparser does not know it: it reads `POSITIONAL`
-/// as the left relation's alias and the bare `JOIN` as a cross join, every row against every row.
-fn refuse_positional(sql: &str) -> Result<()> {
+/// DuckDB's join syntax sqlparser does not know, refused by name: `POSITIONAL JOIN`, which it read
+/// as the left relation's alias `POSITIONAL` and a bare `JOIN`, a cross join of every row with
+/// every row; `JOIN BY (TYPE MARK)` and the other explicit join types; and `NEAREST n BY`.
+fn refuse_join_syntax(sql: &str) -> Result<()> {
     use sqlparser::keywords::Keyword;
     use sqlparser::tokenizer::{Token, Tokenizer};
-    if !may_hold_keyword(sql, &["positional"]) {
+    if !may_hold_keyword(sql, &["positional", "nearest", "type"]) {
         return Ok(());
     }
     let Ok(tokens) = Tokenizer::new(&Duck, sql).tokenize() else {
         return Ok(());
     };
-    let mut positional = false;
-    for t in tokens.iter().filter(|t| !matches!(t, Token::Whitespace(_))) {
-        if positional && matches!(t, Token::Word(w) if w.keyword == Keyword::JOIN) {
-            return Err(BurrmillError::Parse(
-                "POSITIONAL JOIN is not supported here".into(),
-            ));
-        }
-        positional = matches!(t, Token::Word(w)
-            if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("positional"));
+    let words: Vec<&Token> = tokens
+        .iter()
+        .filter(|t| !matches!(t, Token::Whitespace(_)))
+        .collect();
+    let keyword = |i: usize, k: Keyword| {
+        words
+            .get(i)
+            .is_some_and(|t| matches!(t, Token::Word(w) if w.keyword == k))
+    };
+    let bare = |i: usize, name: &str| {
+        words.get(i).is_some_and(|t| {
+            matches!(t, Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(name))
+        })
+    };
+    // DuckDB's join types; any other name is its syntax error, and sqlparser's.
+    const TYPES: &[&str] = &[
+        "inner",
+        "left",
+        "right",
+        "outer",
+        "semi",
+        "anti",
+        "mark",
+        "single",
+        "right_semi",
+        "right_anti",
+    ];
+    for i in 0..words.len() {
+        let refused = if bare(i, "positional") && keyword(i + 1, Keyword::JOIN) {
+            "POSITIONAL JOIN".to_string()
+        } else if keyword(i, Keyword::JOIN)
+            && keyword(i + 1, Keyword::BY)
+            && matches!(words.get(i + 2), Some(Token::LParen))
+            && bare(i + 3, "type")
+            && let Some(t) = TYPES.iter().find(|t| bare(i + 4, t))
+        {
+            format!("JOIN BY (TYPE {})", t.to_uppercase())
+        } else if bare(i, "nearest")
+            && matches!(words.get(i + 1), Some(Token::Number(..)))
+            && keyword(i + 2, Keyword::BY)
+            && (bare(i + 3, "distance") || bare(i + 3, "similarity"))
+        {
+            "NEAREST ... BY".to_string()
+        } else {
+            continue;
+        };
+        return Err(BurrmillError::Parse(format!(
+            "{refused} is not supported here"
+        )));
     }
     Ok(())
 }
