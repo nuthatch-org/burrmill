@@ -1640,6 +1640,99 @@ fn tuple_cmp(a: &[SqlExpr], b: &[SqlExpr], op: &BinaryOperator) -> SqlExpr {
     binop(head, Or, SqlExpr::Nested(Box::new(binop(eq, And, tail))))
 }
 
+/// A `NATURAL JOIN` whose sides have columns named alike but for case, refused: DuckDB joins on
+/// them, as it compares names without case, where DataFusion's join matches names exactly and
+/// would keep both. Sides whose columns the statement and the nest's tables do not tell are let be.
+fn natural_join_case(
+    body: &sq::SetExpr,
+    known: &Known,
+    ctes: &std::collections::HashSet<String>,
+) -> Option<String> {
+    match body {
+        sq::SetExpr::SetOperation { left, right, .. } => {
+            natural_join_case(left, known, ctes).or_else(|| natural_join_case(right, known, ctes))
+        }
+        sq::SetExpr::Select(s) => s
+            .from
+            .iter()
+            .find_map(|t| natural_joins(t, known, ctes).err()),
+        _ => None,
+    }
+}
+
+/// The columns `t` provides, where they can be told, or the refusal of a NATURAL JOIN within it.
+fn natural_joins(
+    t: &sq::TableWithJoins,
+    known: &Known,
+    ctes: &std::collections::HashSet<String>,
+) -> std::result::Result<Option<Vec<String>>, String> {
+    let columns = |t: &sq::TableFactor| -> std::result::Result<Option<Vec<String>>, String> {
+        let listed = |a: &Option<sq::TableAlias>| {
+            a.as_ref()
+                .filter(|a| !a.columns.is_empty())
+                .map(|a| a.columns.iter().map(|c| c.name.value.clone()).collect())
+        };
+        Ok(match t {
+            sq::TableFactor::Table { alias, .. } | sq::TableFactor::Derived { alias, .. }
+                if listed(alias).is_some() =>
+            {
+                listed(alias)
+            }
+            sq::TableFactor::Table {
+                name, args: None, ..
+            } if name.0.len() == 1 => {
+                let sq::ObjectNamePart::Identifier(n) = &name.0[0] else {
+                    return Ok(None);
+                };
+                let n = n.value.to_lowercase();
+                if ctes.contains(&n) {
+                    None
+                } else {
+                    known.columns(&n)
+                }
+            }
+            sq::TableFactor::NestedJoin {
+                table_with_joins,
+                alias: None,
+            } => natural_joins(table_with_joins, known, ctes)?,
+            _ => None,
+        })
+    };
+    let mut left = columns(&t.relation)?;
+    for j in &t.joins {
+        let right = columns(&j.relation)?;
+        let natural = matches!(
+            &j.join_operator,
+            sq::JoinOperator::Join(c)
+                | sq::JoinOperator::Inner(c)
+                | sq::JoinOperator::Left(c)
+                | sq::JoinOperator::LeftOuter(c)
+                | sq::JoinOperator::Right(c)
+                | sq::JoinOperator::RightOuter(c)
+                | sq::JoinOperator::FullOuter(c)
+                if matches!(c, sq::JoinConstraint::Natural)
+        );
+        if natural && let (Some(l), Some(r)) = (&left, &right) {
+            for a in l {
+                if let Some(b) = r.iter().find(|b| a.eq_ignore_ascii_case(b) && a != *b) {
+                    return Err(format!(
+                        "a NATURAL JOIN on columns named alike but for case ({a}, {b}) is not \
+                         supported here; join with ON"
+                    ));
+                }
+            }
+        }
+        left = match (left, right) {
+            (Some(mut l), Some(r)) => {
+                l.extend(r);
+                Some(l)
+            }
+            _ => None,
+        };
+    }
+    Ok(left)
+}
+
 /// DuckDB's type names DataFusion does not plan, renamed in place, within a list, struct or map as
 /// at the top; `Some` is a refusal.
 fn retype(t: &mut SqlType) -> Option<String> {
@@ -1722,6 +1815,10 @@ impl VisitorMut for Rewriter {
 
     fn pre_visit_query(&mut self, q: &mut sq::Query) -> ControlFlow<()> {
         if let Err(why) = super::subqueries::predicates_as_counts(q, &self.known, &self.ctes) {
+            self.refused = Some(why);
+            return ControlFlow::Break(());
+        }
+        if let Some(why) = natural_join_case(&q.body, &self.known, &self.ctes) {
             self.refused = Some(why);
             return ControlFlow::Break(());
         }

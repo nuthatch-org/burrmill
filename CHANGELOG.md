@@ -12,6 +12,16 @@ entry: a receipt someone kept stops verifying on that release (`tests/receipt_co
 
 Engine (`burrmill`, feature `datafusion`)
 
+- Answers as DuckDB 2.0.1 does where DuckDB's sqllogictest suite found small differences (#430):
+  `//` and `%` over integers, HUGEINT and DECIMAL raise `Division by zero` where they were NULL,
+  except under `CASE`, `AND`, `OR`, `COALESCE`, `TRY` or a window function's arguments, which
+  DuckDB evaluates lazily and DataFusion does not, where they stay NULL; beside a float they are
+  NULL as before. `list_distinct` drops NULL; a list `||` a NULL is NULL; `array_to_string` with a
+  NULL separator joins with `,`; `corr` over pairs with no spread is NaN, one pair included. A bare
+  `DECIMAL` or `NUMERIC` is DECIMAL(18,3), within a list, struct or map too, as DuckDB's type names
+  there are now renamed as they are at the top. `typeof` names TIMESTAMP_S, TIMESTAMP_MS,
+  INTERVAL, STRUCT and MAP as DuckDB does. A NATURAL JOIN on columns named alike but for case is
+  refused, where it answered with both columns.
 - Under a budget with a spill directory, a hash join whose build side's files hold more than half
   the statement pool, or cannot be measured, is planned as a sort-merge join, whose sorts and key
   buffer can spill where a hash join's build side cannot. TPC-H Q21, refused at SF10 under 2 GiB,
