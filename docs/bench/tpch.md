@@ -175,7 +175,8 @@ under an eighth of the other. Q12's `lineitem` is guessed at a 36th of `orders` 
 guess decided is also collected, if inner. Partitioned, its dynamic filter on `orders` was a `CASE`
 over each row's repartition hash: 2.37 s of that scan's CPU against 0.30 s collected (one `EXPLAIN
 ANALYZE` each, load 50). After the fix, Q12 at SF10 builds on 310.8K rows, 15.6 MB, the `orders`
-scan gives 291.9K of 15M rows, and the pool peaks at 17 MiB.
+scan gives 291.9K of 15M rows, and the pool peaks at 15 MiB (`EXPLAIN ANALYZE` on 9eaaa03, load
+28.3).
 
 **What was tried and not kept.** Two rules were tried before this one. Taking every filter to keep
 DataFusion's default 20% changed the plans of Q5, 7, 10, 12, 13 and 21. Q13 built on the 15M
@@ -186,7 +187,7 @@ differs in Q12 alone, at SF1 and at SF10. `a_side_whose_filter_keeps_few_rows_is
 (`crates/burrmill/tests/df_buildside.rs`) fails if the join goes back to building on the side that
 reads fewer bytes.
 
-**Measured** 2026-11-25 on 9e98fab against c0ff95b, on the ThinkPad as above, 8 threads, 2 GiB, no
+**Measured** 2026-11-25 on 9eaaa03 (9e98fab only adds the changelog) against c0ff95b, on the ThinkPad as above, 8 threads, 2 GiB, no
 spill directory. There were three rounds at each scale factor, alternating before and after. Each
 run is the best of 5 for Burrmill and for the DuckDB 2.0.1 CLI, in the same process, so both
 engines ran in the same window. The load was over 8 for 20 minutes before this, up to 139; it fell
@@ -202,10 +203,12 @@ to 7.98 at 16:29:33 and rose again while these ran. Every answer was the same as
 | 1 | 3 | 14.34 / 14.34 | 24 | 84 | 3.49x | 23 | 58 | 2.51x | 506 / 375 |
 
 Q12 at SF10 went from 4.60x–5.96x DuckDB 2.0.1 to 3.13x–3.63x, and at SF1 from 3.49x–4.26x to
-2.51x–2.86x. What is left is mostly the scan: `lineitem`'s took 3.30 s of CPU over its 60M rows,
-727 ms of it the row filter, and `orders`' took 1.21 s.
+2.51x–2.86x. What is left is in the scans. In that `EXPLAIN ANALYZE` at load 28.3, the
+`lineitem` scan, filtering all 60M rows, took 12.29 s of CPU, 2.25 s of it the row filter. The
+`orders` scan took 2.01 s. The join holds a 15.6 MB build. That load inflates CPU times, so these
+are not compared with the figures above.
 
-**All 22 after the fix**, at SF10 on 9e98fab, best of 3, DuckDB 2.0.1 in the same process. The load
+**All 22 after the fix**, at SF10 on 9eaaa03, best of 3, DuckDB 2.0.1 in the same process. The load
 was 17.76 at the start (16:30:42) and 17.83 at the end (16:32:33). All 21 answers given were the same
 as DuckDB's, and Q21 was refused as above. The widest ratios were Q17 at 5.33x (this tree does not
 have #438), Q4 at 4.46x, Q11 and Q22 at 3.92x, Q18 at 3.78x, and Q6 at 3.47x. Q12 was at 3.19x. At
