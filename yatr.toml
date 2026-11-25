@@ -29,7 +29,7 @@ sources = ["fuzz/Cargo.toml", "fuzz/Cargo.lock", "crates/*/Cargo.toml", "vendor/
 desc = "Clippy on burrmill, default graph and with datafusion"
 run = [
     "cargo clippy --locked -p burrmill --all-targets -- -D warnings",
-    "cargo clippy --locked -p burrmill --all-targets --features datafusion -- -D warnings",
+    "cargo clippy --locked -p burrmill --all-targets --features datafusion,sqllogictest -- -D warnings",
 ]
 sources = ["crates/burrmill/**", "crates/burrmill-ingest/**", "vendor/**", "corpus/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 
@@ -176,6 +176,15 @@ run = [
 env = { CC_x86_64_unknown_linux_musl = "musl-gcc" }
 sources = ["crates/burrmill/**", "crates/burrmill-cli/**", "vendor/**", "corpus/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 
+# #386: DuckDB's test/sql at the tag in the script, fetched as data, and held to the baseline.
+[tasks.sqllogictest]
+desc = "DuckDB's sqllogictest suite at a pinned tag; fail if wrong answers rise or passes fall"
+run = [
+    "cargo test --locked --release -p burrmill --features sqllogictest --example sqllogictest",
+    "docs/bench/sqllogictest.sh",
+]
+sources = ["crates/burrmill/**", "vendor/**", "docs/bench/sqllogictest.sh", "docs/bench/sqllogictest-baseline.tsv", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+
 [tasks.agents-check]
 desc = "Fail if the task table in AGENTS.md has drifted from this file"
 run = ["yatr agents --check"]
@@ -185,5 +194,5 @@ tool_inputs = ["yatr --version"]
 
 [tasks.ci]
 desc = "Every CI job but demo"
-depends = ["fmt-check", "fuzz-lock", "agents-check", "lint", "test", "cli", "bench-lint", "deny", "ingest", "ingest-size", "tab", "tab-build", "engine-size"]
+depends = ["fmt-check", "fuzz-lock", "agents-check", "lint", "test", "cli", "bench-lint", "deny", "ingest", "ingest-size", "tab", "tab-build", "engine-size", "sqllogictest"]
 run = []
