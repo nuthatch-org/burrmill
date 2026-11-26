@@ -253,7 +253,7 @@ fn marked(plan: &LogicalPlan) -> bool {
 }
 
 /// What every scan in `plan` reads, by the catalogue's file sizes; `None` if one is unmeasured.
-fn bytes(plan: &LogicalPlan) -> Option<u64> {
+pub(super) fn bytes(plan: &LogicalPlan) -> Option<u64> {
     let mut total = 0u64;
     let mut measured = true;
     let _ = plan.apply(|p| {

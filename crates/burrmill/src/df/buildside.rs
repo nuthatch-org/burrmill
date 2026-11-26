@@ -40,6 +40,12 @@
 //! customers of one segment and Q19's parts, and Q19 was slower in the one round that compared it;
 //! an unfiltered side, such as Q8's 100K suppliers, is left partitioned.
 //!
+//! Where the probe side has no filter of its own, every row it reads is put to the join's dynamic
+//! filter, and a filtered build side guessed at a quarter of it or less is enough
+//! ([`filters_unfiltered_probe`]). Q5 joins a year of orders, with their customers, to all 60M
+//! `lineitem` rows, guessed at a seventh of them at SF10; partitioned, the `CASE` in the `lineitem`
+//! scan cost 2.77 s of row-filter CPU, against 0.77 s collected (#433).
+//!
 //! A `HAVING` is guessed to keep a tenth of its aggregate's input as groups, before its own
 //! predicate's share ([`HAVING_GROUPS`]). Q18's `IN (SELECT l_orderkey FROM lineitem GROUP BY
 //! l_orderkey HAVING sum(l_quantity) > 300)` keeps 624 of 15M orders at SF10, and was guessed at a
@@ -116,6 +122,24 @@ const FAR: f64 = 64.0;
 
 /// How many times smaller a side's guessed share must leave it for the guess to decide.
 const DECISIVE: f64 = 8.0;
+
+/// Whether an inner join building on `build` is collected though the guess did not choose its
+/// side: `probe` has no filter of its own, so the join's dynamic filter is evaluated on every row
+/// it reads, and `build` is filtered and guessed to keep at most a [`UNFILTERED`]th of that.
+fn filters_unfiltered_probe(
+    build: &Arc<dyn ExecutionPlan>,
+    probe: &Arc<dyn ExecutionPlan>,
+) -> bool {
+    matches!(
+        (bytes_kept(build), bytes_read(build), bytes_kept(probe), bytes_read(probe)),
+        (Some(kb), Some(rb), Some(kp), Some(rp))
+            if kb < rb && kp == rp && kb.saturating_mul(UNFILTERED) <= kp
+    )
+}
+
+/// How many times what a filtered build side is guessed to keep an unfiltered probe side must read
+/// for the join to be collected.
+const UNFILTERED: u64 = 4;
 
 /// Whether `build` is the larger side, and whether a guess said so against the bytes read: by the
 /// bytes each reads, unless [`bytes_kept`] guesses one under an eighth of the other. One constant
@@ -324,6 +348,12 @@ impl PhysicalOptimizerRule for BuildOnSmaller {
             };
             let mode = match j.partition_mode() {
                 PartitionMode::Partitioned if guessed && *j.join_type() == JoinType::Inner => {
+                    PartitionMode::CollectLeft
+                }
+                PartitionMode::Partitioned
+                    if *j.join_type() == JoinType::Inner
+                        && filters_unfiltered_probe(build, probe) =>
+                {
                     PartitionMode::CollectLeft
                 }
                 PartitionMode::Partitioned if collect && filters_probe(build, probe) => {

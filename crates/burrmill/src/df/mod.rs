@@ -105,6 +105,7 @@ mod textfn;
 mod tojson;
 mod topkfilter;
 mod topn;
+mod transitivekeys;
 mod unionorder;
 mod usingjoins;
 mod wide;

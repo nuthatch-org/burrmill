@@ -19,6 +19,20 @@ Engine (`burrmill`, feature `datafusion`)
   that kernel as before, so the same statements are refused. TPC-H Q1 at SF10 went from
   1,065–1,165 ms to 629–677 ms, from 3.37x–3.53x DuckDB 2.0.1 to 1.91x–2.10x. Only the kernels
   change, not the plans.
+- A table equated with a filtered dimension's key only through another table reads only the keys
+  that dimension keeps (#433). TPC-H Q5 equates `c_nationkey` with `s_nationkey` in a join on two
+  columns, whose dynamic filter cannot be split between its probe's scans, so the five nations of
+  `ASIA` never reached `customer` and its joins carried 2.28M orders and 9.10M `lineitem` rows at
+  SF10, where DuckDB carries 456.8K and 1.83M. `customer` now gets a semi join on the nations the
+  region keeps. A dimension reading more than a sixteenth of the table, a volatile filter, and a
+  table already joined to the dimension itself are left alone; in TPC-H only Q5's plan changes.
+- An inner join whose filtered build side is guessed at a quarter or less of an unfiltered probe
+  side is collected rather than partitioned (#433), so the dynamic filter the probe's scan
+  evaluates on every row is one hash lookup and not a `CASE` over each row's repartition hash. In
+  Q5 at SF10 that filter's CPU went from 2.77 s to 0.77 s. With both, Q5 at SF10 went from 899–985
+  ms to 502–522 ms, from 2.98x–3.33x DuckDB 2.0.1 to 1.69x–1.79x, and at SF1 from 97–128 ms to
+  50–57 ms. Q16 takes the collected join too, its parts joined to `partsupp`: 171–180 ms to 128–139
+  ms at SF10.
 - `<`, `>`, `<=`, `>=` and `BETWEEN` between structs or lists order a NULL inside them after every
   value, as DuckDB does (#423): `{'x': NULL} > {'x': 0}` and `[1, NULL] > [1, 2]` are true, where
   Arrow's comparator put the NULL first and answered false.
