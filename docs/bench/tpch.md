@@ -35,6 +35,8 @@ Q6 is now 2.25x to 2.64x at SF10, from 3.78x to 3.99x, its `WHERE` evaluated abo
 reader and not in it ([below](#q6-its-filter-above-the-reader-433)).
 Q11 is now 1.66x to 1.76x at SF10, from 2.74x to 3.20x, its total summed from its groups and its
 join run once ([below](#q11-one-join-for-the-groups-and-their-total-433)).
+Q18 is now 2.27x to 2.62x at SF10, from 3.64x to 4.05x, its join reading the `HAVING`'s groups
+rather than `lineitem` again ([below](#q18-the-havings-groups-in-place-of-the-rows-433)).
 
 **Against datafusion-cli it is faster on four at SF10** (7, 15, 18, 19) and within 1.5x on 13 of
 the 21 it answers. It is the same DataFusion underneath, so that gap is Burrmill's own. Where it
@@ -539,6 +541,84 @@ The load was 6.51 at the start (21:25:28) and 9.53 at the end (21:26:40). All 21
 the same as DuckDB's, and Q21 was refused as above. The widest ratios were Q1 at 3.41x (981 ms
 against 288), Q22 at 3.29x, Q18 at 3.24x, Q5 at 3.19x and Q4 at 3.01x. Q11 was at 1.96x. At SF1, one
 run each at a load of 9.08, all 22 answers were the same as DuckDB's.
+
+## Q18: the `HAVING`'s groups in place of the rows (#433)
+
+Q18 was third widest at SF10 in the run of all 22 after #455, 3.24x. On f47a89b, with the DuckDB
+2.0.1 CLI downloaded for this, Q18 alone at SF10, best of 5, took 1,708 ms against DuckDB's 480,
+3.56x, at a load of 20.13 (23:07:09, much of it this run's own build).
+
+**The cause.** Q18 keeps the orders whose lines hold over 300 in all, `o_orderkey IN (SELECT
+l_orderkey FROM lineitem GROUP BY l_orderkey HAVING sum(l_quantity) > 300)`, and then joins
+`customer`, `orders` and `lineitem` and groups them to sum `l_quantity` again. The subquery has
+already summed every order's lines, but `lineitem` was scanned and joined a second time. In an
+`EXPLAIN ANALYZE` at SF10 on f47a89b (load 18.80, 23:07:28) the subquery's aggregate read all 59.99M
+rows: 2.97 s of CPU partial, 1.97 s final, 15.00M groups, 624 kept. The semi join built on those 624,
+partitioned, and the scans under it waited for them. Then the `orders` scan took 2.85 s of CPU, 2.24 s
+of it the row filter, and the second `lineitem` scan 3.04 s, 2.59 s of it the row filter, both the
+partitioned joins' `CASE` over each row's repartition hash, to give 624 and 4.37K rows. Q18 without
+its outer query, the subquery alone under a `count(*)`, took 672 and 770 ms against Q18's 1,529 and
+1,495, so half the time came after the aggregate (best of 5, loads 15.78 to 15.34, 23:26:44 to
+23:27:26). DuckDB 2.0.1's `EXPLAIN ANALYZE` (load 10.97, 23:08:17) also scans `lineitem` twice: one
+hash group-by of 2.16 s, then 190 ms for the second scan, which its filter prunes to 370 of 528 row
+groups, and 550 ms for `orders`.
+
+**The A/B.** Q18 written by hand with the groups joined in place of the second `lineitem`, `FROM
+customer, orders, (SELECT l_orderkey, sum(l_quantity) AS q FROM lineitem GROUP BY l_orderkey HAVING
+sum(l_quantity) > 300) a` and `sum(q)`, built only for this and not committed, gave the same answer
+as DuckDB 2.0.1 but was refused under 2 GiB: the join built on all 15M orders and their customers
+beside the 15M groups. A `HAVING` was guessed to keep a third of its input, `lineitem`'s 2.55 GB,
+more than `orders` and `customer`'s 817 MB. With a `HAVING`'s groups guessed at a tenth of its input
+too, the rewrite took 881, 912 and 886 ms against Q18's 1,439, 1,349 and 1,250, three rounds
+alternating, best of 5, Burrmill alone, loads 9.99 to 11.41 (23:39:18 to 23:40:17). With the guess
+alone, Q18 itself took 1,242, 1,154 and 1,270. Collecting Q18's three joins by hand instead, also
+not committed, took 925 to 1,105 ms against 1,365 to 1,502 (three rounds, loads 14.96 to 11.93),
+and skipping the partial aggregate did not help.
+
+**The fix.** `HavingGroups` (`crates/burrmill/src/df/havinggroups.rs`) makes that rewrite. Where a
+semi join on an aggregate's groups sits over an inner join to that aggregate's own input on its
+group key, and every aggregate above is a `checked_sum` of a column of that input which the groups
+sum too, the join reads the groups the `HAVING` keeps and each sum above sums the groups' sums. The
+semi join goes, as the `HAVING` now filters the groups the join meets. `checked_sum` is exact, so
+the sum of the sums is the sum of the rows, of the same type. A count or a sum of the other side's
+columns, which counts each of its rows once per line, a sum of doubles, a `max`, an `IN` on another
+column, NULL equal to NULL, a join with any other condition, and anything volatile or correlated are
+left alone. `BuildOnSmaller` (`buildside.rs`) now guesses a `HAVING` to keep a tenth of its
+aggregate's input as groups, before its predicate's third, so the join builds on the 624 groups and
+is collected. Taking every grouped aggregate to keep a tenth changed Q2's and Q17's plans as well and
+was not kept. The `EXPLAIN` of all 22 before and after differs in Q18 alone, at SF1 and at SF10.
+`a_q18_shaped_join_reads_the_havings_groups_and_scans_once` (`crates/burrmill/tests/df_havinggroups.rs`)
+fails with the rule off, its table scanned twice, and with the guess off, the join no longer built
+on the groups; `a_semi_join_on_a_havings_groups_is_collected` fails with the guess off.
+
+**Measured** 2026-11-26 on 2202748 against f47a89b, on the ThinkPad as above, 8 threads, 2 GiB, no
+spill directory: three rounds per scale factor, before then after, each the best of 5 for Burrmill
+and for the DuckDB 2.0.1 CLI in the same process. The load was 11.14 at 00:06:12; the wait for it to
+fall under 8 ended at 00:06:56 (7.39), and it rose to 11.21 during the rounds. Every answer was the
+same as DuckDB's.
+
+| SF | round | 1-minute load, start / end | DuckDB 2.0.1 ms | before ms | ratio | DuckDB 2.0.1 ms | after ms | ratio | Burrmill peak RSS MiB, before / after |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| 10 | 1 | 6.80 / 9.37 | 384 | 1,398 | 3.64x | 377 | 884 | 2.34x | 2,065 / 2,201 |
+| 10 | 2 | 9.37 / 10.29 | 403 | 1,567 | 3.89x | 428 | 1,121 | 2.62x | 2,024 / 2,014 |
+| 10 | 3 | 10.29 / 11.21 | 406 | 1,643 | 4.05x | 390 | 884 | 2.27x | 2,075 / 2,115 |
+| 1 | 1 | 11.21 / 11.21 | 41 | 124 | 3.03x | 43 | 71 | 1.65x | 650 / 669 |
+| 1 | 2 | 11.21 / 11.19 | 40 | 112 | 2.79x | 42 | 61 | 1.46x | 670 / 675 |
+| 1 | 3 | 11.19 / 11.19 | 40 | 109 | 2.71x | 43 | 63 | 1.47x | 662 / 653 |
+
+Q18 at SF10 went from 3.64x–4.05x DuckDB 2.0.1 to 2.27x–2.62x, and at SF1 from 2.71x–3.03x to
+1.46x–1.65x. Peak RSS is not lower: the 15M groups are held as before, and the pool peaked at 1,311
+MiB after against 1,265 to 1,560 before. What is left at SF10 is the aggregate, 2.33 s of CPU partial
+and 1.70 s final over the 59.99M rows, against DuckDB's 2.16 s for its group-by, and the `orders`
+scan, 1.58 s of CPU, 1.09 s of it the row filter: the customer join's partitioned `CASE` comes first
+in it and is evaluated on all 15M orders before the groups' filter (`EXPLAIN ANALYZE` after the fix,
+load 9.86, 00:08:16).
+
+**All 22 after the fix**, at SF10 on 2202748, best of 3, DuckDB 2.0.1 in the same process. The load
+was 9.39 at the start (00:08:24) and 9.92 at the end (00:09:38). All 21 answers given were the same
+as DuckDB's, and Q21 was refused as above. The widest ratios were Q1 at 3.23x (1,012 ms against 313),
+Q5 at 3.15x, Q9 at 2.89x, Q4 at 2.88x and Q17 at 2.81x. Q18 was at 2.42x. At SF1, one run each at a
+load of 9.92, all 22 answers were the same as DuckDB's.
 
 ## Spilling: Q21 under 2 GiB (#383)
 
