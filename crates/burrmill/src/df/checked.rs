@@ -772,7 +772,7 @@ fn decimal128(op: Operator, l: &ColumnarValue, r: &ColumnarValue) -> Option<Arra
     };
     let (bl, br) = (bits(&l), bits(&r));
     // Arrow's rules, `decimal_op` in arrow-arith.
-    let (precision, scale, out) = match op {
+    let (precision, scale, bound, out) = match op {
         Operator::Multiply => {
             let scale = s1
                 .checked_add(s2)
@@ -798,7 +798,7 @@ fn decimal128(op: Operator, l: &ColumnarValue, r: &ColumnarValue) -> Option<Arra
             } else {
                 return None;
             };
-            (precision, scale, out)
+            (precision, scale, bl + br, out)
         }
         Operator::Plus | Operator::Minus => {
             let scale = s1.max(s2);
@@ -839,7 +839,8 @@ fn decimal128(op: Operator, l: &ColumnarValue, r: &ColumnarValue) -> Option<Arra
                 }
                 (D::Lit(_), D::Lit(_)) => return None,
             };
-            (precision, scale, out)
+            let bound = (bl + unit_bits(ml)).max(br + unit_bits(mr)) + 1;
+            (precision, scale, bound, out)
         }
         _ => return None,
     };
@@ -861,12 +862,15 @@ fn decimal128(op: Operator, l: &ColumnarValue, r: &ColumnarValue) -> Option<Arra
             }
         }
     }
+    // Every result is under 2^bound; where that is at most 10^precision, all of them fit it.
     let most = 10i128.pow(precision as u32) - 1;
-    let (lo, hi) = out
-        .iter()
-        .fold((0i128, 0i128), |(lo, hi), &v| (lo.min(v), hi.max(v)));
-    if lo < -most || hi > most {
-        return None;
+    if bound > 126 || (1i128 << bound) - 1 > most {
+        let (lo, hi) = out
+            .iter()
+            .fold((0i128, 0i128), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        if lo < -most || hi > most {
+            return None;
+        }
     }
     Some(Arc::new(
         Decimal128Array::new(out.into(), nulls)
