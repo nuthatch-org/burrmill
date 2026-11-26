@@ -264,6 +264,16 @@ path = "tests/df_staticfilters.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_grouptotal"
+path = "tests/df_grouptotal.rs"
+required-features = ["datafusion"]
+
+[[test]]
+name = "df_havinggroups"
+path = "tests/df_havinggroups.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_latest"
 path = "tests/df_latest.rs"
 required-features = ["datafusion"]

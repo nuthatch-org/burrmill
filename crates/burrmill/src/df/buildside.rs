@@ -31,6 +31,13 @@
 //! probes all 60M `lineitem` rows; partitioned, the `CASE` its dynamic filter put in that scan cost
 //! 1.77 s of row-filter CPU at SF10, against 0.39 s collected (#433). A semi join holds only its
 //! build side's rows or keys, so collecting it moves no more into memory than partitioning did.
+//!
+//! A `HAVING` is guessed to keep a tenth of its aggregate's input as groups, before its own
+//! predicate's share ([`HAVING_GROUPS`]). Q18's `IN (SELECT l_orderkey FROM lineitem GROUP BY
+//! l_orderkey HAVING sum(l_quantity) > 300)` keeps 624 of 15M orders at SF10, and was guessed at a
+//! third of `lineitem`'s 2.55 GB, so its semi join stayed partitioned. Once
+//! [`super::havinggroups`] joins those groups to the orders in its place, that guess built the join
+//! on all 15M orders and their customers, and the statement was refused under 2 GiB (#433).
 
 use std::sync::Arc;
 
@@ -44,6 +51,7 @@ use datafusion_physical_expr::expressions::{
     NotExpr, TryCastExpr,
 };
 use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_plan::aggregates::{AggregateExec, AggregateMode};
 use datafusion_physical_plan::filter::FilterExec;
 use datafusion_physical_plan::joins::{HashJoinExec, PartitionMode};
 use datafusion_session::PhysicalOptimizerRule;
@@ -116,7 +124,12 @@ fn builds_larger(build: &Arc<dyn ExecutionPlan>, probe: &Arc<dyn ExecutionPlan>)
 /// [`kept`] guesses that filter keeps; `None` if a scan cannot be measured.
 fn bytes_kept(p: &Arc<dyn ExecutionPlan>) -> Option<u64> {
     if let Some(f) = p.downcast_ref::<FilterExec>() {
-        return bytes_kept(f.input()).map(|b| (b as f64 * kept(f.predicate())) as u64);
+        let groups = if having(f.input()) {
+            HAVING_GROUPS
+        } else {
+            1.0
+        };
+        return bytes_kept(f.input()).map(|b| (b as f64 * groups * kept(f.predicate())) as u64);
     }
     if let Some(definition) = super::sharing::definition(p) {
         return bytes_kept(&definition);
@@ -126,6 +139,20 @@ fn bytes_kept(p: &Arc<dyn ExecutionPlan>) -> Option<u64> {
         return bytes_read(p);
     }
     children.into_iter().map(bytes_kept).sum()
+}
+
+/// The share of its input a `HAVING`'s aggregate is guessed to keep as groups. Without statistics
+/// a grouping's distinct count is a guess too; a tenth is the equality's. Taking every grouped
+/// aggregate to keep a tenth was tried and not kept: it changed the plans of Q2 and Q17 too, and
+/// those were not measured with it. With only the `HAVING`'s, of TPC-H's 22 plans only Q18's
+/// changes, at SF1 and at SF10.
+const HAVING_GROUPS: f64 = EQUAL;
+
+/// Whether `p`, the input of a filter, is an aggregate with groups that the filter is the `HAVING`
+/// of: its final step, whose rows are the groups.
+fn having(p: &Arc<dyn ExecutionPlan>) -> bool {
+    p.downcast_ref::<AggregateExec>()
+        .is_some_and(|a| !a.group_expr().is_empty() && !matches!(a.mode(), AggregateMode::Partial))
 }
 
 /// The share of rows a predicate is guessed to keep, 0 to 1: the product of its conjuncts', where

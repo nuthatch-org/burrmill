@@ -69,6 +69,8 @@ mod files;
 mod floatsum;
 mod fold;
 mod gate;
+mod grouptotal;
+mod havinggroups;
 mod host;
 mod joinedgroups;
 mod joinfilters;
