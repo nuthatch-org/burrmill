@@ -289,6 +289,11 @@ path = "tests/df_subqueries.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_emptysets"
+path = "tests/df_emptysets.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_deepviews"
 path = "tests/df_deepviews.rs"
 required-features = ["datafusion"]

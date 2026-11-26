@@ -632,6 +632,8 @@ impl MiniSession {
                     // First, so no later rule meets a sort that cannot order the answer.
                     Arc::new(super::outerorder::OutermostOrder)
                         as Arc<dyn AnalyzerRule + Send + Sync>,
+                    // Before `grouping()` is resolved, so it counts the sets this rewrites.
+                    Arc::new(super::emptysets::EmptyGroupingSets),
                     Arc::new(super::coercion::Grouping(ResolveGroupingFunction::new())),
                     // Before every rule that reads a join: a marked one is not one yet.
                     Arc::new(super::asof::AsofJoins),

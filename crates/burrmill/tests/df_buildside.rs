@@ -411,6 +411,111 @@ fn a_semi_join_on_a_few_filtered_rows_is_collected() {
     assert!(!plan(&e, all).contains("CollectLeft"), "{}", plan(&e, all));
 }
 
+/// Q8 at SF10 keeps the 13.45K parts of one type and joins all 60M `lineitem` rows to them. The join
+/// built on the parts, the side that reads less, but partitioned, so the dynamic filter it gave the
+/// `lineitem` scan was a `CASE` over each row's repartition hash: 4.29 s of row-filter CPU, against
+/// 0.81 s collected (#433). A filtered build side guessed at a 64th of its probe or less is now
+/// collected; an unfiltered one, or one the probe's own filter leaves nearer its size, is not.
+#[test]
+fn a_join_on_a_few_filtered_rows_of_a_small_table_is_collected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let segs = tmp.path().join("segments");
+    std::fs::create_dir(&segs).unwrap();
+    let mut seed = 0x6a09_e667_f3bc_c909u64;
+    let mut next = |m: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % m) as i64
+    };
+    let parts = 2_000i64;
+    let types: Vec<i64> = (0..parts).map(|_| next(25)).collect();
+    // `k` a part, `a` and `b` small codes, `v` a price.
+    let lines: Vec<[i64; 4]> = (0..50 * parts)
+        .map(|_| [next(parts as u64), next(10), next(10), next(1 << 40)])
+        .collect();
+    let int = |name: &str| Field::new(name, DataType::Int64, false);
+    let put = |name: &str, fields: Vec<Field>, arrays: Vec<ArrayRef>| {
+        let schema = Arc::new(Schema::new(fields));
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let path = segs.join(format!("{name}-{:064x}.parquet", 1));
+        let f = std::fs::File::create(&path).unwrap();
+        let mut w = parquet::arrow::ArrowWriter::try_new(f, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+        std::fs::metadata(&path).unwrap().len() as f64
+    };
+    let part_bytes = put(
+        "parts",
+        vec![int("k"), Field::new("ty", DataType::Utf8, false)],
+        vec![
+            Arc::new(Int64Array::from_iter_values(0..parts)),
+            Arc::new(StringArray::from_iter_values(
+                types.iter().map(|t| format!("TYPE {t}")),
+            )),
+        ],
+    );
+    let col = |i: usize| -> ArrayRef {
+        Arc::new(Int64Array::from_iter_values(lines.iter().map(|l| l[i])))
+    };
+    let line_bytes = put(
+        "lines",
+        vec![int("k"), int("a"), int("b"), int("v")],
+        vec![col(0), col(1), col(2), col(3)],
+    );
+    // An equality's tenth of `parts` is under a 64th of `lines`, and over a 64th of the hundredth
+    // that two equalities leave of `lines`.
+    let ratio = line_bytes / part_bytes;
+    assert!((6.4..640.0).contains(&ratio), "{ratio}");
+    let e = Engine::open_segments(&segs).unwrap();
+    e.set_small_statement_bytes(0);
+    for (from, on) in [
+        ("lines l JOIN parts p", "l.k = p.k"),
+        ("parts p JOIN lines l", "p.k = l.k"),
+    ] {
+        let sql = format!(
+            "SELECT count(*), coalesce(sum(l.v % 1000), 0) FROM {from} ON {on} \
+             WHERE p.ty = 'TYPE 7'"
+        );
+        assert_eq!(build_side(&e, &sql), "parts", "{sql}");
+        assert!(
+            plan(&e, &sql).contains("HashJoinExec: mode=CollectLeft, join_type=Inner"),
+            "{}",
+            plan(&e, &sql)
+        );
+        let rows: Vec<i64> = lines
+            .iter()
+            .filter(|l| types[l[0] as usize] == 7)
+            .map(|l| l[3] % 1000)
+            .collect();
+        assert!(
+            !rows.is_empty() && rows.len() < lines.len() / 10,
+            "{}",
+            rows.len()
+        );
+        let want = (rows.len().to_string(), rows.iter().sum::<i64>().to_string());
+        assert_eq!(one(&e, &sql), want, "{sql}");
+    }
+    for (sql, why) in [
+        (
+            "SELECT count(*), 0 FROM lines l JOIN parts p ON l.k = p.k",
+            "unfiltered",
+        ),
+        (
+            "SELECT count(*), 0 FROM lines l JOIN parts p ON l.k = p.k \
+             WHERE p.ty = 'TYPE 7' AND l.a = 1 AND l.b = 2",
+            "the probe filtered too",
+        ),
+    ] {
+        assert_eq!(build_side(&e, sql), "parts", "{sql}");
+        assert!(
+            !plan(&e, sql).contains("CollectLeft"),
+            "{why}: {}",
+            plan(&e, sql)
+        );
+    }
+}
+
 fn plan(e: &Engine, sql: &str) -> String {
     let mut out = String::new();
     for b in e.sql(&format!("EXPLAIN {sql}")).unwrap() {

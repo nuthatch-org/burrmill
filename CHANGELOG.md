@@ -88,6 +88,22 @@ Engine (`burrmill`, feature `datafusion`)
   builds on the groups and is collected. Q18 at SF10 went from 1,398–1,643 ms to 884–1,121 ms. Only
   exact sums are taken apart; a count, a sum of the other side's columns or of doubles, and anything
   correlated or volatile are left alone. No other TPC-H plan changes.
+- A correlated `LATERAL` over an aggregate with an empty grouping set (`GROUPING SETS ((), ...)`,
+  `ROLLUP`, `CUBE`) gives every outer row a row per empty set, as DuckDB does, even where the
+  subquery keeps none of its rows: `count(*)` is 0 there and `sum` NULL (#422). DataFusion joined
+  the subquery as if grouped by the correlated column, so such an outer row had no rows at all.
+  An ungrouped `LATERAL` with a `HAVING` now filters on those values too: `HAVING count(*) > 0`
+  answered a NULL row for an unmatched outer row. `GROUP BY GROUPING SETS (())` is planned as no
+  `GROUP BY`, one row even over no input. Any other correlated subquery over an empty grouping set,
+  a scalar one among them, is refused by name. Of DuckDB's `test/sql/subquery`, no record is
+  wrong where 21 were.
+- An inner join whose build side is filtered and guessed, as above, to keep at most a 64th of what
+  its probe side keeps is collected rather than partitioned (#433), so the dynamic filter it puts
+  in the probe's scan is one hash lookup and not a `CASE` over each row's repartition hash. TPC-H
+  Q8 at SF10 builds on 13.45K parts and probes 60M `lineitem` rows; that filter's CPU went from
+  4.29 s to 0.81 s and Q8 from 1,013–1,099 ms to 717–750 ms, and at SF1 from 114–123 ms to 78–82
+  ms. Q2, 5, 7, 9, 11, 17, 20 and 21 take it too, most for a join on one nation or region; Q17 at
+  SF10 went from 808–890 ms to 466–489 ms and Q9 from 1,680–1,855 ms to 1,416–1,569 ms.
 
 Build and CI
 

@@ -32,6 +32,20 @@
 //! 1.77 s of row-filter CPU at SF10, against 0.39 s collected (#433). A semi join holds only its
 //! build side's rows or keys, so collecting it moves no more into memory than partitioning did.
 //!
+//! An inner join is collected where its build side is filtered and guessed to keep at most a 64th
+//! of what its probe side does ([`filtered_far_smaller`]), though the bytes read already chose that
+//! side. Q8 builds on the 13.45K parts of one type and probes all 60M `lineitem` rows at SF10;
+//! partitioned, the `CASE` its dynamic filter put in that scan cost 4.29 s of row-filter CPU, the
+//! most of any operator in the query, against 0.81 s collected (#433). A 16th also collected Q3's
+//! customers of one segment and Q19's parts, and Q19 was slower in the one round that compared it;
+//! an unfiltered side, such as Q8's 100K suppliers, is left partitioned.
+//!
+//! Where the probe side has no filter of its own, every row it reads is put to the join's dynamic
+//! filter, and a filtered build side guessed at a quarter of it or less is enough
+//! ([`filters_unfiltered_probe`]). Q5 joins a year of orders, with their customers, to all 60M
+//! `lineitem` rows, guessed at a seventh of them at SF10; partitioned, the `CASE` in the `lineitem`
+//! scan cost 2.77 s of row-filter CPU, against 0.77 s collected (#433).
+//!
 //! A `HAVING` is guessed to keep a tenth of its aggregate's input as groups, before its own
 //! predicate's share ([`HAVING_GROUPS`]). Q18's `IN (SELECT l_orderkey FROM lineitem GROUP BY
 //! l_orderkey HAVING sum(l_quantity) > 300)` keeps 624 of 15M orders at SF10, and was guessed at a
@@ -92,6 +106,19 @@ fn filters_probe(build: &Arc<dyn ExecutionPlan>, probe: &Arc<dyn ExecutionPlan>)
         (Some(b), Some(p)) if b.saturating_mul(DECISIVE as u64) <= p
     )
 }
+
+/// Whether an inner join building on `build` is collected though the guess did not choose its side:
+/// a filter under `build` is guessed to keep part of what it reads, and what it keeps is at most a
+/// [`FAR`]th of what `probe` is guessed to keep.
+fn filtered_far_smaller(build: &Arc<dyn ExecutionPlan>, probe: &Arc<dyn ExecutionPlan>) -> bool {
+    matches!(
+        (bytes_kept(build), bytes_read(build), bytes_kept(probe)),
+        (Some(kb), Some(rb), Some(kp)) if kb < rb && kb as f64 * FAR <= kp as f64
+    )
+}
+
+/// How many times smaller than its probe side a filtered build side must be guessed to be collected.
+const FAR: f64 = 64.0;
 
 /// How many times smaller a side's guessed share must leave it for the guess to decide.
 const DECISIVE: f64 = 8.0;
@@ -330,6 +357,11 @@ impl PhysicalOptimizerRule for BuildOnSmaller {
                     PartitionMode::CollectLeft
                 }
                 PartitionMode::Partitioned if collect && filters_probe(build, probe) => {
+                    PartitionMode::CollectLeft
+                }
+                PartitionMode::Partitioned
+                    if *j.join_type() == JoinType::Inner && filtered_far_smaller(build, probe) =>
+                {
                     PartitionMode::CollectLeft
                 }
                 m => *m,
