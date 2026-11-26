@@ -46,6 +46,7 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
     // Before the parser: sqlparser rejects `[expr FOR x IN list]`, which the views still write.
     let expanded = crate::listcomp::before_parse(sql);
     super::depth::refuse_set_op_tokens(&expanded)?;
+    refuse_join_syntax(&expanded)?;
     let (expanded, asof_at) = super::asof::blank(&expanded);
     let parsed = DFParser::parse_sql_with_dialect(expanded.as_str(), &Duck).map_err(|e| {
         let text = parser_text(&e);
@@ -69,6 +70,71 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
         }
     }
     Ok(parsed)
+}
+
+/// DuckDB's join syntax sqlparser does not know, refused by name: `POSITIONAL JOIN`, which it read
+/// as the left relation's alias `POSITIONAL` and a bare `JOIN`, a cross join of every row with
+/// every row; `JOIN BY (TYPE MARK)` and the other explicit join types; and `NEAREST n BY`.
+fn refuse_join_syntax(sql: &str) -> Result<()> {
+    use sqlparser::keywords::Keyword;
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    if !may_hold_keyword(sql, &["positional", "nearest", "type"]) {
+        return Ok(());
+    }
+    let Ok(tokens) = Tokenizer::new(&Duck, sql).tokenize() else {
+        return Ok(());
+    };
+    let words: Vec<&Token> = tokens
+        .iter()
+        .filter(|t| !matches!(t, Token::Whitespace(_)))
+        .collect();
+    let keyword = |i: usize, k: Keyword| {
+        words
+            .get(i)
+            .is_some_and(|t| matches!(t, Token::Word(w) if w.keyword == k))
+    };
+    let bare = |i: usize, name: &str| {
+        words.get(i).is_some_and(|t| {
+            matches!(t, Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(name))
+        })
+    };
+    // DuckDB's join types; any other name is its syntax error, and sqlparser's.
+    const TYPES: &[&str] = &[
+        "inner",
+        "left",
+        "right",
+        "outer",
+        "semi",
+        "anti",
+        "mark",
+        "single",
+        "right_semi",
+        "right_anti",
+    ];
+    for i in 0..words.len() {
+        let refused = if bare(i, "positional") && keyword(i + 1, Keyword::JOIN) {
+            "POSITIONAL JOIN".to_string()
+        } else if keyword(i, Keyword::JOIN)
+            && keyword(i + 1, Keyword::BY)
+            && matches!(words.get(i + 2), Some(Token::LParen))
+            && bare(i + 3, "type")
+            && let Some(t) = TYPES.iter().find(|t| bare(i + 4, t))
+        {
+            format!("JOIN BY (TYPE {})", t.to_uppercase())
+        } else if bare(i, "nearest")
+            && matches!(words.get(i + 1), Some(Token::Number(..)))
+            && keyword(i + 2, Keyword::BY)
+            && (bare(i + 3, "distance") || bare(i + 3, "similarity"))
+        {
+            "NEAREST ... BY".to_string()
+        } else {
+            continue;
+        };
+        return Err(BurrmillError::Parse(format!(
+            "{refused} is not supported here"
+        )));
+    }
+    Ok(())
 }
 
 /// Whether `sql` may hold one of `words` as a keyword: false only for ASCII text that does not
@@ -877,11 +943,15 @@ fn rewrite(stmt: &mut DfStatement, known: &Known, names: &mut [Option<String>]) 
     let _ = crate::walk::walk(s.as_ref(), &mut CteNames(&mut ctes));
     let mut rw = Rewriter {
         refused: None,
+        binder: None,
         lambda: vec![],
         known,
         ctes,
     };
     let _ = crate::walk::walk_mut(s.as_mut(), &mut rw);
+    if let Some(why) = rw.binder {
+        return Err(BurrmillError::Plan(why));
+    }
     match rw.refused {
         Some(why) => Err(BurrmillError::NotAllowed(why)),
         None => Ok(()),
@@ -890,6 +960,8 @@ fn rewrite(stmt: &mut DfStatement, known: &Known, names: &mut [Option<String>]) 
 
 struct Rewriter {
     refused: Option<String>,
+    /// An error DuckDB's binder raises, as DuckDB words it.
+    binder: Option<String>,
     /// Parameters of the lambdas the walk is inside.
     lambda: Vec<String>,
     known: Known,
@@ -1822,6 +1894,18 @@ impl VisitorMut for Rewriter {
             self.refused = Some(why);
             return ControlFlow::Break(());
         }
+        let scope = super::usingjoins::Scope::of(q, &self.known, &self.ctes);
+        match super::usingjoins::rewrite_query(q, &scope) {
+            Ok(()) => {}
+            Err(super::usingjoins::Failed::Refused(why)) => {
+                self.refused = Some(why);
+                return ControlFlow::Break(());
+            }
+            Err(super::usingjoins::Failed::Binder(why)) => {
+                self.binder = Some(why);
+                return ControlFlow::Break(());
+            }
+        }
         for cte in q.with.iter().flat_map(|w| &w.cte_tables) {
             let cols = &cte.alias.columns;
             let mut seen = std::collections::HashSet::new();
@@ -2582,6 +2666,8 @@ impl AnalyzerRule for DuckSemantics {
                             let t = t.transform_data(|e| case_nullability(e, &schema))?;
                             let t = t.transform_data(try_as_duckdb)?;
                             let t =
+                                t.transform_data(|e| super::nestedorder::nested_order(e, &schema))?;
+                            let t =
                                 t.transform_data(|e| hugeint_rounding(e, &schema, &self.round))?;
                             t.transform_data(hugeint_null_test)
                         })
@@ -2604,10 +2690,19 @@ impl AnalyzerRule for DuckSemantics {
 fn semantics_may_rewrite(e: &Expr) -> bool {
     match e {
         // `divide_as_double`, `modulo_by_zero` and `dates_as_duckdb`.
+        // ... and `nested_order`, with `BETWEEN`.
         Expr::BinaryExpr(b) => matches!(
             b.op,
-            Operator::Divide | Operator::Modulo | Operator::Plus | Operator::Minus
+            Operator::Divide
+                | Operator::Modulo
+                | Operator::Plus
+                | Operator::Minus
+                | Operator::Lt
+                | Operator::LtEq
+                | Operator::Gt
+                | Operator::GtEq
         ),
+        Expr::Between(_) => true,
         // `timestamp_as_duckdb`, `dates_as_duckdb`, `try_as_duckdb` and `hugeint_rounding`.
         // ... and `guard_zero`.
         Expr::ScalarFunction(f) => matches!(

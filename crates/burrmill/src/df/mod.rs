@@ -80,6 +80,7 @@ mod literalkeys;
 #[cfg(unix)]
 mod localfs;
 mod names;
+mod nestedorder;
 mod ordered_agg;
 mod printf;
 mod rangebounds;
@@ -104,6 +105,7 @@ mod tojson;
 mod topkfilter;
 mod topn;
 mod unionorder;
+mod usingjoins;
 mod wide;
 
 #[path = "generated/physical_planner.rs"]
