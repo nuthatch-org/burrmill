@@ -73,6 +73,7 @@ mod gate;
 mod grouptotal;
 mod havinggroups;
 mod host;
+mod intervals;
 mod joinedgroups;
 mod joinfilters;
 mod lastnonnull;

@@ -204,6 +204,11 @@ path = "tests/df_duckjoins.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_ducktypes"
+path = "tests/df_ducktypes.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_buildside"
 path = "tests/df_buildside.rs"
 required-features = ["datafusion"]

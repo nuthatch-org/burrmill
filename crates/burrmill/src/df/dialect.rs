@@ -361,6 +361,44 @@ impl sqlparser::dialect::Dialect for Duck {
         true
     }
 
+    /// `INTERVAL 3 DECADES`, `CENTURIES` and `MILLENNIA`: units sqlparser knows only in the
+    /// singular, so it read the plural as the column's alias and the interval as 3 seconds.
+    fn parse_prefix(
+        &self,
+        parser: &mut sqlparser::parser::Parser,
+    ) -> Option<std::result::Result<SqlExpr, sqlparser::parser::ParserError>> {
+        use sqlparser::keywords::Keyword;
+        use sqlparser::tokenizer::Token;
+        let [i, v, u] = parser.peek_tokens::<3>();
+        let (Token::Word(i), Token::Word(u)) = (i, u) else {
+            return None;
+        };
+        if i.keyword != Keyword::INTERVAL || u.quote_style.is_some() {
+            return None;
+        }
+        let value = match v {
+            Token::Number(n, l) => sq::Value::Number(n, l),
+            Token::SingleQuotedString(s) => sq::Value::SingleQuotedString(s),
+            _ => return None,
+        };
+        let field = match u.value.to_ascii_lowercase().as_str() {
+            "decades" => sq::DateTimeField::Decade,
+            "centuries" => sq::DateTimeField::Century,
+            "millennia" | "millenniums" => sq::DateTimeField::Millennium,
+            _ => return None,
+        };
+        for _ in 0..3 {
+            parser.next_token();
+        }
+        Some(Ok(SqlExpr::Interval(sq::Interval {
+            value: Box::new(SqlExpr::Value(value.into())),
+            leading_field: Some(field),
+            leading_precision: None,
+            last_field: None,
+            fractional_seconds_precision: None,
+        })))
+    }
+
     /// `PIVOT` and `UNPIVOT` are refused by name rather than as a syntax error.
     fn parse_statement(
         &self,
@@ -1805,6 +1843,69 @@ fn natural_joins(
     Ok(left)
 }
 
+/// `INTERVAL '...'` as DuckDB reads it (#419). Without a unit it is DuckDB's cast of the text, which
+/// `DuckSemantics` makes [`super::intervals::parse`]; the cast is returned to replace it. With a
+/// unit above a millisecond, DuckDB takes the number's whole part (`INTERVAL '1.5' HOUR` is an
+/// hour), and a millennium, which DataFusion does not know, is a thousand years.
+fn duck_interval(iv: &mut sq::Interval) -> Option<SqlExpr> {
+    use sq::DateTimeField as F;
+    if iv.last_field.is_some()
+        || iv.leading_precision.is_some()
+        || iv.fractional_seconds_precision.is_some()
+    {
+        return None;
+    }
+    let SqlExpr::Value(v) = iv.value.as_mut() else {
+        return None;
+    };
+    let Some(field) = iv.leading_field.as_ref() else {
+        return matches!(v.value, sq::Value::SingleQuotedString(_)).then(|| SqlExpr::Cast {
+            kind: sq::CastKind::Cast,
+            expr: iv.value.clone(),
+            data_type: SqlType::Interval {
+                fields: None,
+                precision: None,
+            },
+            array: false,
+            format: None,
+        });
+    };
+    let keeps_fraction = matches!(
+        field,
+        F::Second | F::Seconds | F::Millisecond | F::Milliseconds
+    );
+    let millennia = matches!(field, F::Millennium | F::Millenium);
+    if let sq::Value::SingleQuotedString(s) = &mut v.value
+        && !keeps_fraction
+    {
+        let t = s.trim();
+        let (neg, digits) = t.strip_prefix('-').map_or((false, t), |d| (true, d));
+        if let Some((int, frac)) = digits.split_once('.')
+            && !(int.is_empty() && frac.is_empty())
+            && int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit())
+        {
+            let int = if int.is_empty() { "0" } else { int };
+            *s = format!("{}{int}", if neg { "-" } else { "" });
+        }
+    }
+    if millennia {
+        let n = match &mut v.value {
+            sq::Value::SingleQuotedString(s) | sq::Value::Number(s, _) => s,
+            _ => return None,
+        };
+        if let Some(years) = n
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .and_then(|n| n.checked_mul(1000))
+        {
+            *n = years.to_string();
+            iv.leading_field = Some(F::Year);
+        }
+    }
+    None
+}
+
 /// DuckDB's type names DataFusion does not plan, renamed in place, within a list, struct or map as
 /// at the top; `Some` is a refusal.
 fn retype(t: &mut SqlType) -> Option<String> {
@@ -2150,6 +2251,11 @@ impl VisitorMut for Rewriter {
                 // from zero; both are DECIMAL(38,0) here, so `DuckSemantics` is told which it was.
                 if hugeint {
                     *e = call("burrmill_hugeint", vec![e.clone()]);
+                }
+            }
+            SqlExpr::Interval(iv) => {
+                if let Some(cast) = duck_interval(iv) {
+                    *e = cast;
                 }
             }
             // `f(x).field`: DataFusion takes a field name after a dot only as a string.
@@ -2665,6 +2771,9 @@ impl AnalyzerRule for DuckSemantics {
                             let t = t.transform_data(|e| dates_as_duckdb(e, &schema))?;
                             let t = t.transform_data(|e| case_nullability(e, &schema))?;
                             let t = t.transform_data(try_as_duckdb)?;
+                            let t = t.transform_data(|e| {
+                                super::intervals::intervals_as_duckdb(e, &schema)
+                            })?;
                             let t =
                                 t.transform_data(|e| super::nestedorder::nested_order(e, &schema))?;
                             let t =
@@ -2701,6 +2810,11 @@ fn semantics_may_rewrite(e: &Expr) -> bool {
                 | Operator::LtEq
                 | Operator::Gt
                 | Operator::GtEq
+                // `intervals_as_duckdb`, between intervals.
+                | Operator::Eq
+                | Operator::NotEq
+                | Operator::IsDistinctFrom
+                | Operator::IsNotDistinctFrom
         ),
         Expr::Between(_) => true,
         // `timestamp_as_duckdb`, `dates_as_duckdb`, `try_as_duckdb` and `hugeint_rounding`.
