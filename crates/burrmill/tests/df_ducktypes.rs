@@ -120,7 +120,7 @@ fn an_interval_past_arrows_nanoseconds_is_refused() {
 }
 
 /// What DuckDB's binder refuses, refused (test/sql/types/numeric/float_precision.test:47, :52,
-/// decimal/test_decimal.test:153, :163, struct/struct_case_insensitivity.test:28,
+/// decimal/test_decimal.test:163, struct/struct_case_insensitivity.test:28,
 /// type_constructor_error_location.test:30, list/recursive_unnest.test:103,
 /// list/unnest_group_by.test:107, :122, nested/map/map_error.test:46). Each was answered.
 #[test]
@@ -129,7 +129,7 @@ fn what_duckdbs_binder_refuses_is_an_error() {
     for (sql, says) in [
         ("SELECT CAST(NULL AS FLOAT(0))", "at least 1 bit"),
         ("SELECT CAST(NULL AS FLOAT(54))", "less than 54 bits"),
-        ("SELECT '0.1'::DECIMAL(40)", "between 1 and 38"),
+        ("SELECT '0.1'::DECIMAL(0)", "between 1 and 38"),
         ("SELECT '1'::INTEGER(1000)", "syntax error"),
         (
             "SELECT {'hello': 3, 'HELLO': 4}",

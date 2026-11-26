@@ -2021,8 +2021,9 @@ fn duck_interval(iv: &mut sq::Interval) -> Option<SqlExpr> {
 }
 
 /// What DuckDB raises for a type it does not take, as it words it (#419): a FLOAT's bits outside 1
-/// to 53, a DECIMAL wider than 38 digits, `INTEGER(n)` (a syntax error to DuckDB) and a STRUCT
-/// that names a field twice. DataFusion planned each of them.
+/// to 53, a DECIMAL of no digits, `INTEGER(n)` (a syntax error to DuckDB) and a STRUCT that names
+/// a field twice. DataFusion planned each of them. A DECIMAL past 38 digits is not among them: it
+/// is this engine's, to 76 (#349).
 fn type_error(t: &SqlType) -> Option<String> {
     match t {
         SqlType::Array(
@@ -2058,7 +2059,7 @@ fn type_error(t: &SqlType) -> Option<String> {
             ExactNumberInfo::Precision(p) | ExactNumberInfo::PrecisionAndScale(p, _),
         )
         | SqlType::Dec(ExactNumberInfo::Precision(p) | ExactNumberInfo::PrecisionAndScale(p, _))
-            if *p == 0 || *p > 38 =>
+            if *p == 0 =>
         {
             Some("Binder Error: DECIMAL type width must be between 1 and 38".into())
         }

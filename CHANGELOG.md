@@ -71,14 +71,14 @@ Engine (`burrmill`, feature `datafusion`)
 - `x op ANY(list)`, `x op ALL(list)` and `list_contains` answer with DuckDB's NULLs (#419): `4 =
   ANY([1, 2, 3, NULL])` is NULL and `1 = ANY(NULL)` false, where DataFusion answered false and
   NULL.
-- What DuckDB's binder refuses is an error (#419): `FLOAT(0)` and `FLOAT(54)`, a DECIMAL wider
-  than 38 digits, `INTEGER(n)`, a struct naming a field twice, `UNNEST(UNNEST(...))`, `GROUP BY
+- What DuckDB's binder refuses is an error (#419): `FLOAT(0)` and `FLOAT(54)`, `DECIMAL(0)`,
+  `INTEGER(n)`, a struct naming a field twice, `UNNEST(UNNEST(...))`, `GROUP BY
   ALL` over an UNNEST, an UNNEST of a struct in `GROUP BY`, and `MAP` of two scalars. `FLOAT(25)`
   to `FLOAT(53)` is DOUBLE, and a float cast to BIGNUM rounds half to even, as to HUGEINT.
 - The sqllogictest harness quotes a BLOB inside a LIST, STRUCT or MAP as DuckDB's cast to text
   does, and writes dates past chrono's year 262143 (#419). In DuckDB's sqllogictest suite,
-  `test/sql/types` has 2727 pass, 1427 refused, 49 wrong and 791 error, where it had 2454, 1421,
-  166 and 922; the whole suite 12624 pass and 459 wrong, where 12245 and 583.
+  `test/sql/types` has 2727 pass, 1427 refused, 50 wrong and 790 error, where it had 2454, 1421,
+  166 and 922; the whole suite 12624 pass and 460 wrong, where 12245 and 583.
 
 - A hash join builds on the side its filter plainly cuts below the other, where it built on the
   side that reads fewer bytes (#433). Statistics being off, a filter's share is guessed from its
