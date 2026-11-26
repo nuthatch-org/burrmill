@@ -338,6 +338,73 @@ impl<const N: usize> Groups<N> {
         }
     }
 
+    /// `update_batch` over integers and `Decimal128`, read from their value buffers rather than
+    /// row by row through `dyn Array`: Q1's seven checked sums and averages took 2.49 s of CPU over
+    /// 59.14M rows into 4 groups at SF10 that way (#433). `None` for any other input.
+    fn update_narrow(
+        &mut self,
+        a: &ArrayRef,
+        group_indices: &[usize],
+        filter: Option<&BooleanArray>,
+    ) -> Option<Result<()>> {
+        // The rows to add: valid, and kept by the filter where there is one.
+        let keep = match filter {
+            None => a.nulls().map(|n| n.inner().clone()),
+            Some(f) => {
+                let mut k = f.values().clone();
+                if let Some(n) = f.nulls() {
+                    k = &k & n.inner();
+                }
+                if let Some(n) = a.nulls() {
+                    k = &k & n.inner();
+                }
+                Some(k)
+            }
+        };
+        Some(match a.data_type() {
+            DataType::Int64 => {
+                self.fold_narrow(a.as_primitive::<Int64Type>().values(), group_indices, keep)
+            }
+            DataType::UInt64 => {
+                self.fold_narrow(a.as_primitive::<UInt64Type>().values(), group_indices, keep)
+            }
+            DataType::Decimal128(..) => self.fold_narrow(
+                a.as_primitive::<Decimal128Type>().values(),
+                group_indices,
+                keep,
+            ),
+            _ => return None,
+        })
+    }
+
+    fn fold_narrow<T: Copy + Into<i128>>(
+        &mut self,
+        values: &[T],
+        group_indices: &[usize],
+        keep: Option<arrow::buffer::BooleanBuffer>,
+    ) -> Result<()> {
+        let (sums, counts) = (&mut self.sums, &mut self.counts);
+        let mut add = |g: usize, v: T| match sums[g].checked_add(Wide::from_i128(v.into())) {
+            Some(s) => {
+                sums[g] = s;
+                counts[g] += 1;
+                true
+            }
+            None => false,
+        };
+        let added = match keep {
+            None => group_indices.iter().zip(values).all(|(&g, &v)| add(g, v)),
+            Some(k) if k.count_set_bits() == k.len() => {
+                group_indices.iter().zip(values).all(|(&g, &v)| add(g, v))
+            }
+            Some(k) => k.set_indices().all(|i| add(group_indices[i], values[i])),
+        };
+        match added {
+            true => Ok(()),
+            false => exec_err!("{}: running total left {} bits", self.spec.name, N * 64),
+        }
+    }
+
     fn finish_one(&self, sum: Wide<N>, count: u64) -> Result<Wide<N>> {
         match self.spec.mode {
             Mode::Sum | Mode::SumText => Ok(sum),
@@ -458,6 +525,9 @@ impl<const N: usize> GroupsAccumulator for Groups<N> {
         total_num_groups: usize,
     ) -> Result<()> {
         self.grow(total_num_groups);
+        if let Some(r) = self.update_narrow(&values[0], group_indices, opt_filter) {
+            return r;
+        }
         let mut sums = std::mem::take(&mut self.sums);
         let mut counts = std::mem::take(&mut self.counts);
         let name = self.spec.name;
@@ -623,6 +693,192 @@ fn validate_precision(a: &ArrayRef) -> Result<()> {
     .map_err(|e| super::errors::overflow(e.to_string()))
 }
 
+/// One operand of [`decimal128`]: a column's values, or a literal's on every row.
+trait Operand: Copy {
+    fn at(self, i: usize) -> i128;
+}
+
+#[derive(Clone, Copy)]
+struct Each<'a>(&'a [i128]);
+
+#[derive(Clone, Copy)]
+struct Same(i128);
+
+impl Operand for Each<'_> {
+    #[inline(always)]
+    fn at(self, i: usize) -> i128 {
+        self.0[i]
+    }
+}
+
+impl Operand for Same {
+    #[inline(always)]
+    fn at(self, _: usize) -> i128 {
+        self.0
+    }
+}
+
+fn apply<L: Operand, R: Operand>(
+    l: L,
+    r: R,
+    rows: usize,
+    f: impl Fn(i128, i128) -> i128,
+) -> Vec<i128> {
+    (0..rows).map(|i| f(l.at(i), r.at(i))).collect()
+}
+
+/// The bits of the largest magnitude in `v`, so that every value is under 2 to that power.
+fn magnitude_bits(v: &[i128]) -> u32 {
+    128 - v
+        .iter()
+        .fold(0u128, |m, x| m | x.unsigned_abs())
+        .leading_zeros()
+}
+
+/// `l + r`, `l - r` or `l * r` over `Decimal128` operands in plain `i128` arithmetic, where the
+/// magnitudes in this batch show no row can overflow it, with arrow's result precision and scale.
+/// Arrow's checked kernel makes a checked 128-bit multiply per row, and one more per operand for
+/// the rescale of an addition: Q1's `l_extendedprice * (1 - l_discount)` took 1.02 s of CPU over
+/// 59.14M rows at SF10 that way (#433). `None` leaves the batch to arrow: other types, a NULL or
+/// lone literal, magnitudes that could overflow, or a result outside its precision, which arrow then
+/// refuses as before.
+fn decimal128(op: Operator, l: &ColumnarValue, r: &ColumnarValue) -> Option<ArrayRef> {
+    enum D<'a> {
+        Col(&'a Decimal128Array),
+        Lit(i128),
+    }
+    fn dec(v: &ColumnarValue) -> Option<(D<'_>, u8, i8)> {
+        match v {
+            ColumnarValue::Array(a) => match a.data_type() {
+                DataType::Decimal128(p, s) => {
+                    Some((D::Col(a.as_primitive::<Decimal128Type>()), *p, *s))
+                }
+                _ => None,
+            },
+            ColumnarValue::Scalar(ScalarValue::Decimal128(Some(x), p, s)) => {
+                Some((D::Lit(*x), *p, *s))
+            }
+            _ => None,
+        }
+    }
+    let ((l, p1, s1), (r, p2, s2)) = (dec(l)?, dec(r)?);
+    let rows = match (&l, &r) {
+        (D::Col(a), _) | (_, D::Col(a)) => a.len(),
+        (D::Lit(_), D::Lit(_)) => return None,
+    };
+    let bits = |d: &D| match d {
+        D::Col(a) => magnitude_bits(a.values()),
+        D::Lit(x) => magnitude_bits(&[*x]),
+    };
+    let (bl, br) = (bits(&l), bits(&r));
+    // Arrow's rules, `decimal_op` in arrow-arith.
+    let (precision, scale, bound, out) = match op {
+        Operator::Multiply => {
+            let scale = s1
+                .checked_add(s2)
+                .filter(|s| *s <= Decimal128Type::MAX_SCALE)?;
+            let precision = p1.saturating_add(p2 + 1).min(Decimal128Type::MAX_PRECISION);
+            // Under 2^63 each, the product is one 64-bit multiply; under 2^127 together, it fits.
+            let out = if bl <= 63 && br <= 63 {
+                let f = |a: i128, b: i128| (a as i64 as i128) * (b as i64 as i128);
+                match (&l, &r) {
+                    (D::Col(a), D::Col(b)) => apply(Each(a.values()), Each(b.values()), rows, f),
+                    (D::Col(a), D::Lit(b)) => apply(Each(a.values()), Same(*b), rows, f),
+                    (D::Lit(a), D::Col(b)) => apply(Same(*a), Each(b.values()), rows, f),
+                    (D::Lit(_), D::Lit(_)) => return None,
+                }
+            } else if bl + br <= 127 {
+                let f = |a: i128, b: i128| a.wrapping_mul(b);
+                match (&l, &r) {
+                    (D::Col(a), D::Col(b)) => apply(Each(a.values()), Each(b.values()), rows, f),
+                    (D::Col(a), D::Lit(b)) => apply(Each(a.values()), Same(*b), rows, f),
+                    (D::Lit(a), D::Col(b)) => apply(Same(*a), Each(b.values()), rows, f),
+                    (D::Lit(_), D::Lit(_)) => return None,
+                }
+            } else {
+                return None;
+            };
+            (precision, scale, bl + br, out)
+        }
+        Operator::Plus | Operator::Minus => {
+            let scale = s1.max(s2);
+            let precision = (scale.saturating_add((p1 as i8 - s1).max(p2 as i8 - s2)) as u8)
+                .saturating_add(1)
+                .min(Decimal128Type::MAX_PRECISION);
+            let ml = 10i128.checked_pow(u32::try_from(scale - s1).ok()?)?;
+            let mr = 10i128.checked_pow(u32::try_from(scale - s2).ok()?)?;
+            // Each rescaled operand under 2^126, so their sum or difference fits.
+            let unit_bits = |m: i128| magnitude_bits(&[m]);
+            if bl + unit_bits(ml) > 126 || br + unit_bits(mr) > 126 {
+                return None;
+            }
+            let sign = if op == Operator::Minus { -1 } else { 1 };
+            let out = match (&l, &r) {
+                (D::Col(a), D::Col(b)) if ml == 1 && mr == 1 => {
+                    let f = |a: i128, b: i128| a.wrapping_add(b * sign);
+                    apply(Each(a.values()), Each(b.values()), rows, f)
+                }
+                (D::Col(a), D::Col(b)) => {
+                    let f = |a: i128, b: i128| (a * ml).wrapping_add(b * mr * sign);
+                    apply(Each(a.values()), Each(b.values()), rows, f)
+                }
+                (D::Col(a), D::Lit(b)) if ml == 1 => {
+                    apply(Each(a.values()), Same(*b * mr * sign), rows, |a, b| a + b)
+                }
+                (D::Col(a), D::Lit(b)) => {
+                    let b = *b * mr * sign;
+                    apply(Each(a.values()), Same(b), rows, |a, b| a * ml + b)
+                }
+                (D::Lit(a), D::Col(b)) if mr == 1 => {
+                    let f = |a: i128, b: i128| a + b * sign;
+                    apply(Same(*a * ml), Each(b.values()), rows, f)
+                }
+                (D::Lit(a), D::Col(b)) => {
+                    let f = |a: i128, b: i128| a + b * mr * sign;
+                    apply(Same(*a * ml), Each(b.values()), rows, f)
+                }
+                (D::Lit(_), D::Lit(_)) => return None,
+            };
+            let bound = (bl + unit_bits(ml)).max(br + unit_bits(mr)) + 1;
+            (precision, scale, bound, out)
+        }
+        _ => return None,
+    };
+    // Arrow's precision check compares the scale as a `u8`, so it refuses every negative scale.
+    if precision < scale as u8 {
+        return None;
+    }
+    let nulls = match (&l, &r) {
+        (D::Col(a), D::Col(b)) => arrow::buffer::NullBuffer::union(a.nulls(), b.nulls()),
+        (D::Col(a), _) | (_, D::Col(a)) => a.nulls().cloned(),
+        (D::Lit(_), D::Lit(_)) => return None,
+    };
+    let mut out = out;
+    // Arrow leaves zero under a NULL, which no precision refuses.
+    if let Some(n) = &nulls {
+        for (v, valid) in out.iter_mut().zip(n.iter()) {
+            if !valid {
+                *v = 0;
+            }
+        }
+    }
+    // Every result is under 2^bound; where that is at most 10^precision, all of them fit it.
+    let most = 10i128.pow(precision as u32) - 1;
+    if bound > 126 || (1i128 << bound) - 1 > most {
+        let (lo, hi) = out
+            .iter()
+            .fold((0i128, 0i128), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+        if lo < -most || hi > most {
+            return None;
+        }
+    }
+    Some(Arc::new(
+        Decimal128Array::new(out.into(), nulls)
+            .with_precision_and_scale(precision, scale)
+            .ok()?,
+    ))
+}
+
 impl ScalarUDFImpl for CheckedBinary {
     fn name(&self) -> &str {
         match self.op {
@@ -657,19 +913,31 @@ impl ScalarUDFImpl for CheckedBinary {
             .args
             .iter()
             .all(|a| matches!(a, ColumnarValue::Scalar(_)));
-        let arrays = ColumnarValue::values_to_arrays(&args.args)?;
-        let out: ArrayRef = match self.op {
-            Some(Operator::Plus) => numeric::add(&arrays[0], &arrays[1]),
-            Some(Operator::Minus) => numeric::sub(&arrays[0], &arrays[1]),
-            Some(Operator::Multiply) => numeric::mul(&arrays[0], &arrays[1]),
-            Some(Operator::Modulo) => {
-                least_modulo_minus_one(&arrays[0], &arrays[1])?;
-                numeric::rem(&arrays[0], &arrays[1])
+        let fast = match (self.op, &args.args[..]) {
+            (Some(op @ (Operator::Plus | Operator::Minus | Operator::Multiply)), [l, r]) => {
+                decimal128(op, l, r)
             }
-            _ => numeric::neg(&arrays[0]),
-        }
-        .map_err(super::errors::arithmetic)?;
-        validate_precision(&out)?;
+            _ => None,
+        };
+        let out = match fast {
+            Some(out) => out,
+            None => {
+                let arrays = ColumnarValue::values_to_arrays(&args.args)?;
+                let out: ArrayRef = match self.op {
+                    Some(Operator::Plus) => numeric::add(&arrays[0], &arrays[1]),
+                    Some(Operator::Minus) => numeric::sub(&arrays[0], &arrays[1]),
+                    Some(Operator::Multiply) => numeric::mul(&arrays[0], &arrays[1]),
+                    Some(Operator::Modulo) => {
+                        least_modulo_minus_one(&arrays[0], &arrays[1])?;
+                        numeric::rem(&arrays[0], &arrays[1])
+                    }
+                    _ => numeric::neg(&arrays[0]),
+                }
+                .map_err(super::errors::arithmetic)?;
+                validate_precision(&out)?;
+                out
+            }
+        };
         let want = args.return_field.data_type();
         let out = if out.data_type() == want {
             out
@@ -993,6 +1261,198 @@ mod tests {
 
     fn pair<T: ArrowPrimitiveType>(a: PrimitiveArray<T>, b: PrimitiveArray<T>) -> [ArrayRef; 2] {
         [Arc::new(a), Arc::new(b)]
+    }
+
+    fn dec(v: Vec<Option<i128>>, p: u8, s: i8) -> ColumnarValue {
+        ColumnarValue::Array(Arc::new(
+            Decimal128Array::from(v)
+                .with_precision_and_scale(p, s)
+                .unwrap(),
+        ))
+    }
+
+    fn lit(v: i128, p: u8, s: i8) -> ColumnarValue {
+        ColumnarValue::Scalar(ScalarValue::Decimal128(Some(v), p, s))
+    }
+
+    /// Arrow's checked kernel and the precision check, as `CheckedBinary` ran every batch before.
+    fn arrow_kernel(op: Operator, l: &ColumnarValue, r: &ColumnarValue) -> Result<ArrayRef> {
+        let a = ColumnarValue::values_to_arrays(&[l.clone(), r.clone()])?;
+        let out = match op {
+            Operator::Plus => numeric::add(&a[0], &a[1]),
+            Operator::Minus => numeric::sub(&a[0], &a[1]),
+            _ => numeric::mul(&a[0], &a[1]),
+        }
+        .map_err(super::super::errors::arithmetic)?;
+        validate_precision(&out)?;
+        Ok(out)
+    }
+
+    // #433: Q1's decimal arithmetic, `l_extendedprice * (1 - l_discount) * (1 + l_tax)`, each a
+    // checked 128-bit multiply per row in arrow's kernel. These shapes must take the plain one.
+    #[test]
+    fn q1s_decimal_arithmetic_takes_the_plain_kernel() {
+        let price = dec(vec![Some(9_999_999_999_999), Some(90_100), None], 15, 2);
+        let disc = dec(vec![Some(10), Some(0), Some(4)], 15, 2);
+        let one = lit(1, 20, 0);
+        let less = decimal128(Operator::Minus, &one, &disc).expect("1 - l_discount");
+        assert_eq!(less.data_type(), &DataType::Decimal128(23, 2));
+        let less = ColumnarValue::Array(less);
+        let disc_price = decimal128(Operator::Multiply, &price, &less).expect("price * (1 - disc)");
+        assert_eq!(disc_price.data_type(), &DataType::Decimal128(38, 4));
+        let more =
+            ColumnarValue::Array(decimal128(Operator::Plus, &one, &disc).expect("1 + l_tax"));
+        let charge = decimal128(Operator::Multiply, &ColumnarValue::Array(disc_price), &more)
+            .expect("disc_price * (1 + l_tax)");
+        let want = arrow_kernel(
+            Operator::Multiply,
+            &ColumnarValue::Array(
+                arrow_kernel(
+                    Operator::Multiply,
+                    &price,
+                    &ColumnarValue::Array(arrow_kernel(Operator::Minus, &one, &disc).unwrap()),
+                )
+                .unwrap(),
+            ),
+            &ColumnarValue::Array(arrow_kernel(Operator::Plus, &one, &disc).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(charge.as_ref(), want.as_ref());
+    }
+
+    #[test]
+    fn the_plain_kernel_answers_as_arrows_or_leaves_it_to_arrow() {
+        let big = i128::MAX / 3;
+        let values = [
+            vec![Some(0), Some(-1), Some(7), None, Some(123_456_789)],
+            vec![
+                Some(i64::MAX as i128),
+                Some(i64::MIN as i128 + 1),
+                Some(-5),
+                Some(2),
+                None,
+            ],
+            vec![
+                Some(1i128 << 70),
+                Some(-(1i128 << 70)),
+                Some(3),
+                Some(-3),
+                Some(0),
+            ],
+            vec![Some(big), Some(-big), Some(1), Some(-1), Some(2)],
+            vec![
+                Some(10i128.pow(37)),
+                Some(-(10i128.pow(37))),
+                None,
+                None,
+                Some(9),
+            ],
+        ];
+        let types = [(38u8, 0i8), (15, 2), (38, 10), (20, -2), (5, 5)];
+        let mut fast = 0;
+        for op in [Operator::Plus, Operator::Minus, Operator::Multiply] {
+            for (i, l) in values.iter().enumerate() {
+                for (j, r) in values.iter().enumerate() {
+                    let (lt, rt) = (types[i], types[(i + j) % types.len()]);
+                    let mut sides = vec![(dec(l.clone(), lt.0, lt.1), dec(r.clone(), rt.0, rt.1))];
+                    if let Some(x) = r[2] {
+                        sides.push((dec(l.clone(), lt.0, lt.1), lit(x, rt.0, rt.1)));
+                        sides.push((lit(x, rt.0, rt.1), dec(l.clone(), lt.0, lt.1)));
+                    }
+                    for (a, b) in &sides {
+                        let want = arrow_kernel(op, a, b);
+                        if let Some(got) = decimal128(op, a, b) {
+                            fast += 1;
+                            assert_eq!(got.as_ref(), want.unwrap().as_ref(), "{op} {i} {j}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(fast > 50, "{fast}");
+        // A result past its precision, or past 128 bits, is arrow's to refuse.
+        let max = dec(vec![Some(i128::MAX / 2)], 38, 0);
+        assert!(decimal128(Operator::Multiply, &max, &lit(4, 38, 0)).is_none());
+        assert!(arrow_kernel(Operator::Multiply, &max, &lit(4, 38, 0)).is_err());
+        let most = dec(vec![Some(10i128.pow(38) - 1)], 38, 0);
+        assert!(decimal128(Operator::Plus, &most, &lit(1, 38, 0)).is_none());
+        assert!(arrow_kernel(Operator::Plus, &most, &lit(1, 38, 0)).is_err());
+        assert!(decimal128(Operator::Plus, &lit(1, 38, 0), &lit(1, 38, 0)).is_none());
+    }
+
+    fn groups(in_ty: DataType, out_ty: DataType, mode: Mode) -> Groups<3> {
+        Groups::new(Spec {
+            mode,
+            name: "checked_sum",
+            in_ty,
+            out_ty,
+            lenient: false,
+            hex: false,
+        })
+    }
+
+    // #433: Q1's seven checked sums and averages over `Decimal128`, read from the value buffer.
+    #[test]
+    fn checked_sums_read_their_value_buffers_as_row_by_row() {
+        let ty = DataType::Decimal128(15, 2);
+        let values: ArrayRef = Arc::new(
+            Decimal128Array::from(vec![
+                Some(5),
+                None,
+                Some(-7),
+                Some(10i128.pow(15) - 1),
+                Some(3),
+                Some(-(10i128.pow(15) - 1)),
+                Some(11),
+            ])
+            .with_precision_and_scale(15, 2)
+            .unwrap(),
+        );
+        let gi = [0, 1, 2, 0, 1, 2, 3];
+        let filter = BooleanArray::from(vec![
+            Some(true),
+            Some(true),
+            None,
+            Some(true),
+            Some(false),
+            Some(true),
+            Some(true),
+        ]);
+        for f in [None, Some(&filter)] {
+            for (mode, out) in [
+                (Mode::Sum, DataType::Decimal128(38, 2)),
+                (Mode::Avg, DataType::Decimal128(38, 6)),
+                (Mode::Avg, DataType::Float64),
+            ] {
+                let mut fast = groups(ty.clone(), out.clone(), mode);
+                fast.grow(5);
+                assert!(fast.update_narrow(&values, &gi, f).unwrap().is_ok());
+                let mut slow = groups(ty.clone(), out, mode);
+                slow.grow(5);
+                let (mut sums, mut counts) = (slow.sums.clone(), slow.counts.clone());
+                slow.each(&values, f, |i, v| {
+                    sums[gi[i]] = sums[gi[i]].checked_add(v).unwrap();
+                    counts[gi[i]] += 1;
+                    Ok(())
+                })
+                .unwrap();
+                (slow.sums, slow.counts) = (sums, counts);
+                assert_eq!(fast.sums, slow.sums);
+                assert_eq!(fast.counts, slow.counts);
+                assert_eq!(
+                    fast.evaluate(EmitTo::All).unwrap().as_ref(),
+                    slow.evaluate(EmitTo::All).unwrap().as_ref()
+                );
+            }
+        }
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![Some(i64::MAX), Some(i64::MAX), None]));
+        let mut g = groups(DataType::Int64, DataType::Decimal128(38, 0), Mode::Sum);
+        g.grow(1);
+        assert!(g.update_narrow(&ints, &[0, 0, 0], None).unwrap().is_ok());
+        assert_eq!(g.sums[0], Wide::from_i128(2 * i64::MAX as i128));
+        assert_eq!(g.counts[0], 2);
+        let text: ArrayRef = Arc::new(arrow::array::StringArray::from(vec!["1"]));
+        assert!(g.update_narrow(&text, &[0], None).is_none());
     }
 
     // #50: the least value at 128 bits was `i64::MIN >> (64 - 128)`.

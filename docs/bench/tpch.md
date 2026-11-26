@@ -37,6 +37,8 @@ Q11 is now 1.66x to 1.76x at SF10, from 2.74x to 3.20x, its total summed from it
 join run once ([below](#q11-one-join-for-the-groups-and-their-total-433)).
 Q18 is now 2.27x to 2.62x at SF10, from 3.64x to 4.05x, its join reading the `HAVING`'s groups
 rather than `lineitem` again ([below](#q18-the-havings-groups-in-place-of-the-rows-433)).
+Q1 is now 1.91x to 2.10x at SF10, from 3.37x to 3.53x, its decimal arithmetic and sums no longer
+checked row by row ([below](#q1-decimal-arithmetic-and-sums-without-a-check-per-row-433)).
 
 **Against datafusion-cli it is faster on four at SF10** (7, 15, 18, 19) and within 1.5x on 13 of
 the 21 it answers. It is the same DataFusion underneath, so that gap is Burrmill's own. Where it
@@ -619,6 +621,77 @@ was 9.39 at the start (00:08:24) and 9.92 at the end (00:09:38). All 21 answers 
 as DuckDB's, and Q21 was refused as above. The widest ratios were Q1 at 3.23x (1,012 ms against 313),
 Q5 at 3.15x, Q9 at 2.89x, Q4 at 2.88x and Q17 at 2.81x. Q18 was at 2.42x. At SF1, one run each at a
 load of 9.92, all 22 answers were the same as DuckDB's.
+
+## Q1: decimal arithmetic and sums without a check per row (#433)
+
+Q1 was the widest ratio at SF10 in the run of all 22 after #464, 3.23x. On fb2da5a, with the DuckDB
+2.0.1 CLI downloaded for this, Q1 alone at SF10, best of 5, took 1,065 ms against DuckDB's 302,
+3.53x, at a load of 16.09 (06:26:34); in the rounds below, at loads of 6.93 to 9.62, it was 3.37x to
+3.53x.
+
+**The cause.** Q1 scans all of `lineitem`, keeps 59.14M of its 59.99M rows, and folds them into 4
+groups with five checked sums, three checked averages and a count over decimal expressions. In an
+`EXPLAIN ANALYZE` at SF10 on fb2da5a (load 14.30, 06:26:46) the projection of
+`checked_mul(l_extendedprice, checked_sub(1, l_discount))` took 1.02 s of CPU, and the partial
+aggregate 3.53 s: 1.01 s evaluating its arguments, `checked_mul(.., checked_add(1, l_tax))`, and
+2.49 s aggregating. The scan took 2.14 s and the `FilterExec` 114.90 ms. Arrow's checked decimal
+kernel makes a checked 128-bit multiply per row, a call into compiler-rt, and for `1 - l_discount`
+it rescales the literal, spread to a column, with two more per row. On one core over 59M rows, a
+checked `i128` multiply took 166 ms where one 64-bit multiply took 49 ms (a loop built only for
+this). `checked_sum` and `checked_avg` read each row through `dyn Array::is_valid` and a closure,
+seven times per row. DuckDB 2.0.1's `EXPLAIN ANALYZE` (load 10.16, 07:32:31) takes 90.0 and 110.0 ms
+for its two projections, 1.21 s for its group-by and 1.28 s for its scan.
+
+**The A/B.** The reader's row filter is not the cause. Q1 keeps it, since the scan reads two text
+columns besides the predicate's. With `StaticRowFilters` made to drop it, built only for this and not
+committed, Q1 took 905, 903 and 918 ms against 881, 889 and 1,042 with it, three rounds alternating,
+best of 5, Burrmill alone, loads 8.03 to 8.36. The arithmetic and the sums as below, before the
+skipped precision pass was added, took Q1 from 1,159, 1,124 and 1,145 ms to 747, 706 and 993, three
+rounds alternating, Burrmill alone, loads 8.71 to 9.87.
+
+**The fix.** `checked_add`, `checked_sub` and `checked_mul` over `Decimal128`
+(`crates/burrmill/src/df/checked.rs`) now run in plain `i128` where the batch's magnitudes show no
+row can overflow: under 2^127 for a product, each rescaled operand under 2^126 for a sum or a
+difference, and one 64-bit multiply where both factors are under 2^63. The result has arrow's
+precision and scale, and the pass checking it against its precision is skipped where the magnitudes
+already bound it. A batch that could overflow, a result past its precision, a NULL or lone literal,
+and a negative scale, which arrow's precision check refuses, go to arrow's kernel as before, so
+what is refused is unchanged. `checked_sum` and `checked_avg` over integers and `Decimal128` add from
+the value buffer, with NULLs and the filter folded into one mask. Tests in `checked.rs` compare
+both paths with the old ones over operands up to 2^127, NULLs, literals and negative scales, and
+`q1s_decimal_arithmetic_takes_the_plain_kernel` fails if Q1's four expressions go back to arrow's
+kernel. After the fix, in an `EXPLAIN ANALYZE` at SF10 (load 11.27, 07:32:23), the projection took
+332.57 ms of CPU, the aggregate's arguments 333.12 ms and its aggregating 1.49 s.
+
+**Measured** 2026-11-26 on 18edef4 (built before rustfmt, which moved only layout) against fb2da5a,
+on the ThinkPad as above, 8 threads, 2 GiB, no spill directory: three rounds per scale factor,
+before then after, each the best of 5 for Burrmill and for the DuckDB 2.0.1 CLI in the same process.
+The load was over 8 from 06:26 until 07:29 (up to 150 at 07:21); the wait for it ended at 07:29:40
+(7.55), and it rose to 9.81 during the rounds. Every answer was the same as DuckDB's.
+
+| SF | round | 1-minute load, start / end | DuckDB 2.0.1 ms | before ms | ratio | DuckDB 2.0.1 ms | after ms | ratio | Burrmill peak RSS MiB, before / after |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| 10 | 1 | 6.93 / 7.32 | 334 | 1,165 | 3.49x | 322 | 677 | 2.10x | 362 / 355 |
+| 10 | 2 | 7.32 / 8.32 | 302 | 1,065 | 3.53x | 301 | 629 | 2.09x | 361 / 361 |
+| 10 | 3 | 8.32 / 9.62 | 318 | 1,070 | 3.37x | 348 | 664 | 1.91x | 366 / 363 |
+| 1 | 1 | 9.62 / 9.81 | 39 | 128 | 3.29x | 38 | 72 | 1.90x | 344 / 348 |
+| 1 | 2 | 9.81 / 9.81 | 36 | 118 | 3.29x | 35 | 82 | 2.34x | 343 / 346 |
+| 1 | 3 | 9.81 / 9.19 | 39 | 118 | 3.02x | 39 | 70 | 1.79x | 345 / 349 |
+
+Q1 at SF10 went from 3.37x–3.53x DuckDB 2.0.1 to 1.91x–2.10x, and at SF1 from 3.02x–3.29x to
+1.79x–2.34x. What is left at SF10 is the scan, 2.37 s of CPU after the fix against DuckDB's 1.28 s,
+and the aggregate's 1.49 s, which counts the two text group keys' hash lookups as well as the
+seven sums. Probed alone at SF10 (Burrmill, best of 3, load 12.05, 06:42:08), the scan of the four
+decimal columns took 1.41 s of CPU, of the two text columns 843.46 ms and of `l_shipdate` alone
+154.98 ms, and a `count(*)` grouped by the two text columns took 681.41 ms aggregating. DuckDB also
+answers each average as its sum over its count, where Burrmill accumulates `sum(l_quantity)` and
+`avg(l_quantity)`, and `l_extendedprice`'s two, apart.
+
+**All 22 after the fix**, at SF10 on the same build, best of 3, DuckDB 2.0.1 in the same process.
+The load was 8.53 at the start (07:30:45) and 12.03 at the end (07:32:05). All 21 answers given were
+the same as DuckDB's, and Q21 was refused as above. The widest ratios were Q8 at 3.46x (1,193 ms
+against 345), Q5 at 3.39x, Q2 at 3.27x, Q4 at 3.14x and Q22 at 3.00x. Q1 was at 1.77x. At SF1, one
+run each at a load of 11.07, all 22 answers were the same as DuckDB's.
 
 ## Spilling: Q21 under 2 GiB (#383)
 
