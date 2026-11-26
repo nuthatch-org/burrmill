@@ -12,6 +12,23 @@ entry: a receipt someone kept stops verifying on that release (`tests/receipt_co
 
 Engine (`burrmill`, feature `datafusion`)
 
+- `<`, `>`, `<=`, `>=` and `BETWEEN` between structs or lists order a NULL inside them after every
+  value, as DuckDB does (#423): `{'x': NULL} > {'x': 0}` and `[1, NULL] > [1, 2]` are true, where
+  Arrow's comparator put the NULL first and answered false.
+- `SELECT *` over a `USING` or `NATURAL` join is the left side's columns, then the right side's
+  without the join columns, as in DuckDB (#423). DataFusion kept whichever copy's table name
+  sorted first, so `t3 NATURAL JOIN t2` put `t2`'s columns first, and over a `LEFT JOIN` it could
+  answer the right side's NULL for a row the left side had. A join column of a `RIGHT JOIN ... USING`
+  is the right side's and of a `FULL JOIN` both coalesced, in `*` and when named without a table.
+  A `NATURAL JOIN` whose sides share no column is DuckDB's binder error, where it was a cross join.
+- `POSITIONAL JOIN` is refused by name (#423); sqlparser read `POSITIONAL` as an alias and the
+  `JOIN` as a cross join. `JOIN BY (TYPE ...)` and `NEAREST ... BY` are refused by name too, not as
+  syntax errors. In DuckDB's sqllogictest suite, `test/sql/join` has 1177 pass, 304 refused, 1
+  wrong and 120 error, where it had 1169, 176, 11 and 246; the whole suite 12227 pass and 604
+  wrong, where 12199 and 634.
+- The sqllogictest harness judges a statement under `SharedDefsExec` by the statement's own sort,
+  where it took the shared subqueries for a join's inputs and the plan for unordered (#423).
+
 - A hash join builds on the side its filter plainly cuts below the other, where it built on the
   side that reads fewer bytes (#433). Statistics being off, a filter's share is guessed from its
   predicate, a tenth for an equality and a third for a range or a comparison of two columns, and
@@ -58,8 +75,8 @@ Engine (`burrmill`, feature `datafusion`)
   An ungrouped `LATERAL` with a `HAVING` now filters on those values too: `HAVING count(*) > 0`
   answered a NULL row for an unmatched outer row. `GROUP BY GROUPING SETS (())` is planned as no
   `GROUP BY`, one row even over no input. Any other correlated subquery over an empty grouping set,
-  a scalar one among them, is refused by name. Of DuckDB's `test/sql/subquery`, 1 record is
-  wrong where 22 were.
+  a scalar one among them, is refused by name. Of DuckDB's `test/sql/subquery`, no record is
+  wrong where 21 were.
 
 Build and CI
 
