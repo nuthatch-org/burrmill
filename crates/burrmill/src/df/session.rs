@@ -727,6 +727,9 @@ impl MiniSession {
                         // After the subqueries are joins and the filters are down, and before a
                         // pass that pushes projections and filters into the semi join it adds.
                         Arc::new(super::joinedgroups::JoinedGroups),
+                        // Once the filters are down and the joins are joins, so it can tell a
+                        // filtered dimension; the next pass pushes projections into its semi join.
+                        Arc::new(super::transitivekeys::TransitiveKeys),
                         Arc::new(super::bound::BoundValues(Arc::clone(&limits))),
                         Arc::new(super::sharing::PruneShared),
                     ])
