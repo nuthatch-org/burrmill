@@ -274,6 +274,11 @@ path = "tests/df_havinggroups.rs"
 required-features = ["datafusion"]
 
 [[test]]
+name = "df_transitivekeys"
+path = "tests/df_transitivekeys.rs"
+required-features = ["datafusion"]
+
+[[test]]
 name = "df_latest"
 path = "tests/df_latest.rs"
 required-features = ["datafusion"]

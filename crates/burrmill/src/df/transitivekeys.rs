@@ -154,7 +154,10 @@ impl<'a> Tree<'a> {
     }
 
     /// The first leaf to reduce, its column, and the dimension's keys to reduce it to.
-    fn reduction(&self, config: &dyn OptimizerConfig) -> Result<Option<(usize, Column, LogicalPlan)>> {
+    fn reduction(
+        &self,
+        config: &dyn OptimizerConfig,
+    ) -> Result<Option<(usize, Column, LogicalPlan)>> {
         // Each pair's leaves, and the classes of columns the equalities join.
         let mut class = Classes::default();
         let mut edges = Vec::new();
@@ -203,8 +206,12 @@ impl<'a> Tree<'a> {
                 if filters.iter().any(|(_, on, _)| *on == k) {
                     continue;
                 }
-                let dimension = self.dimension(n, k, &filters, config)?;
-                let Some(read) = bytes(&dimension) else {
+                // What the dimension reads: `n` and each filtered leaf it meets.
+                let read = filters.iter().fold(bytes(leaf), |sum, &(r, _, _)| {
+                    sum.zip(bytes(self.leaves[r]))
+                        .map(|(a, b)| a.saturating_add(b))
+                });
+                let Some(read) = read else {
                     continue;
                 };
                 for (t, c) in class.members(k).filter_map(|c| Some((self.leaf_of(c)?, c))) {
@@ -226,6 +233,7 @@ impl<'a> Tree<'a> {
                     }
                     match bytes(self.leaves[t]) {
                         Some(b) if read.saturating_mul(SMALLER) <= b => {
+                            let dimension = self.dimension(n, k, &filters, config)?;
                             return Ok(Some((t, c.clone(), dimension)));
                         }
                         _ => {}

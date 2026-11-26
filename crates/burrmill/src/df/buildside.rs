@@ -96,6 +96,24 @@ fn filters_probe(build: &Arc<dyn ExecutionPlan>, probe: &Arc<dyn ExecutionPlan>)
 /// How many times smaller a side's guessed share must leave it for the guess to decide.
 const DECISIVE: f64 = 8.0;
 
+/// Whether an inner join building on `build` is collected though the guess did not choose its
+/// side: `probe` has no filter of its own, so the join's dynamic filter is evaluated on every row
+/// it reads, and `build` is filtered and guessed to keep at most a [`UNFILTERED`]th of that.
+fn filters_unfiltered_probe(
+    build: &Arc<dyn ExecutionPlan>,
+    probe: &Arc<dyn ExecutionPlan>,
+) -> bool {
+    matches!(
+        (bytes_kept(build), bytes_read(build), bytes_kept(probe), bytes_read(probe)),
+        (Some(kb), Some(rb), Some(kp), Some(rp))
+            if kb < rb && kp == rp && kb.saturating_mul(UNFILTERED) <= kp
+    )
+}
+
+/// How many times what a filtered build side is guessed to keep an unfiltered probe side must read
+/// for the join to be collected.
+const UNFILTERED: u64 = 4;
+
 /// Whether `build` is the larger side, and whether a guess said so against the bytes read: by the
 /// bytes each reads, unless [`bytes_kept`] guesses one under an eighth of the other. One constant
 /// can be five times off, `o_orderstatus = 'F'` keeping half the orders and not a tenth; with the
@@ -303,6 +321,12 @@ impl PhysicalOptimizerRule for BuildOnSmaller {
             };
             let mode = match j.partition_mode() {
                 PartitionMode::Partitioned if guessed && *j.join_type() == JoinType::Inner => {
+                    PartitionMode::CollectLeft
+                }
+                PartitionMode::Partitioned
+                    if *j.join_type() == JoinType::Inner
+                        && filters_unfiltered_probe(build, probe) =>
+                {
                     PartitionMode::CollectLeft
                 }
                 PartitionMode::Partitioned if collect && filters_probe(build, probe) => {
