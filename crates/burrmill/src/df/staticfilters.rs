@@ -21,10 +21,10 @@
 //! only the decoding of those columns for the rows an earlier conjunct dropped, and the join drops
 //! the same rows above the scan. TPC-H Q4's `lineitem` scan reads `l_orderkey`, `l_commitdate` and
 //! `l_receiptdate`; its predicate is `l_receiptdate > l_commitdate` and the semi join's filter on
-//! `l_orderkey`, which together keep 1.45M of 60M rows at SF10. In the reader that scan took 1.65 s
-//! of CPU, 327 ms of it evaluating the predicate, and the statement 395 to 406 ms; read whole, with
-//! the join's filter left to the join, the statement took 243 to 247 ms against 341 to 343 in the
-//! same window (#433).
+//! `l_orderkey`, which together keep 1.45M of 60M rows at SF10. In the reader that scan took 2.54 s
+//! of CPU, 521 ms of it evaluating the predicate; read whole it took 0.87 s, with 0.15 s in the
+//! filter above it and 0.34 s more in the join, and the statement went from 408–514 ms to 242–329
+//! (#433).
 //!
 //! Every predicate such a scan holds is enforced above it as well. A table's `WHERE` reaches the scan
 //! as `Inexact` (`catalog.rs`), so its `FilterExec` stays, and `CancelExec` does not pass a `WHERE`

@@ -167,8 +167,8 @@ fn a_join_filter_still_filters_in_the_reader() {
 }
 
 /// TPC-H Q4's shape: a semi join's filter and a comparison of two columns, over a scan that reads
-/// only the columns they read. In the reader, Q4's `lineitem` scan took 1.65 s of CPU at SF10 and
-/// the statement 341 to 343 ms; with the join's filter left to the join, 243 to 247 (#433).
+/// only the columns they read. In the reader, Q4's `lineitem` scan took 2.54 s of CPU at SF10 and
+/// the statement 408–514 ms; with the join's filter left to the join, 0.87 s and 242–329 ms (#433).
 #[test]
 fn a_join_filter_over_only_its_columns_filters_above_the_reader() {
     let tmp = tempfile::tempdir().unwrap();
