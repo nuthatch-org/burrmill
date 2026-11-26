@@ -408,6 +408,9 @@ pub fn time_text(us: i64) -> String {
     s
 }
 
+/// A text's value as a DATE (days), a TIME or a TIMESTAMP (microseconds).
+type Parse = fn(&str) -> std::result::Result<i64, Fail>;
+
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 enum Kind {
     Date,
@@ -545,7 +548,7 @@ impl ScalarUDFImpl for TemporalFn {
             kind => {
                 let text = arrow::compute::cast(&a, &DataType::Utf8)?;
                 let text = text.as_string::<i32>();
-                let (what, parse): (&str, fn(&str) -> std::result::Result<i64, Fail>) = match kind {
+                let (what, parse): (&str, Parse) = match kind {
                     Kind::Date => ("DATE", |s| date_value(s).map(i64::from)),
                     Kind::Time(_) => ("TIME", parse_time),
                     _ => ("TIMESTAMP", parse_timestamp),
