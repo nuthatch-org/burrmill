@@ -173,3 +173,91 @@ fn a_float_of_25_bits_or_more_is_a_double() {
         vec![json!({"a": "FLOAT", "b": "DOUBLE", "c": "DOUBLE"})]
     );
 }
+
+/// Text cast to BLOB reads `\xAA` as one byte and a BLOB cast to text writes it back, as in DuckDB;
+/// Arrow kept the four characters. A number has no cast to BLOB
+/// (test/sql/types/blob/test_blob.test:12, test_blob_cast.test:18, :47, test_blob_function.test:44).
+#[test]
+fn blobs_cast_as_duckdb() {
+    let e = Engine::open_empty().unwrap();
+    let got = rows(
+        &e,
+        concat!(
+            r"SELECT '\x41\x5a'::BLOB::VARCHAR AS a, '\x5A\x5A'::BLOB = 'ZZ'::BLOB AS b, ",
+            r"'\x20\x00\xFF'::BYTEA::VARCHAR AS c, ('\xFF'::BLOB || 'ZZ'::BYTEA)::VARCHAR AS d, ",
+            r"'a''b\x5Cc'::BLOB::VARCHAR AS f, TRY_CAST('\xA' AS BLOB) AS g",
+        ),
+    );
+    assert_eq!(
+        got,
+        vec![json!({
+            "a": "AZ",
+            "b": true,
+            "c": r" \x00\xFF",
+            "d": r"\xFFZZ",
+            "f": r"a\x27b\x5Cc",
+            "g": null,
+        })]
+    );
+    for (sql, says) in [
+        ("SELECT 1::BYTEA", "Unimplemented type for cast"),
+        ("SELECT 1::bigint::BYTEA", "Unimplemented type for cast"),
+        (r"SELECT '\xA'::BLOB", "Invalid hex escape code"),
+    ] {
+        let err = error(&e, sql);
+        assert!(err.contains(says), "{sql}: {err}");
+    }
+}
+
+/// `x op ANY(list)` and `x op ALL(list)` as DuckDB answers them: over the list's elements as a
+/// subquery, so a NULL list has none (test/sql/types/nested/list/any_list.test:26, :41, :74, :103).
+/// DataFusion answered `4 = ANY([1, 2, 3, NULL])` false and `1 = ANY(NULL)` NULL.
+#[test]
+fn quantified_comparisons_over_lists_as_duckdb() {
+    let e = Engine::open_empty().unwrap();
+    let got = rows(
+        &e,
+        "SELECT 4 = ANY([1, 2, 3, NULL]) AS a, 1 = ANY(NULL) AS b, 4 > ALL([1, 2, 3, NULL]) AS c, \
+         1 = ALL([1, 2, 3, NULL]) AS d, 1 = ANY([1, NULL]) AS f, NULL = ANY([1]) AS g, \
+         3 > ANY([5, NULL, 1]) AS h, 1 = ANY([]::INT[]) AS i, 1 = ALL([]::INT[]) AS j",
+    );
+    assert_eq!(
+        got,
+        vec![json!({
+            "a": null, "b": false, "c": null, "d": false, "f": true, "g": null, "h": true,
+            "i": false, "j": true,
+        })]
+    );
+    // Over a column of lists, one with a NULL element and one without.
+    let got = rows(
+        &e,
+        "SELECT 6 = ANY(l) AS a FROM (VALUES ([1, NULL, 3]), ([1, 2])) t(l) ORDER BY 1 NULLS LAST",
+    );
+    assert_eq!(got, vec![json!({"a": false}), json!({"a": null})]);
+}
+
+/// `list_contains` as DuckDB answers it: NULL for a NULL list or needle, false for an empty list,
+/// and NULL elements do not make a miss NULL (test/sql/function/list/list_contains.test:211, :221).
+#[test]
+fn list_contains_as_duckdb() {
+    let e = Engine::open_empty().unwrap();
+    let got = rows(
+        &e,
+        "SELECT list_contains([], NULL) AS a, list_contains([1], NULL) AS b, \
+         list_contains(NULL::INT[], 1) AS c, list_contains([NULL, 0], 1) AS d, \
+         list_contains([NULL, 0], 0) AS f",
+    );
+    assert_eq!(
+        got,
+        vec![json!({"a": false, "b": null, "c": null, "d": false, "f": true})]
+    );
+}
+
+/// A list of numbers has no cast to a list of BLOBs, as a number has none to a BLOB
+/// (test/sql/types/nested/array/array_cast.test:72).
+#[test]
+fn a_list_of_numbers_does_not_cast_to_blobs() {
+    let e = Engine::open_empty().unwrap();
+    let err = error(&e, "SELECT [1, 2, 3]::BLOB[3]");
+    assert!(err.contains("Unimplemented type for cast"), "{err}");
+}

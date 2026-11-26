@@ -239,7 +239,13 @@ fn child(col: &ArrayRef, i: usize) -> String {
     if null_at(col, i) {
         return "NULL".into();
     }
-    if is_string(col.data_type()) {
+    // A BLOB inside a LIST, STRUCT or MAP is cast to text and then quoted as a string is.
+    if is_string(col.data_type())
+        || matches!(
+            col.data_type(),
+            DataType::Binary | DataType::LargeBinary | DataType::BinaryView
+        )
+    {
         return nested_string(&value(col, i, true), false);
     }
     value(col, i, true)
@@ -592,6 +598,18 @@ mod tests {
         assert_eq!(nested_string("NULL", false), "'NULL'");
         assert_eq!(nested_string("it's", false), "'it\\'s'");
         assert_eq!(nested_string("k", true), "'k'");
+    }
+
+    /// A BLOB inside a STRUCT is written as text and quoted as a string, as DuckDB's cast does
+    /// (test/sql/function/list/aggregates/minmax_nested.test:63).
+    #[test]
+    fn nested_blobs_quote_as_strings() {
+        let col: ArrayRef = std::sync::Arc::new(arrow::array::BinaryArray::from(vec![
+            b"long_prefix_\x100".as_slice(),
+            b"plain".as_slice(),
+        ]));
+        assert_eq!(child(&col, 0), r"'long_prefix_\\x100'");
+        assert_eq!(child(&col, 1), "plain");
     }
 
     #[test]

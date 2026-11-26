@@ -16,6 +16,7 @@ use crate::error::{BurrmillError, Result};
 
 mod addresses;
 mod asof;
+mod blobs;
 mod bound;
 mod cancel;
 mod catalog;

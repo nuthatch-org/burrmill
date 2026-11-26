@@ -1843,6 +1843,120 @@ fn natural_joins(
     Ok(left)
 }
 
+fn case(when: Vec<(SqlExpr, SqlExpr)>, otherwise: SqlExpr) -> SqlExpr {
+    use sqlparser::ast::helpers::attached_token::AttachedToken;
+    SqlExpr::Case {
+        case_token: AttachedToken::empty(),
+        end_token: AttachedToken::empty(),
+        operand: None,
+        conditions: when
+            .into_iter()
+            .map(|(condition, result)| sq::CaseWhen { condition, result })
+            .collect(),
+        else_result: Some(Box::new(otherwise)),
+    }
+}
+
+fn boolean(b: Option<bool>) -> SqlExpr {
+    SqlExpr::Value(b.map_or(sq::Value::Null, sq::Value::Boolean).into())
+}
+
+fn is_null(e: &SqlExpr) -> SqlExpr {
+    SqlExpr::IsNull(Box::new(e.clone()))
+}
+
+/// `NULL` or `[]`: what DuckDB's quantified comparisons and `list_contains` read as no elements.
+fn no_elements(list: &SqlExpr) -> SqlExpr {
+    binop(
+        is_null(list),
+        BinaryOperator::Or,
+        binop(
+            call("cardinality", vec![list.clone()]),
+            BinaryOperator::Eq,
+            SqlExpr::Value(sq::Value::Number("0".into(), false).into()),
+        ),
+    )
+}
+
+/// `x op ANY(list)` and `x op ALL(list)` as DuckDB answers them, as the comparison quantified over
+/// `SELECT unnest(list)` (#419): a NULL list has no elements, so ANY is false and ALL true; an
+/// element that decides the answer decides it whatever NULLs there are; otherwise a NULL `x` or
+/// a NULL element makes it NULL. DataFusion's plan answered `4 = ANY([1, 2, 3, NULL])` false and
+/// `1 = ANY(NULL)` NULL.
+fn quantified(x: &SqlExpr, op: &BinaryOperator, list: &SqlExpr, any: bool) -> Option<SqlExpr> {
+    use BinaryOperator::*;
+    let min = || call("array_min", vec![list.clone()]);
+    let max = || call("array_max", vec![list.clone()]);
+    let has = || call("array_has", vec![list.clone(), x.clone()]);
+    let not = |e: SqlExpr| SqlExpr::UnaryOp {
+        op: sq::UnaryOperator::Not,
+        expr: Box::new(SqlExpr::Nested(Box::new(e))),
+    };
+    let x = || x.clone();
+    // For ANY, some non-NULL element makes the comparison true; for ALL, one makes it false.
+    let decides = match (op, any) {
+        (Eq, true) => has(),
+        (NotEq, true) => binop(binop(min(), NotEq, x()), Or, binop(max(), NotEq, x())),
+        (Gt, true) => binop(min(), Lt, x()),
+        (GtEq, true) => binop(min(), LtEq, x()),
+        (Lt, true) => binop(max(), Gt, x()),
+        (LtEq, true) => binop(max(), GtEq, x()),
+        (Eq, false) => not(binop(binop(min(), Eq, x()), And, binop(max(), Eq, x()))),
+        (NotEq, false) => has(),
+        (Gt, false) => not(binop(x(), Gt, max())),
+        (GtEq, false) => not(binop(x(), GtEq, max())),
+        (Lt, false) => not(binop(x(), Lt, min())),
+        (LtEq, false) => not(binop(x(), LtEq, min())),
+        _ => return None,
+    };
+    let has_null = SqlExpr::IsNotNull(Box::new(call(
+        "array_position",
+        vec![
+            list.clone(),
+            boolean(None),
+            SqlExpr::Value(sq::Value::Number("1".into(), false).into()),
+        ],
+    )));
+    Some(SqlExpr::Nested(Box::new(case(
+        vec![
+            (no_elements(list), boolean(Some(!any))),
+            (is_null(&x()), boolean(None)),
+            (
+                call("coalesce", vec![decides, boolean(Some(false))]),
+                boolean(Some(any)),
+            ),
+            (has_null, boolean(None)),
+        ],
+        boolean(Some(!any)),
+    ))))
+}
+
+/// A written list of one element or more, none of them a NULL literal: where DataFusion's
+/// `array_has` already answers as DuckDB does, and is left to the rules that read it as `IN`.
+fn plain_list(e: &SqlExpr) -> bool {
+    matches!(e, SqlExpr::Array(a) if !a.elem.is_empty()
+        && !a.elem.iter().any(|x| matches!(x, SqlExpr::Value(v) if v.value == sq::Value::Null)))
+}
+
+/// `list_contains(list, x)` as DuckDB answers it (#419): NULL for a NULL list, false for an empty
+/// one, NULL for a NULL `x`, and otherwise whether `x` is there, NULL elements aside.
+fn list_contains(list: &SqlExpr, x: &SqlExpr) -> SqlExpr {
+    SqlExpr::Nested(Box::new(case(
+        vec![
+            (is_null(list), boolean(None)),
+            (no_elements(list), boolean(Some(false))),
+            (is_null(x), boolean(None)),
+        ],
+        call(
+            "coalesce",
+            vec![
+                call("array_has", vec![list.clone(), x.clone()]),
+                boolean(Some(false)),
+            ],
+        ),
+    )))
+}
+
 /// `INTERVAL '...'` as DuckDB reads it (#419). Without a unit it is DuckDB's cast of the text, which
 /// `DuckSemantics` makes [`super::intervals::parse`]; the cast is returned to replace it. With a
 /// unit above a millisecond, DuckDB takes the number's whole part (`INTERVAL '1.5' HOUR` is an
@@ -2090,6 +2204,8 @@ fn retype(t: &mut SqlType) -> Option<String> {
             SqlType::Decimal(ExactNumberInfo::PrecisionAndScale(18, 3))
         }
         SqlType::HugeInt => SqlType::Decimal(ExactNumberInfo::PrecisionAndScale(38, 0)),
+        // DuckDB's BLOB is DataFusion's BYTEA.
+        SqlType::Blob(None) => SqlType::Bytea,
         // `FLOAT(p)` is FLOAT to 24 bits and DOUBLE from 25 to 53; DataFusion's is always FLOAT.
         SqlType::Float(ExactNumberInfo::Precision(p)) if *p > 24 => {
             SqlType::Double(ExactNumberInfo::None)
@@ -2428,6 +2544,41 @@ impl VisitorMut for Rewriter {
                 // from zero; both are DECIMAL(38,0) here, so `DuckSemantics` is told which it was.
                 if hugeint {
                     *e = call("burrmill_hugeint", vec![e.clone()]);
+                }
+            }
+            SqlExpr::AnyOp {
+                left,
+                compare_op,
+                right,
+                ..
+            } if !matches!(right.as_ref(), SqlExpr::Subquery(_)) => {
+                if let Some(q) = quantified(left, compare_op, right, true) {
+                    *e = q;
+                }
+            }
+            SqlExpr::AllOp {
+                left,
+                compare_op,
+                right,
+            } if !matches!(right.as_ref(), SqlExpr::Subquery(_)) => {
+                if let Some(q) = quantified(left, compare_op, right, false) {
+                    *e = q;
+                }
+            }
+            SqlExpr::Function(f)
+                if matches!(
+                    f.name.to_string().to_ascii_lowercase().as_str(),
+                    "list_contains" | "array_contains" | "list_has"
+                ) =>
+            {
+                if let sq::FunctionArguments::List(l) = &f.args
+                    && let [
+                        sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(list)),
+                        sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(x)),
+                    ] = l.args.as_slice()
+                    && !plain_list(list)
+                {
+                    *e = list_contains(list, x);
                 }
             }
             SqlExpr::Interval(iv) => {
@@ -2951,6 +3102,8 @@ impl AnalyzerRule for DuckSemantics {
                             let t = t.transform_data(|e| {
                                 super::intervals::intervals_as_duckdb(e, &schema)
                             })?;
+                            let t =
+                                t.transform_data(|e| super::blobs::blobs_as_duckdb(e, &schema))?;
                             let t =
                                 t.transform_data(|e| super::nestedorder::nested_order(e, &schema))?;
                             let t =
