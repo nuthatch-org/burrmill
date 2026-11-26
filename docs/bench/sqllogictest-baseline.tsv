@@ -60,7 +60,7 @@ show_select	21	22	0	37	72
 sql_export	443	271	5	85	1649
 storage	51	27	0	4	6742
 storage_version	0	0	0	0	19
-subquery	322	210	21	258	843
+subquery	340	218	0	253	843
 table_function	51	78	0	32	619
 timezone	0	0	0	0	615
 topn	89	0	3	4	217
