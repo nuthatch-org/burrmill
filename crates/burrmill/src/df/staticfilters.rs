@@ -10,16 +10,28 @@
 //! Its 1.9% of rows are scattered through every page, so the reader saved nothing it did not then
 //! spend on the passes.
 //!
-//! So a scan keeps its row filter where it can spare something: where its predicate holds a join's or
-//! a top-k's dynamic filter, which cuts the rows the operators above it see; where a conjunct is an
-//! equality with a literal, which alone can keep few rows; and where it reads a column the predicate
-//! does not that is not fixed-width, text or a nested value, whose decoding the filter can save.
+//! So a scan keeps its row filter where it can spare something: where its predicate holds a top-k's
+//! dynamic filter, which cuts the rows the operators above it see; where it holds a join's and the
+//! scan reads a column the predicate does not, whose decoding the join's filter can save; where a
+//! conjunct is an equality with a literal, which alone can keep few rows; and where it reads a column
+//! the predicate does not that is not fixed-width, text or a nested value, whose decoding the filter
+//! can save.
+//!
+//! Where a scan reads only the columns its predicate reads, a join's filter in the reader can spare
+//! only the decoding of those columns for the rows an earlier conjunct dropped, and the join drops
+//! the same rows above the scan. TPC-H Q4's `lineitem` scan reads `l_orderkey`, `l_commitdate` and
+//! `l_receiptdate`; its predicate is `l_receiptdate > l_commitdate` and the semi join's filter on
+//! `l_orderkey`, which together keep 1.45M of 60M rows at SF10. In the reader that scan took 1.65 s
+//! of CPU, 327 ms of it evaluating the predicate, and the statement 395 to 406 ms; read whole, with
+//! the join's filter left to the join, the statement took 243 to 247 ms against 341 to 343 in the
+//! same window (#433).
 //!
 //! Every predicate such a scan holds is enforced above it as well. A table's `WHERE` reaches the scan
 //! as `Inexact` (`catalog.rs`), so its `FilterExec` stays, and `CancelExec` does not pass a `WHERE`
 //! down again. What else a scan holds, a join's or a top-k's filter or `RangeBounds`', is the join's
 //! or the top-k's own to enforce. The predicate still prunes row groups and pages.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use arrow::datatypes::DataType;
@@ -35,24 +47,42 @@ use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_expr::expressions::{BinaryExpr, DynamicFilterPhysicalExpr, Literal};
 use datafusion_physical_expr::utils::{collect_columns, split_conjunction};
 use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_plan::joins::HashJoinExec;
 use datafusion_session::PhysicalOptimizerRule;
 
 #[derive(Debug, Default)]
 pub struct StaticRowFilters;
 
-/// Whether `predicate` holds a dynamic filter anywhere in it.
-fn dynamic(predicate: &Arc<dyn PhysicalExpr>) -> bool {
-    let mut found = false;
+/// The ids of the dynamic filters the plan's hash joins produce.
+fn join_filters(plan: &Arc<dyn ExecutionPlan>) -> Result<HashSet<u64>> {
+    let mut ids = HashSet::new();
+    plan.apply(|node| {
+        if node.is::<HashJoinExec>() {
+            ids.extend(
+                node.dynamic_expressions_produced()
+                    .iter()
+                    .filter_map(|f| f.expression_id()),
+            );
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+    Ok(ids)
+}
+
+/// What dynamic filters `predicate` holds: whether it holds any, and whether all it holds are
+/// joins'.
+fn dynamic(predicate: &Arc<dyn PhysicalExpr>, joins: &HashSet<u64>) -> (bool, bool) {
+    let (mut any, mut all_joins) = (false, true);
     predicate
         .apply(|e| {
-            found = e.is::<DynamicFilterPhysicalExpr>();
-            Ok(match found {
-                true => TreeNodeRecursion::Stop,
-                false => TreeNodeRecursion::Continue,
-            })
+            if e.is::<DynamicFilterPhysicalExpr>() {
+                any = true;
+                all_joins &= e.expression_id().is_some_and(|id| joins.contains(&id));
+            }
+            Ok(TreeNodeRecursion::Continue)
         })
         .expect("the closure does not fail");
-    found
+    (any, all_joins)
 }
 
 /// `a = 5` or `5 = a`, over a column or an expression of one.
@@ -62,19 +92,33 @@ fn equality(conjunct: &Arc<dyn PhysicalExpr>) -> bool {
     })
 }
 
-/// Whether the reader should evaluate `predicate` for a scan that outputs `scan`'s columns.
-fn spares_something(predicate: &Arc<dyn PhysicalExpr>, scan: &DataSourceExec) -> bool {
-    if dynamic(predicate) || split_conjunction(predicate).into_iter().any(equality) {
-        return true;
-    }
+/// Whether the reader should evaluate `predicate` for a scan that outputs `scan`'s columns, where
+/// `joins` are the ids of the plan's join filters.
+fn spares_something(
+    predicate: &Arc<dyn PhysicalExpr>,
+    scan: &DataSourceExec,
+    joins: &HashSet<u64>,
+) -> bool {
     let read: Vec<String> = collect_columns(predicate)
         .into_iter()
         .map(|c| c.name().to_string())
         .collect();
-    scan.schema()
-        .fields()
-        .iter()
-        .any(|f| !read.iter().any(|r| r == f.name()) && !fixed_width(f.data_type()))
+    let schema = scan.schema();
+    let unread = || {
+        schema
+            .fields()
+            .iter()
+            .filter(|f| !read.iter().any(|r| r == f.name()))
+    };
+    match dynamic(predicate, joins) {
+        (true, false) => return true,
+        (true, true) if unread().next().is_some() => return true,
+        _ => {}
+    }
+    if split_conjunction(predicate).into_iter().any(equality) {
+        return true;
+    }
+    unread().any(|f| !fixed_width(f.data_type()))
 }
 
 /// A number, a date or time, or a boolean: a column whose rows decode at a fixed width.
@@ -88,6 +132,7 @@ impl PhysicalOptimizerRule for StaticRowFilters {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        let joins = join_filters(&plan)?;
         Ok(plan
             .transform_up(|p| {
                 let Some(scan) = p.downcast_ref::<DataSourceExec>() else {
@@ -102,7 +147,7 @@ impl PhysicalOptimizerRule for StaticRowFilters {
                 let Some(predicate) = source.filter() else {
                     return Ok(Transformed::no(p));
                 };
-                if spares_something(&predicate, scan) {
+                if spares_something(&predicate, scan, &joins) {
                     return Ok(Transformed::no(p));
                 }
                 let source = source.clone().with_pushdown_filters(false);
