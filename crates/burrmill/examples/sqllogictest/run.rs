@@ -2020,7 +2020,9 @@ const MERGES: &[&str] = &["UnionExec", "CoalescePartitionsExec", "InterleaveExec
 /// [`Session::order_unfixed`] over the lines of a physical plan as DataFusion indents it (two
 /// spaces a level). Down a chain of one-input operators the first sort fixes the order and the
 /// first merge unfixes it; at an operator of several inputs (a join), a merge anywhere below it
-/// unfixes it.
+/// unfixes it. Burrmill's `SharedDefsExec` is not a join: its inputs are the shared subqueries,
+/// computed once, and last the statement, whose rows it hands on in order; a sort that fixes the
+/// statement's order fixes the answer's, whatever the definitions hold.
 fn unordered_plan(lines: &[String]) -> bool {
     let nodes: Vec<(usize, &str)> = lines
         .iter()
@@ -2031,29 +2033,49 @@ fn unordered_plan(lines: &[String]) -> bool {
             ((l.len() - t.len()) / 2, name)
         })
         .collect();
+    matches!(chain_order(&nodes), Order::Unfixed)
+}
+
+enum Order {
+    /// A sort, before any merge.
+    Fixed,
+    Unfixed,
+    /// Neither, down to the leaves.
+    Kept,
+}
+
+/// The order down the chain that starts at `nodes[0]`, a subtree of [`unordered_plan`]'s nodes.
+fn chain_order(nodes: &[(usize, &str)]) -> Order {
     let mut i = 0;
     while i < nodes.len() {
         let (depth, name) = nodes[i];
         if SORTS.contains(&name) {
-            return false;
+            return Order::Fixed;
         }
         if MERGES.contains(&name) {
-            return true;
+            return Order::Unfixed;
         }
         let end = nodes[i + 1..]
             .iter()
             .position(|(d, _)| *d <= depth)
             .map_or(nodes.len(), |p| i + 1 + p);
-        let children = nodes[i + 1..end]
-            .iter()
-            .filter(|(d, _)| *d == depth + 1)
-            .count();
-        if children > 1 {
-            return nodes[i + 1..end].iter().any(|(_, n)| MERGES.contains(n));
+        let children: Vec<usize> = (i + 1..end).filter(|&j| nodes[j].0 == depth + 1).collect();
+        if children.len() > 1 {
+            if name == "SharedDefsExec"
+                && let Some(&statement) = children.last()
+                && matches!(chain_order(&nodes[statement..end]), Order::Fixed)
+            {
+                return Order::Fixed;
+            }
+            return if nodes[i + 1..end].iter().any(|(_, n)| MERGES.contains(n)) {
+                Order::Unfixed
+            } else {
+                Order::Kept
+            };
         }
         i += 1;
     }
-    false
+    Order::Kept
 }
 
 /// Whether a record may change state, so that not running it leaves the rest of the file nothing
@@ -2125,6 +2147,13 @@ mod tests {
         assert!(unordered_plan(&plan_lines(join)));
         let plain_join = "HashJoinExec: mode=CollectLeft\n  SortExec: expr=[]\n    DataSourceExec: partitions=1\n  DataSourceExec: partitions=1";
         assert!(!unordered_plan(&plan_lines(plain_join)));
+        // test/sql/join/runtime_filter_row_number.test:37: the statement, last, is sorted.
+        let shared = "SharedDefsExec: 1 shared, then the statement\n  ProjectionExec: expr=[]\n    DataSourceExec: partitions=1\n  SortPreservingMergeExec: [k@0 ASC]\n    UnionExec\n      SortExec: expr=[k@0 ASC]\n        SharedExec: computed once\n      SortExec: expr=[k@0 ASC]\n        SharedExec: computed once";
+        assert!(!unordered_plan(&plan_lines(shared)));
+        let unsorted = "SharedDefsExec: 1 shared, then the statement\n  ProjectionExec: expr=[]\n    DataSourceExec: partitions=1\n  UnionExec\n    SharedExec: computed once\n    SharedExec: computed once";
+        assert!(unordered_plan(&plan_lines(unsorted)));
+        let def_union = "SharedDefsExec: 1 shared, then the statement\n  UnionExec\n    DataSourceExec: partitions=1\n    DataSourceExec: partitions=1\n  ProjectionExec: expr=[]\n    SharedExec: computed once";
+        assert!(unordered_plan(&plan_lines(def_union)));
     }
 
     #[test]
