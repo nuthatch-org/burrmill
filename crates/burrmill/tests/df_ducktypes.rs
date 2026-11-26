@@ -261,3 +261,80 @@ fn a_list_of_numbers_does_not_cast_to_blobs() {
     let err = error(&e, "SELECT [1, 2, 3]::BLOB[3]");
     assert!(err.contains("Unimplemented type for cast"), "{err}");
 }
+
+/// Text read as a DATE, TIME or TIMESTAMP as DuckDB reads it, and a DATE or TIME written as DuckDB
+/// writes it (test/sql/types/date/date_try_cast.test:56, :73, test_bc_dates.test:31,
+/// time/time_try_cast.test:16, :21, :72, time_parsing.test:11, :23,
+/// timestamp/timestamp_try_cast.test:56, :92). Arrow read neither `(BC)` nor `/`, read `11` as 11
+/// nanoseconds and `23:59:60` as midnight, and wrote `14:42:04.350`.
+#[test]
+fn dates_and_times_parse_and_print_as_duckdb() {
+    let e = Engine::open_empty().unwrap();
+    let got = rows(
+        &e,
+        "SELECT try_cast('1111-11-11 (bc)' AS DATE)::VARCHAR AS a, \
+         try_cast('2004/02/29' AS DATE)::VARCHAR AS b, '-1000-01-01'::DATE::VARCHAR AS c, \
+         try_cast('5881580-07-10' AS DATE)::VARCHAR AS d, try_cast('11' AS TIME) IS NULL AS f, \
+         try_cast('11:' AS TIME)::VARCHAR AS g, try_cast('23:59:60' AS TIME) IS NULL AS h, \
+         '14:42:04.35'::TIME::VARCHAR AS i, '14:42:04.999999999'::TIME::VARCHAR AS j, \
+         try_cast('1111-11-11 11:11' AS TIMESTAMP)::VARCHAR AS k, \
+         try_cast('290309-12-22 (BC) 00:00:00' AS TIMESTAMP)::VARCHAR AS l, \
+         TRY_CAST('2020-01-01 garbage' AS DATE) AS m",
+    );
+    assert_eq!(
+        got,
+        vec![json!({
+            "a": "1111-11-11 (BC)",
+            "b": "2004-02-29",
+            "c": "1001-01-01 (BC)",
+            "d": "5881580-07-10",
+            "f": true,
+            "g": "11:00:00",
+            "h": true,
+            "i": "14:42:04.35",
+            "j": "14:42:04.999999",
+            "k": "1111-11-11 11:11:00",
+            "l": "290309-12-22 (BC) 00:00:00",
+            "m": null,
+        })]
+    );
+    for (sql, says) in [
+        ("SELECT '1'::TIME", "time field value out of range"),
+        (
+            "SELECT CAST('2020-01-01 garbage' AS DATE)",
+            "invalid date field format",
+        ),
+        ("SELECT '5881580-07-10'::date + 1", "Date out of range"),
+    ] {
+        let err = error(&e, sql);
+        assert!(err.contains(says), "{sql}: {err}");
+    }
+}
+
+/// DuckDB's infinite DATE and TIMESTAMP have no value in Arrow's; they are refused by name, a
+/// `TRY_CAST` too, rather than answered NULL (test/sql/types/date/date_try_cast.test:94, :130,
+/// timestamp/timestamp_try_cast.test:102).
+#[test]
+fn infinite_dates_are_refused_by_name() {
+    let e = Engine::open_empty().unwrap();
+    for sql in [
+        "SELECT try_cast('infinity' AS DATE)",
+        "SELECT try_cast('-infinity' AS DATE)",
+        "SELECT try_cast('infinity' AS TIMESTAMP)",
+    ] {
+        let err = error(&e, sql);
+        assert!(err.contains("not supported"), "{sql}: {err}");
+    }
+}
+
+/// `date_diff` over a date past what microseconds hold is refused, where it was NULL
+/// (test/sql/function/date/date_diff_extreme_dates.test:7).
+#[test]
+fn date_diff_past_microseconds_is_refused() {
+    let e = Engine::open_empty().unwrap();
+    let err = error(
+        &e,
+        "SELECT datediff('week', DATE '-5877641-06-25', DATE '5881580-07-10')",
+    );
+    assert!(err.contains("not supported"), "{err}");
+}

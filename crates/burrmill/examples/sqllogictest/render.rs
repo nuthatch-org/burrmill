@@ -128,20 +128,22 @@ fn time_of_day(micros_of_day: i64, nanos: Option<i64>) -> String {
     s
 }
 
+/// DuckDB's `Date::ToString`, over the proleptic Gregorian calendar to DuckDB's limits (chrono
+/// stops at year 262143).
 fn date(days: i64) -> String {
-    match chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-        .and_then(|d| d.checked_add_signed(chrono::Duration::days(days)))
-    {
-        Some(d) => {
-            use chrono::Datelike;
-            let y = d.year();
-            if y <= 0 {
-                format!("{:04}-{:02}-{:02} (BC)", 1 - y, d.month(), d.day())
-            } else {
-                format!("{y:04}-{:02}-{:02}", d.month(), d.day())
-            }
-        }
-        None => format!("<date {days}>"),
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    if y <= 0 {
+        format!("{:04}-{m:02}-{d:02} (BC)", 1 - y)
+    } else {
+        format!("{y:04}-{m:02}-{d:02}")
     }
 }
 
@@ -610,6 +612,15 @@ mod tests {
         ]));
         assert_eq!(child(&col, 0), r"'long_prefix_\\x100'");
         assert_eq!(child(&col, 1), "plain");
+    }
+
+    #[test]
+    fn dates_as_duckdb_prints_them() {
+        assert_eq!(date(0), "1970-01-01");
+        assert_eq!(date(-719_162), "0001-01-01");
+        assert_eq!(date(-719_163), "0001-12-31 (BC)");
+        assert_eq!(date(2_147_483_646), "5881580-07-10");
+        assert_eq!(date(-2_147_483_646), "5877642-06-25 (BC)");
     }
 
     #[test]

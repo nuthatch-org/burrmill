@@ -3104,6 +3104,9 @@ impl AnalyzerRule for DuckSemantics {
                             })?;
                             let t =
                                 t.transform_data(|e| super::blobs::blobs_as_duckdb(e, &schema))?;
+                            let t = t.transform_data(|e| {
+                                super::temporal::temporal_as_duckdb(e, &schema)
+                            })?;
                             let t =
                                 t.transform_data(|e| super::nestedorder::nested_order(e, &schema))?;
                             let t =
@@ -3340,7 +3343,7 @@ fn dates_as_duckdb(e: Expr, schema: &DFSchema) -> DFResult<Transformed<Expr>> {
                     op,
                     Box::new(cast(n, DataType::Int64)),
                 ));
-                cast(cast(sum, DataType::Int32), DataType::Date32)
+                super::temporal::days_to_date(sum)
             };
             if lt == DataType::Date32
                 && matches!(rt, DataType::Interval(_))

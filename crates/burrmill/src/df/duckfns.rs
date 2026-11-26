@@ -226,15 +226,15 @@ fn naive(us: i64) -> Option<NaiveDateTime> {
 /// `CAST(timestamp AS VARCHAR)` as DuckDB writes it: a space, the fraction's trailing zeros
 /// dropped, and `+00` on one with a zone.
 pub fn timestamp_text(us: i64, zoned: bool) -> Option<String> {
-    let t = naive(us)?;
+    // The date as DuckDB writes it, `(BC)` and years past chrono's included.
+    let day = us.div_euclid(86_400_000_000);
+    let secs = us.rem_euclid(86_400_000_000) / 1_000_000;
     let mut s = format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        t.year(),
-        t.month(),
-        t.day(),
-        t.hour(),
-        t.minute(),
-        t.second()
+        "{} {:02}:{:02}:{:02}",
+        super::temporal::date_text(day),
+        secs / 3600,
+        secs / 60 % 60,
+        secs % 60
     );
     let frac = us.rem_euclid(1_000_000);
     if frac != 0 {
@@ -1133,15 +1133,25 @@ impl ScalarUDFImpl for DateDiff {
             b.as_primitive::<arrow::datatypes::TimestampMicrosecondType>(),
         );
         let mut out = Int64Builder::new();
+        // A date past what microseconds or the calendar here hold is refused, not answered NULL.
+        let past = || {
+            datafusion_common::DataFusionError::Execution(
+                "date_diff of a date or timestamp past 262143 years from 1 AD is not supported here"
+                    .into(),
+            )
+        };
         for i in 0..a.len() {
-            if part.is_null(i) || a.is_null(i) || b.is_null(i) {
+            if part.is_null(i) || arrays[1].is_null(i) || arrays[2].is_null(i) {
                 out.append_null();
                 continue;
+            }
+            if a.is_null(i) || b.is_null(i) {
+                return Err(past());
             }
             let (ua, ub) = (a.value(i), b.value(i));
             match (naive(ua), naive(ub)) {
                 (Some(ta), Some(tb)) => out.append_value(date_diff(part.value(i), ta, tb, ua, ub)?),
-                _ => out.append_null(),
+                _ => return Err(past()),
             }
         }
         scalar_out(scalar, Arc::new(out.finish()))

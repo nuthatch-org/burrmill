@@ -98,6 +98,7 @@ mod spillingjoins;
 mod staticfilters;
 mod strict;
 mod tables;
+mod temporal;
 mod textfiles;
 #[cfg(not(target_arch = "wasm32"))]
 mod workers;
