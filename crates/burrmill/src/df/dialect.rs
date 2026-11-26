@@ -2535,7 +2535,15 @@ impl VisitorMut for Rewriter {
                     self.binder = Some(why);
                     return ControlFlow::Break(());
                 }
-                let hugeint = matches!(data_type, SqlType::HugeInt);
+                // BIGNUM is DECIMAL(38,0) here too, and DuckDB rounds a float to it half to even.
+                let hugeint = match &*data_type {
+                    SqlType::HugeInt => true,
+                    SqlType::Custom(name, args) if args.is_empty() => matches!(
+                        name.to_string().to_ascii_uppercase().as_str(),
+                        "BIGNUM" | "VARINT"
+                    ),
+                    _ => false,
+                };
                 if let Some(why) = retype(data_type) {
                     self.refused = Some(why);
                     return ControlFlow::Break(());

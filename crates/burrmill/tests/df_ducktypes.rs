@@ -338,3 +338,16 @@ fn date_diff_past_microseconds_is_refused() {
     );
     assert!(err.contains("not supported"), "{err}");
 }
+
+/// A float cast to BIGNUM rounds half to even, as DuckDB's does and as HUGEINT already did; it
+/// rounded half away from zero (test/sql/types/bignum/test_bignum_from_double_rounding.test:5).
+#[test]
+fn a_float_to_bignum_rounds_half_to_even() {
+    let e = Engine::open_empty().unwrap();
+    let got = rows(
+        &e,
+        "SELECT 1.5::DOUBLE::BIGNUM::VARCHAR AS a, 2.5::DOUBLE::BIGNUM::VARCHAR AS b, \
+         (-1.5)::DOUBLE::BIGNUM::VARCHAR AS c",
+    );
+    assert_eq!(got, vec![json!({"a": "2", "b": "2", "c": "-2"})]);
+}
