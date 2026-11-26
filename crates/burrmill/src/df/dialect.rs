@@ -1906,6 +1906,167 @@ fn duck_interval(iv: &mut sq::Interval) -> Option<SqlExpr> {
     None
 }
 
+/// What DuckDB raises for a type it does not take, as it words it (#419): a FLOAT's bits outside 1
+/// to 53, a DECIMAL wider than 38 digits, `INTEGER(n)` (a syntax error to DuckDB) and a STRUCT
+/// that names a field twice. DataFusion planned each of them.
+fn type_error(t: &SqlType) -> Option<String> {
+    match t {
+        SqlType::Array(
+            sq::ArrayElemTypeDef::AngleBracket(e)
+            | sq::ArrayElemTypeDef::SquareBracket(e, _)
+            | sq::ArrayElemTypeDef::Parenthesis(e),
+        ) => type_error(e),
+        SqlType::Map(k, v) => type_error(k).or_else(|| type_error(v)),
+        SqlType::Struct(fields, _) => {
+            let mut seen = std::collections::HashSet::new();
+            for f in fields {
+                if let Some(n) = &f.field_name
+                    && !seen.insert(n.value.to_lowercase())
+                {
+                    return Some(format!(
+                        "Binder Error: Duplicate struct entry name \"{}\"",
+                        n.value
+                    ));
+                }
+            }
+            fields.iter().find_map(|f| type_error(&f.field_type))
+        }
+        SqlType::Float(ExactNumberInfo::Precision(0)) => {
+            Some("Binder Error: precision for type float must be at least 1 bit".into())
+        }
+        SqlType::Float(ExactNumberInfo::Precision(p)) if *p > 53 => {
+            Some("Binder Error: precision for type float must be less than 54 bits".into())
+        }
+        SqlType::Decimal(
+            ExactNumberInfo::Precision(p) | ExactNumberInfo::PrecisionAndScale(p, _),
+        )
+        | SqlType::Numeric(
+            ExactNumberInfo::Precision(p) | ExactNumberInfo::PrecisionAndScale(p, _),
+        )
+        | SqlType::Dec(ExactNumberInfo::Precision(p) | ExactNumberInfo::PrecisionAndScale(p, _))
+            if *p == 0 || *p > 38 =>
+        {
+            Some("Binder Error: DECIMAL type width must be between 1 and 38".into())
+        }
+        SqlType::Int(Some(_)) | SqlType::Integer(Some(_)) => {
+            Some("Parser Error: syntax error at or near \"(\"".into())
+        }
+        _ => None,
+    }
+}
+
+/// Expressions DuckDB's binder refuses and DataFusion answered (#419): `UNNEST(UNNEST(x))`, a
+/// `{...}` that names a key twice (in any case), and `MAP(k, v)` of two scalar literals.
+fn binder_error(e: &SqlExpr) -> Option<String> {
+    match e {
+        SqlExpr::Dictionary(fields) => {
+            let mut seen = std::collections::HashSet::new();
+            fields.iter().find_map(|f| {
+                (!seen.insert(f.key.value.to_lowercase())).then(|| {
+                    format!(
+                        "Binder Error: Duplicate named argument \"{}\" in function call to \
+                         \"struct_pack\"",
+                        f.key.value
+                    )
+                })
+            })
+        }
+        SqlExpr::Function(f) => {
+            if is_unnest(e).is_some() && sole_arg(f).and_then(is_unnest).is_some() {
+                return Some("Binder Error: Nested UNNEST calls are not supported".into());
+            }
+            let scalar = |a: &sq::FunctionArg| {
+                matches!(
+                    a,
+                    sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(SqlExpr::Value(v)))
+                        if matches!(v.value, sq::Value::Number(..) | sq::Value::SingleQuotedString(_))
+                )
+            };
+            if f.name.to_string().eq_ignore_ascii_case("map")
+                && let sq::FunctionArguments::List(l) = &f.args
+                && l.args.len() == 2
+                && l.args.iter().all(scalar)
+            {
+                return Some(
+                    "Binder Error: No function matches the given name and argument types 'map'"
+                        .into(),
+                );
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn is_unnest(e: &SqlExpr) -> Option<&sq::Function> {
+    match e {
+        SqlExpr::Function(f)
+            if matches!(
+                f.name.to_string().to_ascii_lowercase().as_str(),
+                "unnest" | "unlist"
+            ) =>
+        {
+            Some(f)
+        }
+        _ => None,
+    }
+}
+
+fn sole_arg(f: &sq::Function) -> Option<&SqlExpr> {
+    match &f.args {
+        sq::FunctionArguments::List(l) => match l.args.as_slice() {
+            [sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(a))] => Some(a),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// DuckDB's binder errors for UNNEST in a GROUP BY (#419): `GROUP BY ALL` over a select item that
+/// is an UNNEST would group on it, and an UNNEST of a struct cannot be grouped on at all. Only
+/// what the text shows to be a struct (a `{...}` literal) is caught.
+fn unnest_grouping(b: &sq::SetExpr) -> Option<String> {
+    match b {
+        sq::SetExpr::Select(s) => match &s.group_by {
+            sq::GroupByExpr::All(_) => {
+                let grouped = s.projection.iter().any(|i| match i {
+                    sq::SelectItem::UnnamedExpr(e)
+                    | sq::SelectItem::ExprWithAlias { expr: e, .. } => is_unnest(e).is_some(),
+                    _ => false,
+                });
+                grouped
+                    .then(|| "Binder Error: Cannot group on an UNNEST or UNLIST clause".to_string())
+            }
+            sq::GroupByExpr::Expressions(v, _) => {
+                struct StructUnnest(bool);
+                impl sq::Visitor for StructUnnest {
+                    type Break = ();
+                    fn pre_visit_expr(&mut self, e: &SqlExpr) -> ControlFlow<()> {
+                        if let Some(f) = is_unnest(e)
+                            && matches!(sole_arg(f), Some(SqlExpr::Dictionary(_)))
+                        {
+                            self.0 = true;
+                            return ControlFlow::Break(());
+                        }
+                        ControlFlow::Continue(())
+                    }
+                }
+                let mut found = StructUnnest(false);
+                for e in v {
+                    let _ = crate::walk::walk(e, &mut found);
+                }
+                found.0.then(|| {
+                    "Binder Error: UNNEST of struct cannot be used in GROUP BY clause".to_string()
+                })
+            }
+        },
+        sq::SetExpr::SetOperation { left, right, .. } => {
+            unnest_grouping(left).or_else(|| unnest_grouping(right))
+        }
+        _ => None,
+    }
+}
+
 /// DuckDB's type names DataFusion does not plan, renamed in place, within a list, struct or map as
 /// at the top; `Some` is a refusal.
 fn retype(t: &mut SqlType) -> Option<String> {
@@ -1929,6 +2090,10 @@ fn retype(t: &mut SqlType) -> Option<String> {
             SqlType::Decimal(ExactNumberInfo::PrecisionAndScale(18, 3))
         }
         SqlType::HugeInt => SqlType::Decimal(ExactNumberInfo::PrecisionAndScale(38, 0)),
+        // `FLOAT(p)` is FLOAT to 24 bits and DOUBLE from 25 to 53; DataFusion's is always FLOAT.
+        SqlType::Float(ExactNumberInfo::Precision(p)) if *p > 24 => {
+            SqlType::Double(ExactNumberInfo::None)
+        }
         SqlType::UBigInt => SqlType::BigIntUnsigned(None),
         SqlType::UTinyInt => SqlType::TinyIntUnsigned(None),
         SqlType::USmallInt => SqlType::SmallIntUnsigned(None),
@@ -1987,6 +2152,10 @@ impl VisitorMut for Rewriter {
     }
 
     fn pre_visit_query(&mut self, q: &mut sq::Query) -> ControlFlow<()> {
+        if let Some(why) = unnest_grouping(&q.body) {
+            self.binder = Some(why);
+            return ControlFlow::Break(());
+        }
         if let Err(why) = super::subqueries::predicates_as_counts(q, &self.known, &self.ctes) {
             self.refused = Some(why);
             return ControlFlow::Break(());
@@ -2072,6 +2241,10 @@ impl VisitorMut for Rewriter {
     fn pre_visit_expr(&mut self, e: &mut SqlExpr) -> ControlFlow<()> {
         if let SqlExpr::Subquery(q) = e {
             top_n_correlated(q);
+        }
+        if let Some(why) = binder_error(e) {
+            self.binder = Some(why);
+            return ControlFlow::Break(());
         }
         if let SqlExpr::Function(f) = e {
             if let Some(why) = unsupported_function(f) {
@@ -2242,6 +2415,10 @@ impl VisitorMut for Rewriter {
                 }
             }
             SqlExpr::Cast { data_type, .. } => {
+                if let Some(why) = type_error(data_type) {
+                    self.binder = Some(why);
+                    return ControlFlow::Break(());
+                }
                 let hugeint = matches!(data_type, SqlType::HugeInt);
                 if let Some(why) = retype(data_type) {
                     self.refused = Some(why);

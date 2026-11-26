@@ -118,3 +118,58 @@ fn an_interval_past_arrows_nanoseconds_is_refused() {
     let err = error(&e, "SELECT '999999999:00:00'::INTERVAL");
     assert!(err.contains("not supported"), "{err}");
 }
+
+/// What DuckDB's binder refuses, refused (test/sql/types/numeric/float_precision.test:47, :52,
+/// decimal/test_decimal.test:153, :163, struct/struct_case_insensitivity.test:28,
+/// type_constructor_error_location.test:30, list/recursive_unnest.test:103,
+/// list/unnest_group_by.test:107, :122, nested/map/map_error.test:46). Each was answered.
+#[test]
+fn what_duckdbs_binder_refuses_is_an_error() {
+    let e = Engine::open_empty().unwrap();
+    for (sql, says) in [
+        ("SELECT CAST(NULL AS FLOAT(0))", "at least 1 bit"),
+        ("SELECT CAST(NULL AS FLOAT(54))", "less than 54 bits"),
+        ("SELECT '0.1'::DECIMAL(40)", "between 1 and 38"),
+        ("SELECT '1'::INTEGER(1000)", "syntax error"),
+        (
+            "SELECT {'hello': 3, 'HELLO': 4}",
+            "Duplicate named argument",
+        ),
+        (
+            "SELECT NULL::STRUCT(a INT, a INT)",
+            "Duplicate struct entry name",
+        ),
+        (
+            "SELECT UNNEST(UNNEST([[1, 2, 3]]))",
+            "Nested UNNEST calls are not supported",
+        ),
+        (
+            "SELECT unnest(['a', 'b']) AS tag, count(*) FROM range(1) GROUP BY ALL",
+            "Cannot group on an UNNEST",
+        ),
+        (
+            "SELECT count(*) FROM range(1) GROUP BY unnest({'a': 1, 'b': 2})",
+            "UNNEST of struct cannot be used in GROUP BY",
+        ),
+        ("SELECT MAP(10, 12)", "No function matches"),
+    ] {
+        let err = error(&e, sql);
+        assert!(err.contains(says), "{sql}: {err}");
+    }
+}
+
+/// `FLOAT(p)` is DOUBLE from 25 bits, as in DuckDB; DataFusion made every `FLOAT(p)` a FLOAT
+/// (test/sql/types/numeric/float_precision.test:21).
+#[test]
+fn a_float_of_25_bits_or_more_is_a_double() {
+    let e = Engine::open_empty().unwrap();
+    let got = rows(
+        &e,
+        "SELECT typeof(CAST(NULL AS FLOAT(24))) AS a, typeof(CAST(NULL AS FLOAT(25))) AS b, \
+         typeof(CAST(NULL AS FLOAT(53))) AS c",
+    );
+    assert_eq!(
+        got,
+        vec![json!({"a": "FLOAT", "b": "DOUBLE", "c": "DOUBLE"})]
+    );
+}
