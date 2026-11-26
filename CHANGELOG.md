@@ -12,6 +12,13 @@ entry: a receipt someone kept stops verifying on that release (`tests/receipt_co
 
 Engine (`burrmill`, feature `datafusion`)
 
+- Decimal `+`, `-` and `*` run in plain 128-bit arithmetic where a batch's magnitudes show no row
+  can overflow, and `sum` and `avg` over integers and decimals add from the column's buffer, not
+  row by row (#433). Arrow's checked kernel made a checked 128-bit multiply per row, and two more to
+  rescale an operand. A batch that could overflow, or whose result exceeds its precision, goes to
+  that kernel as before, so the same statements are refused. TPC-H Q1 at SF10 went from
+  1,065–1,165 ms to 629–677 ms, from 3.37x–3.53x DuckDB 2.0.1 to 1.91x–2.10x. Only the kernels
+  change, not the plans.
 - A hash join builds on the side its filter plainly cuts below the other, where it built on the
   side that reads fewer bytes (#433). Statistics being off, a filter's share is guessed from its
   predicate, a tenth for an equality and a third for a range or a comparison of two columns, and
