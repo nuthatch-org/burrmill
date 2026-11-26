@@ -37,6 +37,8 @@ Q11 is now 1.66x to 1.76x at SF10, from 2.74x to 3.20x, its total summed from it
 join run once ([below](#q11-one-join-for-the-groups-and-their-total-433)).
 Q18 is now 2.27x to 2.62x at SF10, from 3.64x to 4.05x, its join reading the `HAVING`'s groups
 rather than `lineitem` again ([below](#q18-the-havings-groups-in-place-of-the-rows-433)).
+Q8 is now 1.55x to 2.02x at SF10, from 1.63x to 2.75x at loads of 7 to 177, its join on the parts
+of one type collected ([below](#q8-the-join-on-one-types-parts-collected-433)).
 
 **Against datafusion-cli it is faster on four at SF10** (7, 15, 18, 19) and within 1.5x on 13 of
 the 21 it answers. It is the same DataFusion underneath, so that gap is Burrmill's own. Where it
@@ -619,6 +621,74 @@ was 9.39 at the start (00:08:24) and 9.92 at the end (00:09:38). All 21 answers 
 as DuckDB's, and Q21 was refused as above. The widest ratios were Q1 at 3.23x (1,012 ms against 313),
 Q5 at 3.15x, Q9 at 2.89x, Q4 at 2.88x and Q17 at 2.81x. Q18 was at 2.42x. At SF1, one run each at a
 load of 9.92, all 22 answers were the same as DuckDB's.
+
+## Q8: the join on one type's parts collected (#433)
+
+Q8 was the widest gap at SF10 in the run of all 22 for #465. On fd05542, with the DuckDB
+2.0.1 CLI downloaded for this, Q8 alone at SF10, best of 5, took 2,700 ms against DuckDB's 656,
+4.12x, at a load of 34.53 (08:34:42).
+
+**The cause.** Q8 joins `lineitem` to the 13.45K parts of `p_type = 'ECONOMY ANODIZED STEEL'`,
+then to the suppliers, to two years of orders and on to their customers and nations. Every join
+built on the side that reads fewer bytes, as it should, but partitioned, so each pushed into the
+`lineitem` scan a dynamic filter that is a `CASE` over each row's repartition hash: three of them,
+for `l_partkey`, `l_suppkey` and `l_orderkey`. The part filter comes first and is evaluated on all
+60M rows. In an `EXPLAIN ANALYZE` at SF10 on fd05542 (load 17.97, 09:07:36) the `lineitem` scan took
+6.79 s of CPU, 4.29 s of it the row filter, to give 24.25K rows; the `orders` scan 1.13 s, 0.34 s
+the row filter, and no other scan over 0.11 s; no join took over 36 ms. DuckDB 2.0.1's `EXPLAIN
+ANALYZE` (load 20.60, 08:37:23) joins the same tables with `lineitem` as the probe and puts the same
+three filters on its scan, which took 2.11 s, and its `orders` scan 0.59 s.
+
+**The A/B.** Built only for this and not committed, an inner join was collected where its build
+side was filtered and guessed to keep at most a given share of what its probe keeps. At a 64th, Q8
+collects the part join and the one-row `region` join. Back to back, best of 5, Burrmill alone, Q8
+took 969 and 965 ms partitioned against 702 and 737 collected (loads 15.89 to 14.29, 08:39:59 to
+08:40:24). Collecting at an eighth also took the 910.4K orders, and Q8 was no faster (735 and 727
+ms). Collecting unfiltered sides too, the 100K suppliers and the customers, took 1,119 ms against
+946 for the eighth on filtered sides alone, one run each at a load of 30. At a 16th, Q3's customers of one segment and Q19's parts were
+collected as well, and in the one round under a load of 13 Q19 took 709 ms against 562 and Q3 724
+against 696.
+
+**The fix.** `BuildOnSmaller` (`crates/burrmill/src/df/buildside.rs`) collects an inner join whose
+build side is filtered and guessed to keep at most a 64th of what its probe side keeps, where the
+bytes read already chose that side. The shares are its guesses as above. After it, in an `EXPLAIN
+ANALYZE` at SF10 (load 18.30, 09:07:39), the `lineitem` scan took 3.17 s of CPU, 0.81 s of it the
+row filter, and the pool peaked at 52 MiB before and after. The `EXPLAIN` of all 22 at SF1 and SF10
+changes in Q2, 5, 7, 8, 9, 11, 17, 20 and 21, the same joins at both: the part joins of Q2, 8, 9
+and 17, and joins on one nation or region in the rest. `a_join_on_a_few_filtered_rows_of_a_small_table_is_collected`
+(`crates/burrmill/tests/df_buildside.rs`) fails with the rule off.
+
+**Measured** 2026-11-26 on 4c4566c against fd05542, on the ThinkPad as above, 8 threads, 2 GiB, no
+spill directory: three rounds per scale factor, before then after, each the best of 5 for Burrmill
+and for the DuckDB 2.0.1 CLI in the same process. The load was 10.93 at 08:57:24; the wait for it to
+fall under 8 ended at 08:57:57 (7.46), and it rose to 177 during the SF10 rounds, other work on the
+host. Every answer was the same as DuckDB's.
+
+| SF | round | 1-minute load, start / end | DuckDB 2.0.1 ms | before ms | ratio | DuckDB 2.0.1 ms | after ms | ratio | Burrmill peak RSS MiB, before / after |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| 10 | 1 | 7.37 / 141.67 | 400 | 1,099 | 2.75x | 476 | 740 | 1.55x | 316 / 473 |
+| 10 | 2 | 141.67 / 103.69 | 649 | 1,059 | 1.63x | 377 | 750 | 1.99x | 448 / 461 |
+| 10 | 3 | 103.69 / 50.50 | 434 | 1,013 | 2.33x | 355 | 717 | 2.02x | 430 / 473 |
+| 1 | 1 | 43.58 / 40.33 | 40 | 114 | 2.84x | 49 | 82 | 1.68x | 389 / 382 |
+| 1 | 2 | 40.33 / 33.33 | 40 | 123 | 3.08x | 44 | 78 | 1.77x | 382 / 389 |
+| 1 | 3 | 33.33 / 28.57 | 48 | 123 | 2.55x | 48 | 78 | 1.62x | 387 / 386 |
+
+Q8's own time at SF10 went from 1,013–1,099 ms to 717–750 ms, and at SF1 from 114–123 ms to 78–82
+ms. DuckDB's times moved with the load, from 355 to 649 ms at SF10, so the ratios are wide: 1.63x to
+2.75x before, 1.55x to 2.02x after. The same rounds ran the other plans that changed, Burrmill's
+best of 5 at SF10, before / after: Q2 200–217 / 155–157 ms, Q9 1,680–1,855 / 1,416–1,569 and Q17
+808–890 / 466–489, faster; Q5 924–965 / 880–971, Q7 685–802 / 746–984, Q11 100–125 / 116–148 and
+Q20 453–461 / 465–509. Five more rounds of those four alone, alternating, best of 5, at loads of
+9.96 to 24.53 (09:06:50 to 09:11:32), found no difference: Q5 873–1,653 / 862–1,708, Q7 689–1,097 /
+687–1,423, Q11 110–300 / 114–230 and Q20 455–1,019 / 457–878: the after was faster in 11 of
+the 20 pairs, and within 5% in 6 of the other 9. Q21 is refused at SF10 as before, and its SF1 answer is the same.
+What is left of Q8 at SF10 is the `lineitem` scan, 3.17 s of CPU against DuckDB's 2.11 s, and the
+`orders` scan's partitioned filter from the customer join.
+
+**All 22 after the fix**, at SF10 on 4c4566c, best of 3, DuckDB 2.0.1 in the same process, at a
+load of 15.93 at the start (09:07:48) and 12.92 at the end (09:09:01). All 21 answers given were the
+same as DuckDB's, and Q21 was refused as above. Q8 was at 2.22x (765 ms against 345). The widest were
+Q5 at 3.17x (965 ms against 304), Q4 at 2.94x, Q22 at 2.89x and Q7 at 2.85x.
 
 ## Spilling: Q21 under 2 GiB (#383)
 

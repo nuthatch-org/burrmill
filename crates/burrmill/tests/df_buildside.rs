@@ -413,9 +413,9 @@ fn a_semi_join_on_a_few_filtered_rows_is_collected() {
 
 /// Q8 at SF10 keeps the 13.45K parts of one type and joins all 60M `lineitem` rows to them. The join
 /// built on the parts, the side that reads less, but partitioned, so the dynamic filter it gave the
-/// `lineitem` scan was a `CASE` over each row's repartition hash: 12.73 s of row-filter CPU (#433).
-/// A filtered build side guessed at a 64th of its probe or less is now collected; an unfiltered one,
-/// or one the probe's own filter leaves nearer its size, is not.
+/// `lineitem` scan was a `CASE` over each row's repartition hash: 4.29 s of row-filter CPU, against
+/// 0.81 s collected (#433). A filtered build side guessed at a 64th of its probe or less is now
+/// collected; an unfiltered one, or one the probe's own filter leaves nearer its size, is not.
 #[test]
 fn a_join_on_a_few_filtered_rows_of_a_small_table_is_collected() {
     let tmp = tempfile::tempdir().unwrap();

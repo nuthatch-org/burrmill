@@ -35,10 +35,10 @@
 //! An inner join is collected where its build side is filtered and guessed to keep at most a 64th
 //! of what its probe side does ([`filtered_far_smaller`]), though the bytes read already chose that
 //! side. Q8 builds on the 13.45K parts of one type and probes all 60M `lineitem` rows at SF10;
-//! partitioned, the `CASE` its dynamic filter put in that scan cost 12.73 s of row-filter CPU, the
-//! most of any operator in the query, where DuckDB's whole `lineitem` scan took 2.11 s (#433). A
-//! 16th also collected Q3's customers of one segment and Q19's parts, and Q19 was slower in the one
-//! round that compared it; an unfiltered side, such as Q8's 100K suppliers, is left partitioned.
+//! partitioned, the `CASE` its dynamic filter put in that scan cost 4.29 s of row-filter CPU, the
+//! most of any operator in the query, against 0.81 s collected (#433). A 16th also collected Q3's
+//! customers of one segment and Q19's parts, and Q19 was slower in the one round that compared it;
+//! an unfiltered side, such as Q8's 100K suppliers, is left partitioned.
 //!
 //! A `HAVING` is guessed to keep a tenth of its aggregate's input as groups, before its own
 //! predicate's share ([`HAVING_GROUPS`]). Q18's `IN (SELECT l_orderkey FROM lineitem GROUP BY
