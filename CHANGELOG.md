@@ -29,9 +29,10 @@ Engine (`burrmill`, feature `datafusion`)
 - An inner join whose filtered build side is guessed at a quarter or less of an unfiltered probe
   side is collected rather than partitioned (#433), so the dynamic filter the probe's scan
   evaluates on every row is one hash lookup and not a `CASE` over each row's repartition hash. In
-  Q5 at SF10 that filter's CPU went from 2.77 s to 0.77 s. With both, Q5 at SF10 went from 875–905
-  ms to 486–515 ms, from 3.03x–3.35x DuckDB 2.0.1 to 1.67x–1.84x, and at SF1 from 90–100 ms to
-  46–49 ms. Q2, 8, 9, 11, 16, 17 and 20 take the collected join too.
+  Q5 at SF10 that filter's CPU went from 2.77 s to 0.77 s. With both, Q5 at SF10 went from 899–985
+  ms to 502–522 ms, from 2.98x–3.33x DuckDB 2.0.1 to 1.69x–1.79x, and at SF1 from 97–128 ms to
+  50–57 ms. Q16 takes the collected join too, its parts joined to `partsupp`: 171–180 ms to 128–139
+  ms at SF10.
 - `<`, `>`, `<=`, `>=` and `BETWEEN` between structs or lists order a NULL inside them after every
   value, as DuckDB does (#423): `{'x': NULL} > {'x': 0}` and `[1, NULL] > [1, 2]` are true, where
   Arrow's comparator put the NULL first and answered false.
