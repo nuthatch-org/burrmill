@@ -84,6 +84,13 @@ Engine (`burrmill`, feature `datafusion`)
   `GROUP BY`, one row even over no input. Any other correlated subquery over an empty grouping set,
   a scalar one among them, is refused by name. Of DuckDB's `test/sql/subquery`, no record is
   wrong where 21 were.
+- An inner join whose build side is filtered and guessed, as above, to keep at most a 64th of what
+  its probe side keeps is collected rather than partitioned (#433), so the dynamic filter it puts
+  in the probe's scan is one hash lookup and not a `CASE` over each row's repartition hash. TPC-H
+  Q8 at SF10 builds on 13.45K parts and probes 60M `lineitem` rows; that filter's CPU went from
+  4.29 s to 0.81 s and Q8 from 1,013–1,099 ms to 717–750 ms, and at SF1 from 114–123 ms to 78–82
+  ms. Q2, 5, 7, 9, 11, 17, 20 and 21 take it too, most for a join on one nation or region; Q17 at
+  SF10 went from 808–890 ms to 466–489 ms and Q9 from 1,680–1,855 ms to 1,416–1,569 ms.
 
 Build and CI
 
