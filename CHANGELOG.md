@@ -12,6 +12,13 @@ entry: a receipt someone kept stops verifying on that release (`tests/receipt_co
 
 Engine (`burrmill`, feature `datafusion`)
 
+- A Parquet scan that reads only its predicate's columns leaves a hash join's dynamic filter to
+  the join rather than evaluating it in the reader (#433). TPC-H Q4's `lineitem` scan reads
+  `l_orderkey`, `l_commitdate` and `l_receiptdate`, all of them in its predicate, and in the
+  reader took 2.54 s of CPU at SF10 against 0.87 s read whole. Q4 at SF10 went from 408–514 ms to
+  242–329 ms, from 3.07x–3.19x DuckDB 2.0.1 to 1.76x–2.08x, and Q22, whose `orders` scan is the
+  other plan that changes, from 3.15x–3.27x to 1.56x–1.70x. A scan that reads a column its
+  predicate does not, or holds a top-k's filter, keeps its row filter.
 - Decimal `+`, `-` and `*` run in plain 128-bit arithmetic where a batch's magnitudes show no row
   can overflow, and `sum` and `avg` over integers and decimals add from the column's buffer, not
   row by row (#433). Arrow's checked kernel made a checked 128-bit multiply per row, and two more to

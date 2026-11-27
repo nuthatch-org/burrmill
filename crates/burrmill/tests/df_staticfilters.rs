@@ -85,18 +85,23 @@ fn answer(e: &Engine, sql: &str) -> Vec<String> {
         .collect()
 }
 
-/// The rows the reader's row filter dropped in the `rows` scan, from `EXPLAIN ANALYZE`.
-fn pruned_in_reader(e: &Engine, sql: &str) -> String {
+/// The `rows` scan's line in `EXPLAIN ANALYZE`.
+fn rows_scan(e: &Engine, sql: &str) -> String {
     let mut plan = String::new();
     for b in e.sql(&format!("EXPLAIN ANALYZE {sql}")).unwrap() {
         for row in burrmill::df::encode::rows(&b).unwrap() {
             plan.push_str(&row.to_string());
         }
     }
-    let line = plan
-        .split("\\n")
+    plan.split("\\n")
         .find(|l| l.contains("DataSourceExec") && l.contains("rows-"))
-        .unwrap_or_else(|| panic!("no rows scan in {plan}"));
+        .unwrap_or_else(|| panic!("no rows scan in {plan}"))
+        .to_string()
+}
+
+/// The rows the reader's row filter dropped in the `rows` scan, from `EXPLAIN ANALYZE`.
+fn pruned_in_reader(e: &Engine, sql: &str) -> String {
+    let line = rows_scan(e, sql);
     line.split("pushdown_rows_pruned=")
         .nth(1)
         .and_then(|m| m.split([',', ']']).next())
@@ -159,4 +164,25 @@ fn a_join_filter_still_filters_in_the_reader() {
     let (c, s) = expected(|n, _, _| n % 100 == 0);
     assert_eq!(answer(&e, sql), [format!(r#"{{"c":{c},"s":{s}}}"#)]);
     assert_ne!(pruned_in_reader(&e, sql), "0", "{sql}");
+}
+
+/// TPC-H Q4's shape: a semi join's filter and a comparison of two columns, over a scan that reads
+/// only the columns they read. In the reader, Q4's `lineitem` scan took 2.54 s of CPU at SF10 and
+/// the statement 408–514 ms; with the join's filter left to the join, 0.87 s and 242–329 ms (#433).
+#[test]
+fn a_join_filter_over_only_its_columns_filters_above_the_reader() {
+    let tmp = tempfile::tempdir().unwrap();
+    let e = engine(tmp.path());
+    let sql = "SELECT count(*) AS c, CAST(sum(k) AS BIGINT) AS s FROM keys \
+               WHERE EXISTS (SELECT 1 FROM rows WHERE n = k AND q > d)";
+    let kept: Vec<i64> = (0..ROWS)
+        .step_by(100)
+        .filter(|n| n / 100 * 37 % 50 > n * 7919 % 100)
+        .collect();
+    let (c, s) = (kept.len(), kept.iter().sum::<i64>());
+    assert!(c > 0 && c < (ROWS / 100) as usize, "{c}");
+    assert_eq!(answer(&e, sql), [format!(r#"{{"c":{c},"s":{s}}}"#)]);
+    let scan = rows_scan(&e, sql);
+    assert!(scan.contains("DynamicFilter"), "no join filter in {scan}");
+    assert_eq!(pruned_in_reader(&e, sql), "0", "the reader evaluated {sql}");
 }
