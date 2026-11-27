@@ -361,6 +361,44 @@ impl sqlparser::dialect::Dialect for Duck {
         true
     }
 
+    /// `INTERVAL 3 DECADES`, `CENTURIES` and `MILLENNIA`: units sqlparser knows only in the
+    /// singular, so it read the plural as the column's alias and the interval as 3 seconds.
+    fn parse_prefix(
+        &self,
+        parser: &mut sqlparser::parser::Parser,
+    ) -> Option<std::result::Result<SqlExpr, sqlparser::parser::ParserError>> {
+        use sqlparser::keywords::Keyword;
+        use sqlparser::tokenizer::Token;
+        let [i, v, u] = parser.peek_tokens::<3>();
+        let (Token::Word(i), Token::Word(u)) = (i, u) else {
+            return None;
+        };
+        if i.keyword != Keyword::INTERVAL || u.quote_style.is_some() {
+            return None;
+        }
+        let value = match v {
+            Token::Number(n, l) => sq::Value::Number(n, l),
+            Token::SingleQuotedString(s) => sq::Value::SingleQuotedString(s),
+            _ => return None,
+        };
+        let field = match u.value.to_ascii_lowercase().as_str() {
+            "decades" => sq::DateTimeField::Decade,
+            "centuries" => sq::DateTimeField::Century,
+            "millennia" | "millenniums" => sq::DateTimeField::Millennium,
+            _ => return None,
+        };
+        for _ in 0..3 {
+            parser.next_token();
+        }
+        Some(Ok(SqlExpr::Interval(sq::Interval {
+            value: Box::new(SqlExpr::Value(value.into())),
+            leading_field: Some(field),
+            leading_precision: None,
+            last_field: None,
+            fractional_seconds_precision: None,
+        })))
+    }
+
     /// `PIVOT` and `UNPIVOT` are refused by name rather than as a syntax error.
     fn parse_statement(
         &self,
@@ -1805,6 +1843,345 @@ fn natural_joins(
     Ok(left)
 }
 
+fn case(when: Vec<(SqlExpr, SqlExpr)>, otherwise: SqlExpr) -> SqlExpr {
+    use sqlparser::ast::helpers::attached_token::AttachedToken;
+    SqlExpr::Case {
+        case_token: AttachedToken::empty(),
+        end_token: AttachedToken::empty(),
+        operand: None,
+        conditions: when
+            .into_iter()
+            .map(|(condition, result)| sq::CaseWhen { condition, result })
+            .collect(),
+        else_result: Some(Box::new(otherwise)),
+    }
+}
+
+fn boolean(b: Option<bool>) -> SqlExpr {
+    SqlExpr::Value(b.map_or(sq::Value::Null, sq::Value::Boolean).into())
+}
+
+fn is_null(e: &SqlExpr) -> SqlExpr {
+    SqlExpr::IsNull(Box::new(e.clone()))
+}
+
+/// `NULL` or `[]`: what DuckDB's quantified comparisons and `list_contains` read as no elements.
+fn no_elements(list: &SqlExpr) -> SqlExpr {
+    binop(
+        is_null(list),
+        BinaryOperator::Or,
+        binop(
+            call("cardinality", vec![list.clone()]),
+            BinaryOperator::Eq,
+            SqlExpr::Value(sq::Value::Number("0".into(), false).into()),
+        ),
+    )
+}
+
+/// `x op ANY(list)` and `x op ALL(list)` as DuckDB answers them, as the comparison quantified over
+/// `SELECT unnest(list)` (#419): a NULL list has no elements, so ANY is false and ALL true; an
+/// element that decides the answer decides it whatever NULLs there are; otherwise a NULL `x` or
+/// a NULL element makes it NULL. DataFusion's plan answered `4 = ANY([1, 2, 3, NULL])` false and
+/// `1 = ANY(NULL)` NULL.
+fn quantified(x: &SqlExpr, op: &BinaryOperator, list: &SqlExpr, any: bool) -> Option<SqlExpr> {
+    use BinaryOperator::*;
+    let min = || call("array_min", vec![list.clone()]);
+    let max = || call("array_max", vec![list.clone()]);
+    let has = || call("array_has", vec![list.clone(), x.clone()]);
+    let not = |e: SqlExpr| SqlExpr::UnaryOp {
+        op: sq::UnaryOperator::Not,
+        expr: Box::new(SqlExpr::Nested(Box::new(e))),
+    };
+    let x = || x.clone();
+    // For ANY, some non-NULL element makes the comparison true; for ALL, one makes it false.
+    let decides = match (op, any) {
+        (Eq, true) => has(),
+        (NotEq, true) => binop(binop(min(), NotEq, x()), Or, binop(max(), NotEq, x())),
+        (Gt, true) => binop(min(), Lt, x()),
+        (GtEq, true) => binop(min(), LtEq, x()),
+        (Lt, true) => binop(max(), Gt, x()),
+        (LtEq, true) => binop(max(), GtEq, x()),
+        (Eq, false) => not(binop(binop(min(), Eq, x()), And, binop(max(), Eq, x()))),
+        (NotEq, false) => has(),
+        (Gt, false) => not(binop(x(), Gt, max())),
+        (GtEq, false) => not(binop(x(), GtEq, max())),
+        (Lt, false) => not(binop(x(), Lt, min())),
+        (LtEq, false) => not(binop(x(), LtEq, min())),
+        _ => return None,
+    };
+    let has_null = SqlExpr::IsNotNull(Box::new(call(
+        "array_position",
+        vec![
+            list.clone(),
+            boolean(None),
+            SqlExpr::Value(sq::Value::Number("1".into(), false).into()),
+        ],
+    )));
+    Some(SqlExpr::Nested(Box::new(case(
+        vec![
+            (no_elements(list), boolean(Some(!any))),
+            (is_null(&x()), boolean(None)),
+            (
+                call("coalesce", vec![decides, boolean(Some(false))]),
+                boolean(Some(any)),
+            ),
+            (has_null, boolean(None)),
+        ],
+        boolean(Some(!any)),
+    ))))
+}
+
+/// A written list of one element or more, none of them a NULL literal: where DataFusion's
+/// `array_has` already answers as DuckDB does, and is left to the rules that read it as `IN`.
+fn plain_list(e: &SqlExpr) -> bool {
+    matches!(e, SqlExpr::Array(a) if !a.elem.is_empty()
+        && !a.elem.iter().any(|x| matches!(x, SqlExpr::Value(v) if v.value == sq::Value::Null)))
+}
+
+/// `list_contains(list, x)` as DuckDB answers it (#419): NULL for a NULL list, false for an empty
+/// one, NULL for a NULL `x`, and otherwise whether `x` is there, NULL elements aside.
+fn list_contains(list: &SqlExpr, x: &SqlExpr) -> SqlExpr {
+    SqlExpr::Nested(Box::new(case(
+        vec![
+            (is_null(list), boolean(None)),
+            (no_elements(list), boolean(Some(false))),
+            (is_null(x), boolean(None)),
+        ],
+        call(
+            "coalesce",
+            vec![
+                call("array_has", vec![list.clone(), x.clone()]),
+                boolean(Some(false)),
+            ],
+        ),
+    )))
+}
+
+/// `INTERVAL '...'` as DuckDB reads it (#419). Without a unit it is DuckDB's cast of the text, which
+/// `DuckSemantics` makes [`super::intervals::parse`]; the cast is returned to replace it. With a
+/// unit above a millisecond, DuckDB takes the number's whole part (`INTERVAL '1.5' HOUR` is an
+/// hour), and a millennium, which DataFusion does not know, is a thousand years.
+fn duck_interval(iv: &mut sq::Interval) -> Option<SqlExpr> {
+    use sq::DateTimeField as F;
+    if iv.last_field.is_some()
+        || iv.leading_precision.is_some()
+        || iv.fractional_seconds_precision.is_some()
+    {
+        return None;
+    }
+    let SqlExpr::Value(v) = iv.value.as_mut() else {
+        return None;
+    };
+    let Some(field) = iv.leading_field.as_ref() else {
+        return matches!(v.value, sq::Value::SingleQuotedString(_)).then(|| SqlExpr::Cast {
+            kind: sq::CastKind::Cast,
+            expr: iv.value.clone(),
+            data_type: SqlType::Interval {
+                fields: None,
+                precision: None,
+            },
+            array: false,
+            format: None,
+        });
+    };
+    let keeps_fraction = matches!(
+        field,
+        F::Second | F::Seconds | F::Millisecond | F::Milliseconds
+    );
+    let millennia = matches!(field, F::Millennium | F::Millenium);
+    if let sq::Value::SingleQuotedString(s) = &mut v.value
+        && !keeps_fraction
+    {
+        let t = s.trim();
+        let (neg, digits) = t.strip_prefix('-').map_or((false, t), |d| (true, d));
+        if let Some((int, frac)) = digits.split_once('.')
+            && !(int.is_empty() && frac.is_empty())
+            && int.bytes().chain(frac.bytes()).all(|c| c.is_ascii_digit())
+        {
+            let int = if int.is_empty() { "0" } else { int };
+            *s = format!("{}{int}", if neg { "-" } else { "" });
+        }
+    }
+    if millennia {
+        let n = match &mut v.value {
+            sq::Value::SingleQuotedString(s) | sq::Value::Number(s, _) => s,
+            _ => return None,
+        };
+        if let Some(years) = n
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .and_then(|n| n.checked_mul(1000))
+        {
+            *n = years.to_string();
+            iv.leading_field = Some(F::Year);
+        }
+    }
+    None
+}
+
+/// What DuckDB raises for a type it does not take, as it words it (#419): a FLOAT's bits outside 1
+/// to 53, a DECIMAL of no digits, `INTEGER(n)` (a syntax error to DuckDB) and a STRUCT that names
+/// a field twice. DataFusion planned each of them. A DECIMAL past 38 digits is not among them: it
+/// is this engine's, to 76 (#349).
+fn type_error(t: &SqlType) -> Option<String> {
+    match t {
+        SqlType::Array(
+            sq::ArrayElemTypeDef::AngleBracket(e)
+            | sq::ArrayElemTypeDef::SquareBracket(e, _)
+            | sq::ArrayElemTypeDef::Parenthesis(e),
+        ) => type_error(e),
+        SqlType::Map(k, v) => type_error(k).or_else(|| type_error(v)),
+        SqlType::Struct(fields, _) => {
+            let mut seen = std::collections::HashSet::new();
+            for f in fields {
+                if let Some(n) = &f.field_name
+                    && !seen.insert(n.value.to_lowercase())
+                {
+                    return Some(format!(
+                        "Binder Error: Duplicate struct entry name \"{}\"",
+                        n.value
+                    ));
+                }
+            }
+            fields.iter().find_map(|f| type_error(&f.field_type))
+        }
+        SqlType::Float(ExactNumberInfo::Precision(0)) => {
+            Some("Binder Error: precision for type float must be at least 1 bit".into())
+        }
+        SqlType::Float(ExactNumberInfo::Precision(p)) if *p > 53 => {
+            Some("Binder Error: precision for type float must be less than 54 bits".into())
+        }
+        SqlType::Decimal(
+            ExactNumberInfo::Precision(p) | ExactNumberInfo::PrecisionAndScale(p, _),
+        )
+        | SqlType::Numeric(
+            ExactNumberInfo::Precision(p) | ExactNumberInfo::PrecisionAndScale(p, _),
+        )
+        | SqlType::Dec(ExactNumberInfo::Precision(p) | ExactNumberInfo::PrecisionAndScale(p, _))
+            if *p == 0 =>
+        {
+            Some("Binder Error: DECIMAL type width must be between 1 and 38".into())
+        }
+        SqlType::Int(Some(_)) | SqlType::Integer(Some(_)) => {
+            Some("Parser Error: syntax error at or near \"(\"".into())
+        }
+        _ => None,
+    }
+}
+
+/// Expressions DuckDB's binder refuses and DataFusion answered (#419): `UNNEST(UNNEST(x))`, a
+/// `{...}` that names a key twice (in any case), and `MAP(k, v)` of two scalar literals.
+fn binder_error(e: &SqlExpr) -> Option<String> {
+    match e {
+        SqlExpr::Dictionary(fields) => {
+            let mut seen = std::collections::HashSet::new();
+            fields.iter().find_map(|f| {
+                (!seen.insert(f.key.value.to_lowercase())).then(|| {
+                    format!(
+                        "Binder Error: Duplicate named argument \"{}\" in function call to \
+                         \"struct_pack\"",
+                        f.key.value
+                    )
+                })
+            })
+        }
+        SqlExpr::Function(f) => {
+            if is_unnest(e).is_some() && sole_arg(f).and_then(is_unnest).is_some() {
+                return Some("Binder Error: Nested UNNEST calls are not supported".into());
+            }
+            let scalar = |a: &sq::FunctionArg| {
+                matches!(
+                    a,
+                    sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(SqlExpr::Value(v)))
+                        if matches!(v.value, sq::Value::Number(..) | sq::Value::SingleQuotedString(_))
+                )
+            };
+            if f.name.to_string().eq_ignore_ascii_case("map")
+                && let sq::FunctionArguments::List(l) = &f.args
+                && l.args.len() == 2
+                && l.args.iter().all(scalar)
+            {
+                return Some(
+                    "Binder Error: No function matches the given name and argument types 'map'"
+                        .into(),
+                );
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn is_unnest(e: &SqlExpr) -> Option<&sq::Function> {
+    match e {
+        SqlExpr::Function(f)
+            if matches!(
+                f.name.to_string().to_ascii_lowercase().as_str(),
+                "unnest" | "unlist"
+            ) =>
+        {
+            Some(f)
+        }
+        _ => None,
+    }
+}
+
+fn sole_arg(f: &sq::Function) -> Option<&SqlExpr> {
+    match &f.args {
+        sq::FunctionArguments::List(l) => match l.args.as_slice() {
+            [sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(a))] => Some(a),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// DuckDB's binder errors for UNNEST in a GROUP BY (#419): `GROUP BY ALL` over a select item that
+/// is an UNNEST would group on it, and an UNNEST of a struct cannot be grouped on at all. Only
+/// what the text shows to be a struct (a `{...}` literal) is caught.
+fn unnest_grouping(b: &sq::SetExpr) -> Option<String> {
+    match b {
+        sq::SetExpr::Select(s) => match &s.group_by {
+            sq::GroupByExpr::All(_) => {
+                let grouped = s.projection.iter().any(|i| match i {
+                    sq::SelectItem::UnnamedExpr(e)
+                    | sq::SelectItem::ExprWithAlias { expr: e, .. } => is_unnest(e).is_some(),
+                    _ => false,
+                });
+                grouped
+                    .then(|| "Binder Error: Cannot group on an UNNEST or UNLIST clause".to_string())
+            }
+            sq::GroupByExpr::Expressions(v, _) => {
+                struct StructUnnest(bool);
+                impl sq::Visitor for StructUnnest {
+                    type Break = ();
+                    fn pre_visit_expr(&mut self, e: &SqlExpr) -> ControlFlow<()> {
+                        if let Some(f) = is_unnest(e)
+                            && matches!(sole_arg(f), Some(SqlExpr::Dictionary(_)))
+                        {
+                            self.0 = true;
+                            return ControlFlow::Break(());
+                        }
+                        ControlFlow::Continue(())
+                    }
+                }
+                let mut found = StructUnnest(false);
+                for e in v {
+                    let _ = crate::walk::walk(e, &mut found);
+                }
+                found.0.then(|| {
+                    "Binder Error: UNNEST of struct cannot be used in GROUP BY clause".to_string()
+                })
+            }
+        },
+        sq::SetExpr::SetOperation { left, right, .. } => {
+            unnest_grouping(left).or_else(|| unnest_grouping(right))
+        }
+        _ => None,
+    }
+}
+
 /// DuckDB's type names DataFusion does not plan, renamed in place, within a list, struct or map as
 /// at the top; `Some` is a refusal.
 fn retype(t: &mut SqlType) -> Option<String> {
@@ -1828,6 +2205,12 @@ fn retype(t: &mut SqlType) -> Option<String> {
             SqlType::Decimal(ExactNumberInfo::PrecisionAndScale(18, 3))
         }
         SqlType::HugeInt => SqlType::Decimal(ExactNumberInfo::PrecisionAndScale(38, 0)),
+        // DuckDB's BLOB is DataFusion's BYTEA.
+        SqlType::Blob(None) => SqlType::Bytea,
+        // `FLOAT(p)` is FLOAT to 24 bits and DOUBLE from 25 to 53; DataFusion's is always FLOAT.
+        SqlType::Float(ExactNumberInfo::Precision(p)) if *p > 24 => {
+            SqlType::Double(ExactNumberInfo::None)
+        }
         SqlType::UBigInt => SqlType::BigIntUnsigned(None),
         SqlType::UTinyInt => SqlType::TinyIntUnsigned(None),
         SqlType::USmallInt => SqlType::SmallIntUnsigned(None),
@@ -1886,6 +2269,10 @@ impl VisitorMut for Rewriter {
     }
 
     fn pre_visit_query(&mut self, q: &mut sq::Query) -> ControlFlow<()> {
+        if let Some(why) = unnest_grouping(&q.body) {
+            self.binder = Some(why);
+            return ControlFlow::Break(());
+        }
         if let Err(why) = super::subqueries::predicates_as_counts(q, &self.known, &self.ctes) {
             self.refused = Some(why);
             return ControlFlow::Break(());
@@ -1971,6 +2358,10 @@ impl VisitorMut for Rewriter {
     fn pre_visit_expr(&mut self, e: &mut SqlExpr) -> ControlFlow<()> {
         if let SqlExpr::Subquery(q) = e {
             top_n_correlated(q);
+        }
+        if let Some(why) = binder_error(e) {
+            self.binder = Some(why);
+            return ControlFlow::Break(());
         }
         if let SqlExpr::Function(f) = e {
             if let Some(why) = unsupported_function(f) {
@@ -2141,7 +2532,19 @@ impl VisitorMut for Rewriter {
                 }
             }
             SqlExpr::Cast { data_type, .. } => {
-                let hugeint = matches!(data_type, SqlType::HugeInt);
+                if let Some(why) = type_error(data_type) {
+                    self.binder = Some(why);
+                    return ControlFlow::Break(());
+                }
+                // BIGNUM is DECIMAL(38,0) here too, and DuckDB rounds a float to it half to even.
+                let hugeint = match &*data_type {
+                    SqlType::HugeInt => true,
+                    SqlType::Custom(name, args) if args.is_empty() => matches!(
+                        name.to_string().to_ascii_uppercase().as_str(),
+                        "BIGNUM" | "VARINT"
+                    ),
+                    _ => false,
+                };
                 if let Some(why) = retype(data_type) {
                     self.refused = Some(why);
                     return ControlFlow::Break(());
@@ -2150,6 +2553,46 @@ impl VisitorMut for Rewriter {
                 // from zero; both are DECIMAL(38,0) here, so `DuckSemantics` is told which it was.
                 if hugeint {
                     *e = call("burrmill_hugeint", vec![e.clone()]);
+                }
+            }
+            SqlExpr::AnyOp {
+                left,
+                compare_op,
+                right,
+                ..
+            } if !matches!(right.as_ref(), SqlExpr::Subquery(_)) => {
+                if let Some(q) = quantified(left, compare_op, right, true) {
+                    *e = q;
+                }
+            }
+            SqlExpr::AllOp {
+                left,
+                compare_op,
+                right,
+            } if !matches!(right.as_ref(), SqlExpr::Subquery(_)) => {
+                if let Some(q) = quantified(left, compare_op, right, false) {
+                    *e = q;
+                }
+            }
+            SqlExpr::Function(f)
+                if matches!(
+                    f.name.to_string().to_ascii_lowercase().as_str(),
+                    "list_contains" | "array_contains" | "list_has"
+                ) =>
+            {
+                if let sq::FunctionArguments::List(l) = &f.args
+                    && let [
+                        sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(list)),
+                        sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(x)),
+                    ] = l.args.as_slice()
+                    && !plain_list(list)
+                {
+                    *e = list_contains(list, x);
+                }
+            }
+            SqlExpr::Interval(iv) => {
+                if let Some(cast) = duck_interval(iv) {
+                    *e = cast;
                 }
             }
             // `f(x).field`: DataFusion takes a field name after a dot only as a string.
@@ -2665,6 +3108,14 @@ impl AnalyzerRule for DuckSemantics {
                             let t = t.transform_data(|e| dates_as_duckdb(e, &schema))?;
                             let t = t.transform_data(|e| case_nullability(e, &schema))?;
                             let t = t.transform_data(try_as_duckdb)?;
+                            let t = t.transform_data(|e| {
+                                super::intervals::intervals_as_duckdb(e, &schema)
+                            })?;
+                            let t =
+                                t.transform_data(|e| super::blobs::blobs_as_duckdb(e, &schema))?;
+                            let t = t.transform_data(|e| {
+                                super::temporal::temporal_as_duckdb(e, &schema)
+                            })?;
                             let t =
                                 t.transform_data(|e| super::nestedorder::nested_order(e, &schema))?;
                             let t =
@@ -2701,6 +3152,11 @@ fn semantics_may_rewrite(e: &Expr) -> bool {
                 | Operator::LtEq
                 | Operator::Gt
                 | Operator::GtEq
+                // `intervals_as_duckdb`, between intervals.
+                | Operator::Eq
+                | Operator::NotEq
+                | Operator::IsDistinctFrom
+                | Operator::IsNotDistinctFrom
         ),
         Expr::Between(_) => true,
         // `timestamp_as_duckdb`, `dates_as_duckdb`, `try_as_duckdb` and `hugeint_rounding`.
@@ -2896,7 +3352,7 @@ fn dates_as_duckdb(e: Expr, schema: &DFSchema) -> DFResult<Transformed<Expr>> {
                     op,
                     Box::new(cast(n, DataType::Int64)),
                 ));
-                cast(cast(sum, DataType::Int32), DataType::Date32)
+                super::temporal::days_to_date(sum)
             };
             if lt == DataType::Date32
                 && matches!(rt, DataType::Interval(_))

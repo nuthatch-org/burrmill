@@ -56,6 +56,36 @@ Engine (`burrmill`, feature `datafusion`)
   wrong, where 12199 and 634.
 - The sqllogictest harness judges a statement under `SharedDefsExec` by the statement's own sort,
   where it took the shared subqueries for a join's inputs and the plan for unordered (#423).
+- INTERVALs are read, written and compared as DuckDB does (#419). Text is DuckDB's
+  `Interval::FromCString`: `'47.210'` is 47.21 seconds, where Arrow read 3 years 11 months 6 days,
+  and a fraction of a week or a month spills into days as DuckDB spills it. `INTERVAL '1.5' HOUR`
+  is an hour, as DuckDB takes the whole part of a unit above a millisecond, and `INTERVAL 3
+  decades` is 30 years, where sqlparser read the plural as an alias and the interval as 3
+  seconds. An interval cast to text is `2 years`, not `24 mons`. Comparisons normalize, a month
+  being 30 days and a day 24 hours, so `INTERVAL 30 DAY = INTERVAL 1 MONTH`. `TIMESTAMP -
+  TIMESTAMP` is an INTERVAL of days and time, not a DURATION. An interval whose time passes
+  2562047 hours, which Arrow's nanoseconds cannot hold, is refused by name.
+- Text cast to DATE, TIME and TIMESTAMP is read as DuckDB reads it, and a DATE or TIME cast to
+  text written as DuckDB writes it (#419): ` (BC)`, `/` between the fields, years from 5877642 BC
+  to 5881580, `11:` as 11:00 and `24:00:00` as a time, `23:59:60` and a bare `11` refused, and a
+  TIME's fraction without its trailing zeros. A DATE's trailing text must be the rest of a
+  timestamp, as in DuckDB 2.0.1. DuckDB's `infinity` has no value in Arrow's DATE or TIMESTAMP and
+  is refused by name, a `TRY_CAST` too. A date past DuckDB's range from `DATE + n` is DuckDB's
+  error, and `date_diff` over a date past what microseconds hold is refused, where it was NULL.
+- Text cast to BLOB reads `\xAA` as a byte and a BLOB cast to text writes one back, as DuckDB's
+  casts do; a number, or a list of numbers, has no cast to BLOB, as in DuckDB (#419). `BLOB` is a
+  type name.
+- `x op ANY(list)`, `x op ALL(list)` and `list_contains` answer with DuckDB's NULLs (#419): `4 =
+  ANY([1, 2, 3, NULL])` is NULL and `1 = ANY(NULL)` false, where DataFusion answered false and
+  NULL.
+- What DuckDB's binder refuses is an error (#419): `FLOAT(0)` and `FLOAT(54)`, `DECIMAL(0)`,
+  `INTEGER(n)`, a struct naming a field twice, `UNNEST(UNNEST(...))`, `GROUP BY
+  ALL` over an UNNEST, an UNNEST of a struct in `GROUP BY`, and `MAP` of two scalars. `FLOAT(25)`
+  to `FLOAT(53)` is DOUBLE, and a float cast to BIGNUM rounds half to even, as to HUGEINT.
+- The sqllogictest harness quotes a BLOB inside a LIST, STRUCT or MAP as DuckDB's cast to text
+  does, and writes dates past chrono's year 262143 (#419). In DuckDB's sqllogictest suite,
+  `test/sql/types` has 2727 pass, 1427 refused, 50 wrong and 790 error, where it had 2454, 1421,
+  166 and 922; the whole suite 12624 pass and 460 wrong, where 12245 and 583.
 
 - A hash join builds on the side its filter plainly cuts below the other, where it built on the
   side that reads fewer bytes (#433). Statistics being off, a filter's share is guessed from its

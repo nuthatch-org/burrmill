@@ -72,6 +72,8 @@ const SAFE_SCALARS: &[&str] = &[
     "len",
     "sign",
     "burrmill_round_int",
+    // `intervals::IntervalFn`: an interval's length in nanoseconds, under 10^26.
+    "burrmill_interval_length",
     "burrmill_text_to_int",
     "burrmill_text_to_decimal",
     // `strict::Div` and `strict::Rescale`: past 38 digits or a dropped digit, refused.

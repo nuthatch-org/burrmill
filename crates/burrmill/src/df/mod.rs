@@ -16,6 +16,7 @@ use crate::error::{BurrmillError, Result};
 
 mod addresses;
 mod asof;
+mod blobs;
 mod bound;
 mod cancel;
 mod catalog;
@@ -73,6 +74,7 @@ mod gate;
 mod grouptotal;
 mod havinggroups;
 mod host;
+mod intervals;
 mod joinedgroups;
 mod joinfilters;
 mod lastnonnull;
@@ -96,6 +98,7 @@ mod spillingjoins;
 mod staticfilters;
 mod strict;
 mod tables;
+mod temporal;
 mod textfiles;
 #[cfg(not(target_arch = "wasm32"))]
 mod workers;
