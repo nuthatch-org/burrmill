@@ -2247,6 +2247,24 @@ fn sole_arg(f: &sq::Function) -> Option<&SqlExpr> {
     }
 }
 
+/// DuckDB's `f(x) EXPORT_STATE` answers the aggregate's state, not its value; sqlparser reads the
+/// keyword as the column's alias, and the value was answered (#421,
+/// test/sql/aggregate/aggregate_state_export/ordered_aggregate_export_state.test:48).
+fn export_state(s: &sq::Select) -> Option<String> {
+    s.projection.iter().find_map(|item| match item {
+        sq::SelectItem::ExprWithAlias {
+            expr: SqlExpr::Function(f),
+            alias,
+        } if alias.quote_style.is_none() && alias.value.eq_ignore_ascii_case("export_state") => {
+            Some(format!(
+                "{}(...) EXPORT_STATE is not supported here",
+                f.name
+            ))
+        }
+        _ => None,
+    })
+}
+
 /// DuckDB's binder errors for UNNEST in a GROUP BY (#419): `GROUP BY ALL` over a select item that
 /// is an UNNEST would group on it, and an UNNEST of a struct cannot be grouped on at all. Only
 /// what the text shows to be a struct (a `{...}` literal) is caught.
@@ -2371,6 +2389,10 @@ impl VisitorMut for Rewriter {
 
     fn pre_visit_select(&mut self, s: &mut sq::Select) -> ControlFlow<()> {
         self.counts.enter_select(s);
+        if let Some(why) = export_state(s) {
+            self.refused = Some(why);
+            return ControlFlow::Break(());
+        }
         ControlFlow::Continue(())
     }
 

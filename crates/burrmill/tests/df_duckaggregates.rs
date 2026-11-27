@@ -155,3 +155,23 @@ fn count_of_a_relation_star_is_refused_where_presence_is_unknown() {
         refused(&e, sql, "COUNT(");
     }
 }
+
+/// `f(x) EXPORT_STATE` is DuckDB's aggregate state; sqlparser read the keyword as an alias and the
+/// aggregate's value was answered (test/sql/aggregate/aggregate_state_export/
+/// ordered_aggregate_export_state.test:48, aggregate_state_union.test:14).
+#[test]
+fn export_state_is_refused_by_name() {
+    let e = Engine::open_empty().unwrap();
+    for sql in [
+        "SELECT list(i ORDER BY i DESC) EXPORT_STATE FROM (VALUES (1), (3), (2)) t(i)",
+        "SELECT typeof(s) FROM (SELECT sum(1) AS s UNION ALL SELECT sum(1) export_state) t",
+        "SELECT corr(i, i + 1) EXPORT_STATE FROM (VALUES (1), (2)) t(i)",
+    ] {
+        refused(&e, sql, "EXPORT_STATE");
+    }
+    // A quoted alias of the name is a name.
+    assert_eq!(
+        rows(&e, "SELECT count(*) AS \"export_state\""),
+        vec![json!({"export_state": 1})]
+    );
+}
