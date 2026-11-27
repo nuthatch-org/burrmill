@@ -21,6 +21,27 @@ Engine (`burrmill`, feature `datafusion`)
   from 1.50x–1.95x to 1.05x–1.08x. A join's filter that reaches a scan through another join, as
   the filter of Q7's join to its customers reaches `orders` through the join to `lineitem`, keeps
   its row filter, and so does a scan that keeps one for any other reason.
+- `COUNT(t.*)` counts the rows `t` is present in, as in DuckDB (#421): a row of `t` whose every
+  column is NULL counts, and a row an outer join NULL-extends `t` in does not. DataFusion read it
+  as `COUNT(*)`. Over the NULL-extended side of a `LEFT` or `RIGHT` join it counts a column the
+  join's condition rejects NULL in; where there is none (a `FULL` join, `ON true`, `IS NOT
+  DISTINCT FROM`) it is refused by name.
+- `f(x) EXPORT_STATE` is refused by name (#421); sqlparser read the keyword as an alias, and the
+  aggregate's value was answered where DuckDB answers its state. `count`, `min`, `max`,
+  `bool_and`, `bool_or` and an unordered `list`, whose state is the value, still answer; over
+  DISTINCT it is DuckDB's binder error.
+- `regr_slope` over no spread in `x` is NaN, and `regr_r2` is 1 over no spread in `y` and the
+  square of `corr` otherwise, as in DuckDB (#421); DataFusion answered NULL, NULL and, where a
+  spread overflowed, NaN.
+- `DISTINCT ON (k) ... ORDER BY o` keeps each key's first row by `o` when `o` does not start with
+  `k`, which DataFusion refused (#421). A position as a `DISTINCT ON` key is the select item there.
+- What DuckDB's binder refuses is an error (#421): `count` of several arguments, `COUNT(DISTINCT
+  *)`, a boolean or NULL as a query's `ORDER BY` key, a literal other than a position as a
+  `DISTINCT ON` key, and, in a `GROUP BY ALL`, a window that takes a column itself.
+  `string_agg(x, NULL)` is NULL, and `avg(x := v)` and `sum(arg := v)` take DuckDB's parameter
+  names. In DuckDB's sqllogictest suite, `test/sql/aggregate` has 882 pass, 914 refused, 1 wrong
+  and 74 error, where it had 827, 694, 43 and 307; the whole suite 12690 pass and 411 wrong,
+  where 12625 and 459.
 
 ## 0.5.0 - 2026-11-27
 
