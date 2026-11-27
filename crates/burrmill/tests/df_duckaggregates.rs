@@ -169,6 +169,14 @@ fn export_state_is_refused_by_name() {
     ] {
         refused(&e, sql, "EXPORT_STATE");
     }
+    // Where sqlparser cannot read it, it is refused by the same name
+    // (aggregate_state_export/approx_quantile_export_state.test:11).
+    for sql in [
+        "SELECT finalize(sum(i) EXPORT_STATE) FROM (VALUES (1)) t(i)",
+        "SELECT sum(i) EXPORT_STATE AS s FROM (VALUES (1)) t(i)",
+    ] {
+        refused(&e, sql, "EXPORT_STATE");
+    }
     // Over DISTINCT it is DuckDB's binder error (test_export_state_distinct.test:26).
     match e.sql("SELECT count(DISTINCT i) EXPORT_STATE FROM (VALUES (1)) t(i)") {
         Ok(b) => panic!("answered {b:?}"),

@@ -63,6 +63,10 @@ pub(crate) fn parse_statements_until(
         let text = parser_text(&e);
         BurrmillError::Parse(if asof_error(&text) {
             ASOF_REFUSAL.into()
+        } else if expanded.to_ascii_lowercase().contains("export_state") {
+            // DuckDB's `f(x) EXPORT_STATE`, where sqlparser cannot read it (inside a call, before
+            // an alias); where it can, the rewrite refuses it (#421).
+            "EXPORT_STATE is not supported here".into()
         } else {
             super::errors::restate(text)
         })
