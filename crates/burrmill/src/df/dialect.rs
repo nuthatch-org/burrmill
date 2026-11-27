@@ -2467,6 +2467,89 @@ fn unnest_grouping(b: &sq::SetExpr) -> Option<String> {
     }
 }
 
+/// DuckDB's binder errors for a window in a `GROUP BY ALL` (#421,
+/// test/sql/aggregate/group/group_by_all_window.test:31): a select item with a window that takes a
+/// column itself, as an argument or a `PARTITION BY` or `ORDER BY` key, is grouped on, which DuckDB
+/// refuses; DataFusion grouped on what it could and answered. Only a bare column counts, so an
+/// aggregate this does not know by name is not mistaken for one.
+fn window_grouping(b: &sq::SetExpr) -> Option<String> {
+    let s = match b {
+        sq::SetExpr::Select(s) => s,
+        sq::SetExpr::SetOperation { left, right, .. } => {
+            return window_grouping(left).or_else(|| window_grouping(right));
+        }
+        _ => return None,
+    };
+    if !matches!(s.group_by, sq::GroupByExpr::All(_)) {
+        return None;
+    }
+    let bare = |e: &SqlExpr| matches!(e, SqlExpr::Identifier(_) | SqlExpr::CompoundIdentifier(_));
+    struct Windows {
+        grouped: bool,
+        aggregate: bool,
+    }
+    impl sq::Visitor for Windows {
+        type Break = ();
+        fn pre_visit_query(&mut self, _: &sq::Query) -> ControlFlow<()> {
+            ControlFlow::Break(())
+        }
+        fn pre_visit_expr(&mut self, e: &SqlExpr) -> ControlFlow<()> {
+            let SqlExpr::Function(f) = e else {
+                return ControlFlow::Continue(());
+            };
+            let bare =
+                |e: &SqlExpr| matches!(e, SqlExpr::Identifier(_) | SqlExpr::CompoundIdentifier(_));
+            match &f.over {
+                Some(sq::WindowType::WindowSpec(w)) => {
+                    let args = match &f.args {
+                        sq::FunctionArguments::List(l) => l.args.as_slice(),
+                        _ => &[],
+                    };
+                    let arg = args.iter().any(|a| {
+                        matches!(a, sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(e)) if bare(e))
+                    });
+                    if arg
+                        || w.partition_by.iter().any(bare)
+                        || w.order_by.iter().any(|o| bare(&o.expr))
+                    {
+                        self.grouped = true;
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    let name = f.name.to_string().to_ascii_lowercase();
+                    if super::subqueries::AGGREGATES.contains(&name.as_str()) {
+                        self.aggregate = true;
+                    }
+                }
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    for item in &s.projection {
+        let (sq::SelectItem::UnnamedExpr(e) | sq::SelectItem::ExprWithAlias { expr: e, .. }) = item
+        else {
+            continue;
+        };
+        if bare(e) {
+            continue;
+        }
+        let mut w = Windows {
+            grouped: false,
+            aggregate: false,
+        };
+        let _ = crate::walk::walk(e, &mut w);
+        if w.grouped {
+            return Some(if w.aggregate {
+                "Binder Error: Cannot mix aggregates with non-aggregated columns!".into()
+            } else {
+                "Binder Error: Cannot group on a window clause".into()
+            });
+        }
+    }
+    None
+}
+
 /// DuckDB's type names DataFusion does not plan, renamed in place, within a list, struct or map as
 /// at the top; `Some` is a refusal.
 fn retype(t: &mut SqlType) -> Option<String> {
@@ -2581,7 +2664,7 @@ impl VisitorMut for Rewriter {
             self.refused = Some(why);
             return ControlFlow::Break(());
         }
-        if let Some(why) = unnest_grouping(&q.body) {
+        if let Some(why) = unnest_grouping(&q.body).or_else(|| window_grouping(&q.body)) {
             self.binder = Some(why);
             return ControlFlow::Break(());
         }

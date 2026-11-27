@@ -316,3 +316,45 @@ fn string_agg_with_a_null_separator_is_null() {
     assert_eq!(names.len(), 2);
     assert_ne!(names[0], names[1]);
 }
+
+/// A window that takes a column itself, in a `GROUP BY ALL`, would be grouped on, which DuckDB
+/// refuses; one over aggregates or over no column is not grouped on
+/// (test/sql/aggregate/group/group_by_all_window.test:9, 31, 37).
+#[test]
+fn a_window_over_a_column_in_group_by_all_is_duckdb_s_binder_error() {
+    let e = Engine::open_empty().unwrap();
+    let t = "(SELECT i % 3 AS g, i AS v FROM range(10) r(i)) t";
+    for (sql, says) in [
+        (
+            format!("SELECT g, sum(v) AS s, lag(sum(v)) OVER (ORDER BY g) FROM {t} GROUP BY ALL"),
+            "Cannot mix aggregates with non-aggregated columns",
+        ),
+        (
+            format!("SELECT g, rank() OVER (ORDER BY g) FROM {t} GROUP BY ALL"),
+            "Cannot group on a window clause",
+        ),
+        (
+            format!("SELECT g, sum(v) OVER () FROM {t} GROUP BY ALL"),
+            "Cannot group on a window clause",
+        ),
+    ] {
+        match e.sql(&sql) {
+            Ok(b) => panic!("{sql}: answered {b:?}"),
+            Err(err) => assert!(err.to_string().contains(says), "{sql}: {err}"),
+        }
+    }
+    assert_eq!(
+        rows(
+            &e,
+            &format!(
+                "SELECT g, sum(v) AS s, rank() OVER (ORDER BY sum(v)) AS r FROM {t} \
+                 GROUP BY ALL ORDER BY g"
+            )
+        ),
+        vec![
+            json!({"g": 0, "s": "18", "r": 3}),
+            json!({"g": 1, "s": "12", "r": 1}),
+            json!({"g": 2, "s": "15", "r": 2}),
+        ]
+    );
+}
