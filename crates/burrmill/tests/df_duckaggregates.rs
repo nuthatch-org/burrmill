@@ -381,3 +381,46 @@ fn avg_and_sum_take_their_parameter_names() {
     );
     assert!(e.sql("SELECT avg(y := 1)").is_err());
 }
+
+/// A boolean or NULL as a query's ordering or `DISTINCT ON` key is DuckDB's binder error, as a
+/// string is; in an aggregate's `ORDER BY` it is taken
+/// (test/sql/order/test_order_by_non_ordinal_literal.test:23, 75, 86).
+#[test]
+fn a_boolean_or_null_key_of_a_query_is_duckdb_s_binder_error() {
+    let e = Engine::open_empty().unwrap();
+    let t = "(VALUES (1, 2), (3, 4)) t(a, b)";
+    for (sql, says) in [
+        (
+            format!("SELECT a FROM {t} ORDER BY true, a"),
+            "ORDER BY non-integer",
+        ),
+        (
+            format!("SELECT a FROM {t} ORDER BY NULL, a"),
+            "ORDER BY non-integer",
+        ),
+        (
+            format!("SELECT a FROM {t} UNION SELECT b FROM {t} ORDER BY false"),
+            "ORDER BY non-integer",
+        ),
+        (
+            format!("SELECT DISTINCT ON (true) a, b FROM {t} ORDER BY a, b"),
+            "DISTINCT ON non-integer",
+        ),
+        (
+            format!("SELECT DISTINCT ON (a) a, b FROM {t} ORDER BY true, a"),
+            "ORDER BY non-integer",
+        ),
+    ] {
+        match e.sql(&sql) {
+            Ok(b) => panic!("{sql}: answered {b:?}"),
+            Err(err) => assert!(err.to_string().contains(says), "{sql}: {err}"),
+        }
+    }
+    assert_eq!(
+        rows(
+            &e,
+            &format!("SELECT len(list(a ORDER BY NULL)) AS l FROM {t}")
+        ),
+        vec![json!({"l": 2})]
+    );
+}

@@ -1164,15 +1164,23 @@ fn nulls_last(v: &mut [sq::OrderByExpr]) {
 /// (though not in a window): it would order nothing.
 fn literal_key(v: &[sq::OrderByExpr]) -> Option<String> {
     v.iter()
-        .any(|o| match &o.expr {
-            SqlExpr::Value(v) => match &v.value {
-                sq::Value::SingleQuotedString(_) | sq::Value::DoubleQuotedString(_) => true,
-                sq::Value::Number(n, _) => n.parse::<i64>().is_err(),
-                _ => false,
-            },
-            _ => false,
-        })
+        .any(|o| non_integer_literal(&o.expr, false))
         .then(|| "Binder Error: ORDER BY non-integer literal has no effect.".to_string())
+}
+
+/// A literal DuckDB's binder refuses as an ordering key: a string or a non-integer number, and, in
+/// a query's own `ORDER BY` or `DISTINCT ON` (`query`), a boolean or NULL too (#421,
+/// test/sql/order/test_order_by_non_ordinal_literal.test:23), which an aggregate's takes.
+fn non_integer_literal(e: &SqlExpr, query: bool) -> bool {
+    match e {
+        SqlExpr::Value(v) => match &v.value {
+            sq::Value::SingleQuotedString(_) | sq::Value::DoubleQuotedString(_) => true,
+            sq::Value::Number(n, _) => n.parse::<i64>().is_err(),
+            sq::Value::Boolean(_) | sq::Value::Null => query,
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// `arg_max(x, y)`: `x` from the row with the greatest `y`, rows with either NULL passed over, as
@@ -2357,18 +2365,17 @@ fn distinct_on(s: &mut sq::Select) -> std::result::Result<(), (bool, String)> {
         return Ok(());
     };
     for k in keys.iter_mut() {
-        let SqlExpr::Value(v) = k else { continue };
-        let n = match &v.value {
-            sq::Value::Number(n, _) => n.parse::<i64>().ok(),
-            sq::Value::SingleQuotedString(_) | sq::Value::DoubleQuotedString(_) => None,
-            _ => continue,
-        };
-        let Some(n) = n else {
+        if non_integer_literal(k, true) {
             return Err((
                 true,
                 "Binder Error: DISTINCT ON non-integer literal has no effect.".into(),
             ));
+        }
+        let SqlExpr::Value(v) = k else { continue };
+        let sq::Value::Number(n, _) = &v.value else {
+            continue;
         };
+        let Ok(n) = n.parse::<i64>() else { continue };
         let items: Option<Vec<&SqlExpr>> =
             s.projection
                 .iter()
@@ -2765,8 +2772,9 @@ impl VisitorMut for Rewriter {
         }
         match q.order_by.as_mut().map(|o| &mut o.kind) {
             Some(sq::OrderByKind::Expressions(v)) => {
-                if let Some(why) = literal_key(v) {
-                    self.refused = Some(why);
+                if v.iter().any(|o| non_integer_literal(&o.expr, true)) {
+                    self.refused =
+                        Some("Binder Error: ORDER BY non-integer literal has no effect.".into());
                     return ControlFlow::Break(());
                 }
                 nulls_last(v)
