@@ -122,6 +122,10 @@ pub(super) fn engine_version() -> String {
 /// The statement as the parser prints it, so whitespace and comments are not part of it.
 pub(super) fn normalised(sql: &str) -> String {
     use sqlparser::dialect::DuckDbDialect;
+    // That parse has no budget. A statement over the bounds is refused when it plans.
+    if super::depth::check_expr_bounds(sql).is_err() {
+        return sql.trim().to_string();
+    }
     match sqlparser::parser::Parser::parse_sql(&DuckDbDialect {}, sql) {
         Ok(s) if s.len() == 1 => s[0].to_string(),
         _ => sql.trim().to_string(),

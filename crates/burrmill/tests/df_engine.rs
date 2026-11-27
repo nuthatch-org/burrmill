@@ -559,6 +559,134 @@ fn nested_parentheses_stop_with_the_parser() {
     assert!(matches!(err, BurrmillError::Parse(_)), "{err}");
 }
 
+fn wrapped(open: &str, close: &str, n: usize, inner: &str) -> String {
+    let mut s = inner.to_string();
+    for _ in 0..n {
+        s = format!("{open}{s}{close}");
+    }
+    s
+}
+
+fn casts(n: usize) -> String {
+    format!("SELECT {} AS n", wrapped("CAST(", " AS BIGINT)", n, "1"))
+}
+
+/// `sql`'s error, failing the test rather than waiting past 20 s for it.
+fn refused_within_20s(sql: &str) -> BurrmillError {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let sql = sql.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(Engine::open_empty().unwrap().sql(&sql).map(|_| ()));
+    });
+    let r = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the statement did not return within 20 s");
+    r.unwrap_err()
+}
+
+#[test]
+fn a_cast_47_deep_plans_and_48_is_refused_quickly() {
+    assert_eq!(value(&casts(47)), r#"[{"n":1}]"#);
+    let err = refused_within_20s(&casts(48));
+    assert!(matches!(err, BurrmillError::NotAllowed(_)), "{err}");
+    assert!(err.to_string().contains("too deeply to parse"), "{err}");
+}
+
+#[test]
+fn reserved_words_nested_past_the_parser_limit_are_refused_quickly() {
+    // Each was parsed as its keyword form, then again as a function call, at every level.
+    let cases = [
+        format!(
+            "SELECT {}{}",
+            "- ".repeat(30),
+            wrapped("CAST(", " AS BIGINT)", 20, "1")
+        ),
+        format!("SELECT {}", wrapped("CEIL(", ")", 48, "1")),
+        format!("SELECT {}", wrapped("NOT (", ")", 48, "true")),
+        format!("SELECT {}", wrapped("ARRAY[", "]", 48, "1")),
+        format!("SELECT {}", wrapped("cast(", ")", 30, "1")),
+    ];
+    for sql in &cases {
+        let err = refused_within_20s(sql);
+        assert!(matches!(err, BurrmillError::NotAllowed(_)), "{err}");
+    }
+}
+
+#[test]
+fn a_7000_deep_array_type_is_refused_and_the_process_lives() {
+    let engine = Engine::open_empty().unwrap();
+    let sql = format!("SELECT CAST(NULL AS INT{}) AS n", "[]".repeat(7000));
+    let err = engine.sql(&sql).unwrap_err();
+    assert!(matches!(err, BurrmillError::NotAllowed(_)), "{err}");
+    assert_eq!(value_of(engine, "SELECT 1 AS n"), r#"[{"n":1}]"#);
+}
+
+#[test]
+fn nested_struct_and_angle_bracket_types_are_refused_before_the_parser() {
+    for ty in [
+        wrapped("STRUCT(a ", ")", 7000, "INT"),
+        wrapped("ARRAY<", ">", 7000, "INT"),
+    ] {
+        let err = refusal(&format!("SELECT CAST(NULL AS {ty}) AS n"));
+        assert!(err.contains("brackets deeper than 64"), "{err}");
+    }
+}
+
+#[test]
+fn type_depth_allows_32_and_refuses_33() {
+    let array = |levels: usize| format!("SELECT CAST(NULL AS INT{}) AS n", "[]".repeat(levels - 1));
+    assert!(Engine::open_empty().unwrap().sql(&array(32)).is_ok());
+    let err = refusal(&array(33));
+    assert!(err.contains("type nests deeper than 32"), "{err}");
+    // Under the bracket bound, but 31 suffixes on each of two levels.
+    let suffixes = "[]".repeat(31);
+    let sql = format!("SELECT CAST(NULL AS STRUCT(a INT{suffixes}){suffixes}) AS n");
+    let err = refusal(&sql);
+    assert!(err.contains("type nests deeper than 32"), "{err}");
+}
+
+fn cube(keys: &[usize]) -> String {
+    let n: usize = keys.iter().sum();
+    let cols: Vec<String> = (0..n).map(|i| format!("{i} AS c{i}")).collect();
+    let mut at = 0;
+    let groups: Vec<String> = keys
+        .iter()
+        .map(|&k| {
+            let names: Vec<String> = (at..at + k).map(|i| format!("c{i}")).collect();
+            at += k;
+            format!("CUBE({})", names.join(", "))
+        })
+        .collect();
+    format!(
+        "SELECT count(*) AS n FROM (SELECT {}) AS t GROUP BY {}",
+        cols.join(", "),
+        groups.join(", ")
+    )
+}
+
+#[test]
+fn a_cube_of_12_keys_plans_and_13_is_refused_before_planning() {
+    // 4,096 grouping sets, one row each from the one input row.
+    assert_eq!(
+        Engine::open_empty()
+            .unwrap()
+            .sql(&cube(&[12]))
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum::<usize>(),
+        4096
+    );
+    for n in [13, 16, 18] {
+        let err = refusal(&cube(&[n]));
+        assert!(err.contains("more than 4096"), "{n}: {err}");
+    }
+    let err = refusal(&cube(&[6, 7]));
+    assert!(err.contains("8192 grouping sets"), "{err}");
+    let rollup = "SELECT count(*) AS n FROM (SELECT 1 AS a, 2 AS b) AS t GROUP BY ROLLUP(a, b)";
+    assert!(Engine::open_empty().unwrap().sql(rollup).is_ok());
+}
+
 #[test]
 fn subquery_depth_continues_from_the_parent() {
     let inner = chain(20)

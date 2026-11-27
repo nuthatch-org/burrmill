@@ -20,20 +20,24 @@ const MAX_SET_DEPTH: usize = 64;
 /// inside one DataFusion rule where no cancel reaches: a chain of 256 `JOIN ... ON` took 14 s in
 /// a release build, 128 took 1.3 and 96 takes 0.67. The largest authored view reads 65.
 const MAX_RELATIONS: usize = 96;
+/// Brackets open at once, counting each `[]` of a type suffix as one more. sqlparser parses a
+/// nested `STRUCT(...)` without its recursion limit and builds `INT[]...[]` in a loop, so either
+/// overflowed the stack in the parser or in the first walk after it.
+const MAX_BRACKET_DEPTH: usize = 64;
+/// Levels of one written type: `INT[][]` is 3, `STRUCT(a INT[])` is 3. Views use a few.
+const MAX_TYPE_DEPTH: usize = 32;
+/// Grouping sets one `GROUP BY` expands to, DataFusion's own cap. DataFusion skips it when the
+/// grouping is the only key, and expands `CUBE` at plan time, outside the memory budget.
+const MAX_GROUPING_SETS: usize = 4096;
 
 /// Refuse a statement whose plan would recurse deep enough to abort the process.
 ///
 /// A statement the parser rejects is left alone, so the planner reports that error itself.
 pub fn check_expr_bounds(sql: &str) -> Result<()> {
-    let stmts = match super::dialect::parse_statements(sql) {
-        Ok(stmts) => stmts,
-        Err(BurrmillError::Parse(_)) => return Ok(()),
-        Err(e) => return Err(e),
-    };
-    for stmt in &stmts {
-        check_df(stmt)?;
+    match super::dialect::parse_statements(sql) {
+        Ok(_) | Err(BurrmillError::Parse(_)) => Ok(()),
+        Err(e) => Err(e),
     }
-    Ok(())
 }
 
 pub(crate) fn check_statement(stmt: &sq::Statement) -> Result<()> {
@@ -45,38 +49,83 @@ pub(crate) fn check_statement(stmt: &sq::Statement) -> Result<()> {
     .run()
 }
 
-/// `UNION` / `INTERSECT` / `EXCEPT` as keywords, not as text. The tokenizer is iterative.
-/// A comment or a string containing the word is not a keyword, and a quoted identifier is not either.
-pub(crate) fn refuse_set_op_tokens(sql: &str) -> Result<()> {
-    if !super::dialect::may_hold_keyword(sql, &["union", "intersect", "except"]) {
+/// Before the parser: `UNION` / `INTERSECT` / `EXCEPT` as keywords, not as text, and bracket
+/// nesting. The tokenizer is iterative. A comment or a string containing the word is not a
+/// keyword, and a quoted identifier is not either.
+pub(crate) fn refuse_deep_tokens(sql: &str) -> Result<()> {
+    let set_ops = super::dialect::may_hold_keyword(sql, &["union", "intersect", "except"]);
+    let brackets = sql
+        .bytes()
+        .filter(|b| matches!(b, b'(' | b'[' | b'<'))
+        .count();
+    if !set_ops && brackets <= MAX_BRACKET_DEPTH {
         return Ok(());
     }
     let mut tokenizer = Tokenizer::new(&super::dialect::Duck, sql);
-    let tokens = match tokenizer.tokenize() {
-        Ok(tokens) => tokens,
+    let tokens: Vec<Token> = match tokenizer.tokenize() {
+        Ok(tokens) => tokens
+            .into_iter()
+            .filter(|t| !matches!(t, Token::Whitespace(_)))
+            .collect(),
         Err(_) => return Ok(()),
     };
-    let mut n = 0usize;
-    for token in tokens {
-        let Token::Word(word) = token else {
-            continue;
-        };
-        if word.quote_style.is_none()
-            && matches!(
-                word.keyword,
-                Keyword::UNION | Keyword::INTERSECT | Keyword::EXCEPT
-            )
-        {
-            n += 1;
-            if n > MAX_SET_DEPTH {
-                return Err(too_nested());
+    let mut set_op_words = 0usize;
+    // Each open bracket, and whether it is the `<` of `ARRAY<...>`.
+    let mut open: Vec<bool> = Vec::new();
+    // `[]` or `[n]` groups in a row: a type suffix builds one level per group.
+    let mut suffix = 0usize;
+    let mut i = 0;
+    while i < tokens.len() {
+        let mut step = 1;
+        match &tokens[i] {
+            Token::Word(word)
+                if word.quote_style.is_none()
+                    && matches!(
+                        word.keyword,
+                        Keyword::UNION | Keyword::INTERSECT | Keyword::EXCEPT
+                    ) =>
+            {
+                set_op_words += 1;
+                if set_op_words > MAX_SET_DEPTH {
+                    return Err(too_nested());
+                }
             }
+            Token::LBracket => match (tokens.get(i + 1), tokens.get(i + 2)) {
+                (Some(Token::RBracket), _) => step = 2,
+                (Some(Token::Number(..)), Some(Token::RBracket)) => step = 3,
+                _ => open.push(false),
+            },
+            Token::LParen => open.push(false),
+            Token::Lt
+                if i > 0
+                    && matches!(&tokens[i - 1], Token::Word(w) if w.quote_style.is_none()
+                        && matches!(w.keyword, Keyword::ARRAY | Keyword::STRUCT | Keyword::MAP)) =>
+            {
+                open.push(true);
+            }
+            Token::RParen | Token::RBracket if open.last() == Some(&false) => {
+                open.pop();
+            }
+            Token::Gt | Token::ShiftRight => {
+                let n = if matches!(tokens[i], Token::Gt) { 1 } else { 2 };
+                for _ in 0..n {
+                    if open.last() == Some(&true) {
+                        open.pop();
+                    }
+                }
+            }
+            _ => {}
         }
+        suffix = if step > 1 { suffix + 1 } else { 0 };
+        if open.len() + suffix > MAX_BRACKET_DEPTH {
+            return Err(too_bracketed());
+        }
+        i += step;
     }
     Ok(())
 }
 
-fn check_df(stmt: &DfStatement) -> Result<()> {
+pub(crate) fn check_df(stmt: &DfStatement) -> Result<()> {
     match stmt {
         DfStatement::Statement(s) => check_statement(s),
         DfStatement::Explain(e) => check_df(e.statement.as_ref()),
@@ -108,6 +157,87 @@ fn too_nested() -> BurrmillError {
     BurrmillError::NotAllowed(format!(
         "query nests more than {MAX_SET_DEPTH} queries or set operations and cannot be planned"
     ))
+}
+
+fn too_bracketed() -> BurrmillError {
+    BurrmillError::NotAllowed(format!(
+        "statement nests brackets deeper than {MAX_BRACKET_DEPTH} and cannot be parsed"
+    ))
+}
+
+fn too_deep_type() -> BurrmillError {
+    BurrmillError::NotAllowed(format!(
+        "type nests deeper than {MAX_TYPE_DEPTH} and cannot be planned"
+    ))
+}
+
+fn too_many_grouping_sets(n: usize) -> BurrmillError {
+    let n = if n == usize::MAX {
+        "more".to_string()
+    } else {
+        n.to_string()
+    };
+    BurrmillError::NotAllowed(format!(
+        "GROUP BY expands to {n} grouping sets, more than {MAX_GROUPING_SETS}, and cannot be planned"
+    ))
+}
+
+/// The deepest level of `ty`, walked on the heap, past `MAX_TYPE_DEPTH` refused.
+fn check_type(ty: &sq::DataType) -> Result<()> {
+    let mut work = vec![(ty, 1usize)];
+    while let Some((ty, depth)) = work.pop() {
+        if depth > MAX_TYPE_DEPTH {
+            return Err(too_deep_type());
+        }
+        let next = depth + 1;
+        match ty {
+            sq::DataType::Array(
+                sq::ArrayElemTypeDef::AngleBracket(t)
+                | sq::ArrayElemTypeDef::SquareBracket(t, _)
+                | sq::ArrayElemTypeDef::Parenthesis(t),
+            )
+            | sq::DataType::Nullable(t)
+            | sq::DataType::LowCardinality(t) => work.push((t, next)),
+            sq::DataType::Map(k, v) => {
+                work.push((k, next));
+                work.push((v, next));
+            }
+            sq::DataType::Struct(fields, _) | sq::DataType::Tuple(fields) => {
+                work.extend(fields.iter().map(|f| (&f.field_type, next)));
+            }
+            sq::DataType::Union(fields) => {
+                work.extend(fields.iter().map(|f| (&f.field_type, next)));
+            }
+            sq::DataType::Nested(columns)
+            | sq::DataType::Table(Some(columns))
+            | sq::DataType::NamedTable { columns, .. } => {
+                work.extend(columns.iter().map(|c| (&c.data_type, next)));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn written_type(expr: &SqlExpr) -> Option<&sq::DataType> {
+    match expr {
+        SqlExpr::Cast { data_type, .. } => Some(data_type),
+        SqlExpr::TypedString(typed) => Some(&typed.data_type),
+        SqlExpr::Convert { data_type, .. } => data_type.as_ref(),
+        _ => None,
+    }
+}
+
+/// Grouping sets of one `GROUP BY`: the product of each key's, saturating.
+fn grouping_sets(keys: &[SqlExpr]) -> usize {
+    keys.iter()
+        .map(|key| match key {
+            SqlExpr::Cube(sets) => 1usize.checked_shl(sets.len() as u32).unwrap_or(usize::MAX),
+            SqlExpr::Rollup(sets) => sets.len().saturating_add(1),
+            SqlExpr::GroupingSets(sets) => sets.len(),
+            _ => 1,
+        })
+        .fold(1usize, usize::saturating_mul)
 }
 
 enum Work<'a> {
@@ -147,6 +277,9 @@ impl<'a> Walk<'a> {
                     }
                     if self.groups[group] > MAX_EXPR_TERMS {
                         return Err(too_wide());
+                    }
+                    if let Some(ty) = written_type(expr) {
+                        check_type(ty)?;
                     }
                     self.expand(expr, depth, group, nest);
                 }
@@ -255,8 +388,18 @@ impl<'a> Walk<'a> {
                     self.root(limit, root, nest);
                 }
             }
-            sq::Statement::CreateView(view) => self.query_at(&view.query, expr_depth, nest + 1),
+            sq::Statement::CreateView(view) => {
+                for column in &view.columns {
+                    if let Some(ty) = &column.data_type {
+                        check_type(ty)?;
+                    }
+                }
+                self.query_at(&view.query, expr_depth, nest + 1);
+            }
             sq::Statement::CreateTable(table) => {
+                for column in &table.columns {
+                    check_type(&column.data_type)?;
+                }
                 if let Some(query) = &table.query {
                     self.query_at(query, expr_depth, nest + 1);
                 }
@@ -310,7 +453,7 @@ impl<'a> Walk<'a> {
     ) -> Result<()> {
         let root = expr_depth + 1;
         match set {
-            sq::SetExpr::Select(select) => self.select(select, root, nest),
+            sq::SetExpr::Select(select) => self.select(select, root, nest)?,
             sq::SetExpr::Query(query) => self.query_at(query, expr_depth, nest + 1),
             sq::SetExpr::SetOperation { left, right, .. } => {
                 if set_depth > MAX_SET_DEPTH {
@@ -339,7 +482,7 @@ impl<'a> Walk<'a> {
         Ok(())
     }
 
-    fn select(&mut self, select: &'a sq::Select, root: usize, nest: usize) {
+    fn select(&mut self, select: &'a sq::Select, root: usize, nest: usize) -> Result<()> {
         if let Some(sq::Distinct::On(exprs)) = &select.distinct {
             for expr in exprs {
                 self.root(expr, root, nest);
@@ -382,6 +525,10 @@ impl<'a> Walk<'a> {
         }
         match &select.group_by {
             sq::GroupByExpr::Expressions(exprs, modifiers) => {
+                let sets = grouping_sets(exprs);
+                if sets > MAX_GROUPING_SETS {
+                    return Err(too_many_grouping_sets(sets));
+                }
                 for expr in exprs {
                     self.root(expr, root, nest);
                 }
@@ -400,6 +547,7 @@ impl<'a> Walk<'a> {
                 self.window_spec(spec, root, nest);
             }
         }
+        Ok(())
     }
 
     fn group_modifiers(

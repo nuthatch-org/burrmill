@@ -1341,7 +1341,7 @@ fn plan_on_stack(
         std::thread::current().name(),
         Some("burrmill-plan" | "burrmill-statement")
     ));
-    let (stmt, names) = dialect::parse(sql, &session.known_names(), served)?;
+    let (stmt, names) = dialect::parse(sql, &session.known_names(), served, cancel)?;
     refuse_df_statement(&stmt)?;
     refuse_wide_literals(&stmt)?;
     if cancel.is_cancelled() {

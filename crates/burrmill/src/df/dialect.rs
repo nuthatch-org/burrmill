@@ -40,15 +40,26 @@ use sqlparser::dialect::DuckDbDialect;
 
 use crate::error::{BurrmillError, Result};
 
-/// Parse every statement. The set-operation bound is applied here and none of the rewrites are.
+/// Parse every statement. The depth bounds are applied here and none of the rewrites are.
 /// A parse error is [`BurrmillError::Parse`]; the depth check leaves those for the planner.
 pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
+    parse_statements_until(sql, None)
+}
+
+/// As [`parse_statements`], stopped as `Cancelled` once `token` is.
+pub(crate) fn parse_statements_until(
+    sql: &str,
+    token: Option<&crate::CancelToken>,
+) -> Result<Vec<DfStatement>> {
     // Before the parser: sqlparser rejects `[expr FOR x IN list]`, which the views still write.
     let expanded = crate::listcomp::before_parse(sql);
-    super::depth::refuse_set_op_tokens(&expanded)?;
+    super::depth::refuse_deep_tokens(&expanded)?;
     refuse_join_syntax(&expanded)?;
     let (expanded, asof_at) = super::asof::blank(&expanded);
-    let parsed = DFParser::parse_sql_with_dialect(expanded.as_str(), &Duck).map_err(|e| {
+    let parsed = bounded(&expanded, token, || {
+        DFParser::parse_sql_with_dialect(expanded.as_str(), &Duck)
+    })?
+    .map_err(|e| {
         let text = parser_text(&e);
         BurrmillError::Parse(if asof_error(&text) {
             ASOF_REFUSAL.into()
@@ -56,6 +67,10 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
             super::errors::restate(text)
         })
     })?;
+    // Before any recursive walk of the tree.
+    for stmt in &parsed {
+        super::depth::check_df(stmt)?;
+    }
     let asof = parsed.iter().any(|s| match s {
         DfStatement::Statement(s) => crate::walk::walk(s.as_ref(), &mut HasAsof).is_break(),
         _ => false,
@@ -70,6 +85,70 @@ pub(crate) fn parse_statements(sql: &str) -> Result<Vec<DfStatement>> {
         }
     }
     Ok(parsed)
+}
+
+/// Prefix expressions one parse may start, per byte of the statement and in all. sqlparser parses a
+/// reserved word such as `CAST`, `CEIL` or `NOT (` and, when that fails, parses it again as a
+/// function name, so each failing level doubled the work: `CAST(` 48 deep never returned.
+const PARSE_PREFIXES_PER_BYTE: usize = 4;
+const PARSE_PREFIXES_BASE: usize = 4096;
+
+struct ParseBudget {
+    left: usize,
+    token: Option<crate::CancelToken>,
+    stopped: Option<BurrmillError>,
+}
+
+thread_local! {
+    static PARSE_BUDGET: std::cell::RefCell<Option<ParseBudget>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `parse` with [`Duck`] held to a budget of prefix expressions and to `token`. Past either, every
+/// later prefix fails at once, so the backtracking above it unwinds in linear time.
+fn bounded<T>(
+    sql: &str,
+    token: Option<&crate::CancelToken>,
+    parse: impl FnOnce() -> T,
+) -> Result<T> {
+    let budget = ParseBudget {
+        left: PARSE_PREFIXES_BASE.saturating_add(PARSE_PREFIXES_PER_BYTE.saturating_mul(sql.len())),
+        token: token.cloned(),
+        stopped: None,
+    };
+    PARSE_BUDGET.with_borrow_mut(|b| *b = Some(budget));
+    let out = parse();
+    match PARSE_BUDGET
+        .with_borrow_mut(Option::take)
+        .and_then(|b| b.stopped)
+    {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
+}
+
+/// Whether the parse on this thread has run out of budget or been cancelled.
+fn spend_prefix() -> bool {
+    PARSE_BUDGET.with_borrow_mut(|budget| {
+        let Some(b) = budget else {
+            return false;
+        };
+        if b.stopped.is_none() {
+            b.left = b.left.saturating_sub(1);
+            if b.left == 0 {
+                b.stopped = Some(BurrmillError::NotAllowed(
+                    "statement nests too deeply to parse".into(),
+                ));
+            } else if b.left.is_multiple_of(256)
+                && b.token
+                    .as_ref()
+                    .is_some_and(crate::CancelToken::is_cancelled)
+            {
+                b.stopped = Some(BurrmillError::Cancelled);
+            }
+        }
+        b.stopped.is_some()
+    })
 }
 
 /// DuckDB's join syntax sqlparser does not know, refused by name: `POSITIONAL JOIN`, which it read
@@ -219,8 +298,17 @@ impl sq::Visitor for HasAsof {
 pub(crate) fn parse_asof(
     sql: &str,
 ) -> std::result::Result<Vec<sq::Statement>, sqlparser::parser::ParserError> {
+    let refused = |e: BurrmillError| sqlparser::parser::ParserError::ParserError(e.to_string());
+    super::depth::refuse_deep_tokens(sql).map_err(refused)?;
     let (blanked, at) = super::asof::blank(sql);
-    let mut parsed = refuse_asof(sqlparser::parser::Parser::parse_sql(&Duck, &blanked))?;
+    let parsed = bounded(&blanked, None, || {
+        sqlparser::parser::Parser::parse_sql(&Duck, &blanked)
+    })
+    .map_err(refused)?;
+    for s in parsed.iter().flatten() {
+        super::depth::check_statement(s).map_err(refused)?;
+    }
+    let mut parsed = refuse_asof(parsed)?;
     for s in &mut parsed {
         super::asof::mark(s, &at).map_err(sqlparser::parser::ParserError::ParserError)?;
     }
@@ -247,8 +335,13 @@ fn refuse_asof(
 /// names come back too, taken from the statement as written, before any rewrite. `served` first
 /// refuses what the SQL surface does not serve, as [`crate::inspect::unserved`]
 /// would, from the statements as written and this one parse.
-pub fn parse(sql: &str, known: &Known, served: bool) -> Result<(DfStatement, Vec<Option<String>>)> {
-    let mut stmts = parse_statements(sql)?;
+pub fn parse(
+    sql: &str,
+    known: &Known,
+    served: bool,
+    token: &crate::CancelToken,
+) -> Result<(DfStatement, Vec<Option<String>>)> {
+    let mut stmts = parse_statements_until(sql, Some(token))?;
     if served {
         fn written<'a>(s: &'a DfStatement, out: &mut Vec<&'a sq::Statement>) {
             match s {
@@ -369,6 +462,9 @@ impl sqlparser::dialect::Dialect for Duck {
     ) -> Option<std::result::Result<SqlExpr, sqlparser::parser::ParserError>> {
         use sqlparser::keywords::Keyword;
         use sqlparser::tokenizer::Token;
+        if spend_prefix() {
+            return Some(Err(sqlparser::parser::ParserError::RecursionLimitExceeded));
+        }
         let [i, v, u] = parser.peek_tokens::<3>();
         let (Token::Word(i), Token::Word(u)) = (i, u) else {
             return None;
@@ -965,9 +1061,6 @@ fn rewrite(stmt: &mut DfStatement, known: &Known, names: &mut [Option<String>]) 
         DfStatement::Explain(e) => return rewrite(e.statement.as_mut(), known, &mut []),
         _ => return Ok(()),
     };
-    // Before any visitor. Aliases is the first walk, and a set operation descends its left
-    // spine before a visitor can refuse it.
-    super::depth::check_statement(s)?;
     let mut known = known.clone();
     let _ = crate::walk::walk(s.as_ref(), &mut Aliases(&mut known));
     let _ = crate::walk::walk_mut(s.as_mut(), &mut CaseFix(&known));
@@ -4885,6 +4978,16 @@ mod tests {
     use super::Known;
 
     #[test]
+    fn a_parse_stops_once_its_token_is_cancelled() {
+        let columns: Vec<String> = (0..600).map(|i| format!("{i} AS c{i}")).collect();
+        let sql = format!("SELECT {}", columns.join(", "));
+        assert!(super::parse_statements_until(&sql, None).is_ok());
+        let token = crate::CancelToken::under(&[], Some(std::time::Instant::now()));
+        let err = super::parse_statements_until(&sql, Some(&token)).unwrap_err();
+        assert!(matches!(err, crate::BurrmillError::Cancelled), "{err}");
+    }
+
+    #[test]
     fn a_keyword_is_looked_for_in_any_case_and_never_ruled_out_in_other_text() {
         use super::may_hold_keyword as may;
         assert!(may("select 1 UNION all select 2", &["union"]));
@@ -4926,7 +5029,8 @@ mod tests {
             let rewritten = (1..=3).any(|n| {
                 let args = ["a", "b", "c"][..n].join(", ");
                 let sql = format!("SELECT {name}({args}) FROM t");
-                let (stmt, _) = super::parse(&sql, &Known::default(), false).unwrap();
+                let (stmt, _) =
+                    super::parse(&sql, &Known::default(), false, &Default::default()).unwrap();
                 !stmt
                     .to_string()
                     .to_ascii_lowercase()

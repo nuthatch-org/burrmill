@@ -41,7 +41,8 @@ partition's, not the last file's.
 
 ## datafusion-expr 55.3.0
 
-DataFusion's `datafusion-expr` 55.3.0 from crates.io, unchanged except for `src/expr_schema.rs`.
+DataFusion's `datafusion-expr` 55.3.0 from crates.io, unchanged except for `src/expr_schema.rs`
+and `enumerate_grouping_sets` in `src/utils.rs`.
 Every DataFusion crate depends on it, so it cannot be renamed like the parquet source and is taken
 by a `[patch.crates-io]` in the workspace manifest instead. That reaches this workspace only: nuthatch
 gets upstream's crate unless it carries the same patch. The bench's stock DataFusion arm
@@ -60,3 +61,9 @@ with an empty name, where before each carried its own schema name. No function i
 or 55.3 keeps an argument's logical name past the outer rename. With it, fresh statements under
 1,000 rows plan about 11% faster on the dialect corpus (geomean 1.78x DuckDB's p50 to 1.62x, Mac,
 three interleaved pairs, at 55.2.0), and dialect parity is unchanged at 370 cases.
+
+Upstream, `enumerate_grouping_sets` checks its 4,096 grouping-set cap only when `GROUP BY` has more
+than one key, so `GROUP BY CUBE(c1, ..., cn)` alone expanded all 2^n sets at plan time, outside
+the memory budget. The change applies the same cap to a lone `CUBE`, `ROLLUP` or
+`GROUPING SETS`. burrmill refuses those before DataFusion plans too, so nuthatch, which gets
+upstream's crate, is held to the cap as well.
