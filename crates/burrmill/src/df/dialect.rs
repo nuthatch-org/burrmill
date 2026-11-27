@@ -2304,6 +2304,31 @@ fn null_separator(f: &mut sq::Function) {
     }
 }
 
+/// DuckDB names the parameter of `avg` and `sum`, `avg(x := v)` and `sum(arg := v)`; DataFusion's
+/// aggregates take no names, so the name is dropped (#421,
+/// test/sql/aggregate/aggregates/test_decimal_aggregate_named_argument.test:5).
+fn parameter_names(f: &mut sq::Function) {
+    let param = match f.name.to_string().to_ascii_lowercase().as_str() {
+        "avg" => "x",
+        "sum" => "arg",
+        _ => return,
+    };
+    let sq::FunctionArguments::List(l) = &mut f.args else {
+        return;
+    };
+    if let [a] = l.args.as_mut_slice()
+        && let sq::FunctionArg::Named {
+            name,
+            arg,
+            operator: sq::FunctionArgOperator::Assignment,
+        } = a
+        && name.quote_style.is_none()
+        && name.value.eq_ignore_ascii_case(param)
+    {
+        *a = sq::FunctionArg::Unnamed(arg.clone());
+    }
+}
+
 /// A select item that [`null_separator`] rewrites keeps its name, which two such items would
 /// otherwise share.
 fn name_null_separators(s: &mut sq::Select) {
@@ -2794,6 +2819,7 @@ impl VisitorMut for Rewriter {
                 }
             }
             nulls_last(&mut f.within_group);
+            parameter_names(f);
             rename_function(f);
             // sqlparser's DuckDB dialect reads `f(flag = 'true')` as a named argument; DuckDB, in an
             // expression, reads a comparison.

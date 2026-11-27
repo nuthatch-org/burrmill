@@ -366,3 +366,18 @@ fn a_window_over_a_column_in_group_by_all_is_duckdb_s_binder_error() {
         ]
     );
 }
+
+/// `avg(x := v)` and `sum(arg := v)` name DuckDB's parameters; DataFusion refused any name
+/// (test/sql/aggregate/aggregates/test_decimal_aggregate_named_argument.test:5).
+#[test]
+fn avg_and_sum_take_their_parameter_names() {
+    let e = Engine::open_empty().unwrap();
+    assert_eq!(
+        rows(
+            &e,
+            "SELECT avg(x := i) AS a, sum(arg := i) AS s FROM range(3) t(i)"
+        ),
+        rows(&e, "SELECT avg(i) AS a, sum(i) AS s FROM range(3) t(i)")
+    );
+    assert!(e.sql("SELECT avg(y := 1)").is_err());
+}
