@@ -151,6 +151,20 @@ fn spend_prefix() -> bool {
     })
 }
 
+/// `sql` parsed by [`Duck`] under the same bounds and budget as a query, but without the
+/// rewrites [`parse_statements`] makes before its parse.
+pub(crate) fn parse_written(sql: &str) -> Result<Vec<sq::Statement>> {
+    super::depth::refuse_deep_tokens(sql)?;
+    let parsed = bounded(sql, None, || {
+        sqlparser::parser::Parser::parse_sql(&Duck, sql)
+    })?
+    .map_err(|e| BurrmillError::Parse(e.to_string()))?;
+    for s in &parsed {
+        super::depth::check_statement(s)?;
+    }
+    Ok(parsed)
+}
+
 /// DuckDB's join syntax sqlparser does not know, refused by name: `POSITIONAL JOIN`, which it read
 /// as the left relation's alias `POSITIONAL` and a bare `JOIN`, a cross join of every row with
 /// every row; `JOIN BY (TYPE MARK)` and the other explicit join types; and `NEAREST n BY`.
