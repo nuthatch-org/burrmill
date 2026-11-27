@@ -22,7 +22,7 @@
 //! scan, and over keys scattered through every page the reader spares little of the other columns'
 //! decoding. TPC-H Q3 probes `lineitem` with a year of orders and `orders` with a segment's
 //! customers; in the reader at SF10 those scans took 2.59 s and 1.03 s of CPU, 1.28 s and 0.43 s of
-//! it the row filter, and the statement 686 ms at best, against 416 ms with both filters left to
+//! it the row filter, and the statement 593–629 ms, against 387–397 ms with both filters left to
 //! the joins (#433). Through another join it is: Q7's `orders` scan holds the filter of the join to
 //! the customers above the join to `lineitem`, and in the reader it cut what that join built on
 //! from 15.00M orders to 1.21M.

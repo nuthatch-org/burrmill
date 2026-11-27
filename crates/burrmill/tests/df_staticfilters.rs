@@ -158,8 +158,8 @@ fn a_text_column_read_besides_still_filters_in_the_reader() {
 /// TPC-H Q3's shape: a join's filter on a scan the join probes directly, with a fixed-width column
 /// read besides. At SF10 Q3's `lineitem` scan, with the filter of its join to a year of orders,
 /// and its `orders` scan, with that of the join to a segment's customers, took 2.59 s and 1.03 s of
-/// CPU in the reader, 1.28 s and 0.43 s of it the row filter, and the statement 686 ms at best;
-/// with the filters left to the joins, 416 ms (#433).
+/// CPU in the reader, 1.28 s and 0.43 s of it the row filter, and the statement 593–629 ms; with
+/// the filters left to the joins, 387–397 ms (#433).
 #[test]
 fn a_join_filter_from_the_join_it_feeds_filters_above_the_reader() {
     let tmp = tempfile::tempdir().unwrap();

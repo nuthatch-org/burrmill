@@ -8,6 +8,20 @@ version number promises.
 A release that changes any receipt in `corpus/receipts/receipts.jsonl` says which, and why, in its
 entry: a receipt someone kept stops verifying on that release (`tests/receipt_corpus.rs`).
 
+## Unreleased
+
+Engine (`burrmill`, feature `datafusion`)
+
+- A hash join's dynamic filter on a Parquet scan the join probes directly, through filters,
+  projections and repartitions alone, is left to the join rather than evaluated in the reader
+  (#433). TPC-H Q3's `lineitem` and `orders` scans held the filters of the joins straight above
+  them, and in the reader took 2.59 s and 1.03 s of CPU at SF10, 1.28 s and 0.43 s of it the row
+  filter. Q3 at SF10 went from 593–629 ms to 387–397 ms, from 2.60x–3.01x DuckDB 2.0.1 to
+  1.66x–1.82x; of the other plans that change, Q11 went from 1.86x–1.97x to 1.02x–1.09x and Q13
+  from 1.50x–1.95x to 1.05x–1.08x. A join's filter that reaches a scan through another join, as
+  the filter of Q7's join to its customers reaches `orders` through the join to `lineitem`, keeps
+  its row filter, and so does a scan that keeps one for any other reason.
+
 ## 0.5.0 - 2026-11-27
 
 Prebuilt `burrmill` binaries for five targets, as a GitHub Release. What changed since 0.4.0:
