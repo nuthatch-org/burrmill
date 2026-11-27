@@ -99,8 +99,8 @@ fn join_filters(plan: &Arc<dyn ExecutionPlan>) -> Result<JoinFilters> {
 }
 
 /// The scan under a join's probe side `p`, where the rows it gives reach the join through filters,
-/// projections, repartitions and the catalogue's `CancelExec` alone. A join's filter that reaches a scan through another join
-/// or an aggregate does not.
+/// projections, repartitions and the catalogue's `CancelExec` alone. A join's filter that reaches a
+/// scan through another join or an aggregate does not.
 fn probed_scan(p: &Arc<dyn ExecutionPlan>) -> Option<&Arc<dyn ExecutionPlan>> {
     if p.is::<DataSourceExec>() {
         return Some(p);
