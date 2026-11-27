@@ -203,7 +203,18 @@ pub fn enumerate_grouping_sets(group_expr: Vec<Expr>) -> Result<Vec<Expr>> {
     let has_grouping_set = group_expr
         .iter()
         .any(|expr| matches!(expr, Expr::GroupingSet(_)));
-    if !has_grouping_set || group_expr.len() == 1 {
+    if !has_grouping_set {
+        return Ok(group_expr);
+    }
+    if let [Expr::GroupingSet(set)] = group_expr.as_slice() {
+        let sets = match set {
+            GroupingSet::GroupingSets(sets) => sets.len(),
+            GroupingSet::Cube(exprs) => {
+                1usize.checked_shl(exprs.len() as u32).unwrap_or(usize::MAX)
+            }
+            GroupingSet::Rollup(exprs) => exprs.len().saturating_add(1),
+        };
+        check_grouping_sets_size_limit(sets)?;
         return Ok(group_expr);
     }
     // Only process mix grouping sets

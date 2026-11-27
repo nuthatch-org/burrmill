@@ -120,9 +120,13 @@ pub(super) fn engine_version() -> String {
 }
 
 /// The statement as the parser prints it, so whitespace and comments are not part of it.
+/// A statement the query path refuses, a parse error included, is left as written for the planner
+/// to refuse; no parse here goes without the query path's budget.
 pub(super) fn normalised(sql: &str) -> String {
-    use sqlparser::dialect::DuckDbDialect;
-    match sqlparser::parser::Parser::parse_sql(&DuckDbDialect {}, sql) {
+    if super::dialect::parse_statements(sql).is_err() {
+        return sql.trim().to_string();
+    }
+    match super::dialect::parse_written(sql) {
         Ok(s) if s.len() == 1 => s[0].to_string(),
         _ => sql.trim().to_string(),
     }
@@ -306,5 +310,27 @@ mod tests {
     #[test]
     fn a_statement_is_normalised_by_its_parse() {
         assert_eq!(normalised("select  1 -- why\n"), normalised("SELECT 1"));
+    }
+
+    #[test]
+    fn a_statement_the_query_path_refuses_is_left_as_written_quickly() {
+        let mut cast = "1".to_string();
+        for _ in 0..48 {
+            cast = format!("CAST({cast} AS BIGINT)");
+        }
+        for sql in [
+            format!("SELECT {cast} AS n FROM a POSITIONAL JOIN b"),
+            format!("SELECT {cast} AS n"),
+        ] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let written = sql.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(normalised(&written));
+            });
+            let got = rx
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .expect("normalising did not return within 20 s");
+            assert_eq!(got, sql);
+        }
     }
 }

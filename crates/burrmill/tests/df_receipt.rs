@@ -174,3 +174,25 @@ fn a_receipt_needs_deterministic_mode_and_hashable_inputs() {
     assert!(r.inputs.is_empty());
     e.verify_receipt(&r).unwrap();
 }
+
+#[test]
+fn a_statement_too_deep_to_parse_is_refused_quickly_with_a_receipt() {
+    let mut cast = "1".to_string();
+    for _ in 0..48 {
+        cast = format!("CAST({cast} AS BIGINT)");
+    }
+    for sql in [
+        format!("SELECT {cast} AS n FROM a POSITIONAL JOIN b"),
+        format!("SELECT {cast} AS n"),
+    ] {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let e = deterministic(Engine::builder().open().unwrap());
+            let _ = tx.send(e.sql_receipt(&sql).map(|_| ()));
+        });
+        let r = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the receipt did not return within 20 s");
+        assert!(r.is_err());
+    }
+}
