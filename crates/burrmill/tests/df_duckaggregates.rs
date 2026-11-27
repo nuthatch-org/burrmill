@@ -175,3 +175,49 @@ fn export_state_is_refused_by_name() {
         vec![json!({"export_state": 1})]
     );
 }
+
+/// `regr_slope` and `regr_r2` as DuckDB answers them: a slope over no spread in `x` is NaN, an R²
+/// over no spread in `y` is 1, and an R² whose `y` spread overflows is 0; DataFusion's were NULL,
+/// NULL and NaN (test/sql/aggregate/aggregates/test_regression.test:69, 93, 98, 108).
+#[test]
+fn regression_slope_and_r2_answer_as_duckdb() {
+    let e = Engine::open_empty().unwrap();
+    let one = |sql: &str| -> Value {
+        let got = rows(&e, &format!("SELECT {sql} AS v"));
+        got[0]["v"].clone()
+    };
+    let float = |sql: &str| -> Option<f64> {
+        let v = one(sql);
+        match v {
+            Value::Null => None,
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => Some(s.parse().unwrap_or_else(|_| panic!("{sql}: {s}"))),
+            v => panic!("{sql}: {v}"),
+        }
+    };
+    assert_eq!(one("isnan(regr_slope(1, 1))"), json!(true));
+    assert_eq!(float("regr_slope(NULL, NULL)"), None);
+    assert_eq!(float("regr_r2(NULL, NULL)"), None);
+    assert_eq!(float("regr_r2(1, 1)"), None);
+    let range = |agg: &str| float(&format!("(SELECT {agg} FROM range(5) t(i))"));
+    assert_eq!(range("regr_r2(0, i)"), Some(1.0));
+    assert_eq!(range("regr_r2(0, 1e230 * i)"), Some(1.0));
+    assert_eq!(range("regr_r2(1e230 * i, i)"), Some(0.0));
+    assert_eq!(range("regr_r2(1e230 * i, 0)"), None);
+    // Where both have spread, the answers are as they were.
+    assert_eq!(range("regr_slope(2 * i + 1, i)"), Some(2.0));
+    assert!((range("regr_r2(2 * i + 1, i)").unwrap() - 1.0).abs() < 1e-12);
+    // Over groups, a pair with a NULL is no pair.
+    assert_eq!(
+        rows(
+            &e,
+            "SELECT g, regr_slope(y, x) IS NULL AS null_slope, isnan(regr_slope(y, x)) AS nan_slope \
+             FROM (VALUES (1, 1.0, 1.0), (1, 2.0, NULL), (2, NULL, 3.0)) t(g, y, x) \
+             GROUP BY g ORDER BY g"
+        ),
+        vec![
+            json!({"g": 1, "null_slope": false, "nan_slope": true}),
+            json!({"g": 2, "null_slope": true, "nan_slope": null}),
+        ]
+    );
+}

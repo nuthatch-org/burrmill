@@ -88,6 +88,7 @@ mod ordered_agg;
 mod printf;
 mod rangebounds;
 mod rangejoin;
+mod regr;
 mod requirements;
 mod rowcounts;
 mod rule;
