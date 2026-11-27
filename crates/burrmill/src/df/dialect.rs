@@ -2410,6 +2410,101 @@ fn distinct_on(s: &mut sq::Select) -> std::result::Result<(), (bool, String)> {
     Ok(())
 }
 
+/// DuckDB's `DISTINCT ON (k) ... ORDER BY o` keeps, for each `k`, the first row by `o`, in any
+/// order of keys; DataFusion takes only an `ORDER BY` that starts with `k` (#421,
+/// test/sql/aggregate/distinct/distinct_on_order_by.test:24). Where it does not, the `DISTINCT ON`
+/// is written as `QUALIFY row_number() OVER (PARTITION BY k ORDER BY o) = 1`, which leaves the
+/// select list as it is. A position or a select item's alias in `o` is the item's expression, as
+/// the window reads neither. Not where the query has a `QUALIFY` of its own, which DuckDB applies
+/// first.
+fn distinct_on_order(q: &mut sq::Query) -> std::result::Result<(), (bool, String)> {
+    let sq::SetExpr::Select(s) = q.body.as_mut() else {
+        return Ok(());
+    };
+    if !matches!(s.distinct, Some(sq::Distinct::On(_))) || s.qualify.is_some() {
+        return Ok(());
+    }
+    let Some(sq::OrderBy {
+        kind: sq::OrderByKind::Expressions(order),
+        ..
+    }) = &q.order_by
+    else {
+        return Ok(());
+    };
+    distinct_on(s)?;
+    let items: Option<Vec<(Option<&sq::Ident>, &SqlExpr)>> = s
+        .projection
+        .iter()
+        .map(|i| match i {
+            sq::SelectItem::UnnamedExpr(e) => Some((None, e)),
+            sq::SelectItem::ExprWithAlias { expr, alias } => Some((Some(alias), expr)),
+            _ => None,
+        })
+        .collect();
+    let mut resolved = Vec::with_capacity(order.len());
+    for o in order {
+        let expr = match (&o.expr, &items) {
+            (SqlExpr::Value(v), _) if matches!(v.value, sq::Value::Number(..)) => {
+                let sq::Value::Number(n, _) = &v.value else {
+                    unreachable!()
+                };
+                // A position needs the items; out of range, DataFusion's own error stands.
+                let Some(items) = &items else { return Ok(()) };
+                match n
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|i| items.get(i.checked_sub(1)?))
+                {
+                    Some((_, e)) => (*e).clone(),
+                    None => return Ok(()),
+                }
+            }
+            (SqlExpr::Identifier(id), Some(items)) => items
+                .iter()
+                .find(|(a, _)| a.is_some_and(|a| a.value.eq_ignore_ascii_case(&id.value)))
+                .map_or_else(|| o.expr.clone(), |(_, e)| (*e).clone()),
+            (e, _) => e.clone(),
+        };
+        resolved.push(sq::OrderByExpr {
+            expr,
+            options: o.options,
+            with_fill: None,
+        });
+    }
+    let Some(sq::Distinct::On(keys)) = &s.distinct else {
+        return Ok(());
+    };
+    if keys.iter().zip(&resolved).all(|(k, o)| *k == o.expr) {
+        return Ok(());
+    }
+    let window = SqlExpr::Function(sq::Function {
+        name: sq::ObjectName::from(vec![sq::Ident::new("row_number")]),
+        uses_odbc_syntax: false,
+        parameters: sq::FunctionArguments::None,
+        args: sq::FunctionArguments::List(sq::FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![],
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: Some(sq::WindowType::WindowSpec(sq::WindowSpec {
+            window_name: None,
+            partition_by: keys.clone(),
+            order_by: resolved,
+            window_frame: None,
+        })),
+        within_group: vec![],
+    });
+    s.qualify = Some(binop(
+        window,
+        BinaryOperator::Eq,
+        SqlExpr::Value(sq::Value::Number("1".into(), false).into()),
+    ));
+    s.distinct = None;
+    Ok(())
+}
+
 /// DuckDB's `f(x) EXPORT_STATE` answers the aggregate's state, not its value; sqlparser reads the
 /// keyword as the column's alias, and the value was answered (#421,
 /// test/sql/aggregate/aggregate_state_export/ordered_aggregate_export_state.test:48). Where the
@@ -2752,6 +2847,17 @@ impl VisitorMut for Rewriter {
                 .flatten()
         {
             v.value = sq::Value::Number(format!("{}", rounded.round() as u64), false);
+        }
+        match distinct_on_order(q) {
+            Ok(()) => {}
+            Err((true, why)) => {
+                self.binder = Some(why);
+                return ControlFlow::Break(());
+            }
+            Err((false, why)) => {
+                self.refused = Some(why);
+                return ControlFlow::Break(());
+            }
         }
         // DataFusion takes `ORDER BY ALL` only over bare columns; DuckDB orders by every output
         // column left to right, which is `ORDER BY 1, ..., n`.

@@ -382,6 +382,44 @@ fn avg_and_sum_take_their_parameter_names() {
     assert!(e.sql("SELECT avg(y := 1)").is_err());
 }
 
+/// `DISTINCT ON (k) ... ORDER BY o`, where `o` does not start with `k`, keeps the first row of each
+/// `k` by `o`, as DuckDB does; DataFusion refused the order
+/// (test/sql/aggregate/distinct/distinct_on_order_by.test:24, distinct_on_nulls.test:11).
+#[test]
+fn distinct_on_takes_the_first_row_by_any_order() {
+    let e = Engine::open_empty().unwrap();
+    let t = "(VALUES (2, 3, 1), (4, 5, 9), (2, 7, 0), (4, 1, 5)) t(i, j, k)";
+    for (sql, want) in [
+        (
+            format!("SELECT DISTINCT ON (i) i, j FROM {t} ORDER BY j"),
+            vec![json!({"i": 4, "j": 1}), json!({"i": 2, "j": 3})],
+        ),
+        (
+            format!("SELECT DISTINCT ON (i) i, j FROM {t} ORDER BY j DESC"),
+            vec![json!({"i": 2, "j": 7}), json!({"i": 4, "j": 5})],
+        ),
+        (
+            format!("SELECT DISTINCT ON (i) i, j FROM {t} ORDER BY k"),
+            vec![json!({"i": 2, "j": 7}), json!({"i": 4, "j": 1})],
+        ),
+        (
+            format!("SELECT DISTINCT ON (1) i AS a, j AS b FROM {t} ORDER BY b DESC"),
+            vec![json!({"a": 2, "b": 7}), json!({"a": 4, "b": 5})],
+        ),
+        (
+            format!("SELECT DISTINCT ON (i) i, j FROM {t} ORDER BY 2 DESC LIMIT 1"),
+            vec![json!({"i": 2, "j": 7})],
+        ),
+        // An order that starts with the keys is DataFusion's own.
+        (
+            format!("SELECT DISTINCT ON (i) i, j FROM {t} ORDER BY i, j"),
+            vec![json!({"i": 2, "j": 3}), json!({"i": 4, "j": 1})],
+        ),
+    ] {
+        assert_eq!(rows(&e, &sql), want, "{sql}");
+    }
+}
+
 /// A boolean or NULL as a query's ordering or `DISTINCT ON` key is DuckDB's binder error, as a
 /// string is; in an aggregate's `ORDER BY` it is taken
 /// (test/sql/order/test_order_by_non_ordinal_literal.test:23, 75, 86).
