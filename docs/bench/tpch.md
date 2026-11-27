@@ -46,6 +46,9 @@ region and its `lineitem` join collected ([below](#q5-the-regions-nations-reach-
 Q4 is now 1.76x to 2.08x at SF10, from 3.07x to 3.19x, and Q22 1.56x to 1.70x, from 3.15x to 3.27x,
 a join's filter over a scan of only its predicate's columns left to the join
 ([below](#q4-again-the-joins-filter-left-to-the-join-433)).
+Q3 is now 1.66x to 1.82x at SF10, from 2.60x to 3.01x, the filters of the joins that probe its
+`lineitem` and `orders` scans left to those joins
+([below](#q3-the-filters-of-the-joins-it-feeds-left-to-the-joins-433)).
 
 **Against datafusion-cli it is faster on four at SF10** (7, 15, 18, 19) and within 1.5x on 13 of
 the 21 it answers. It is the same DataFusion underneath, so that gap is Burrmill's own. Where it
@@ -930,6 +933,102 @@ as above. Before, the widest ratios were Q22 at 3.54x, Q4 at 3.23x, Q7 at 2.97x 
 After, they were Q3 at 2.97x (771 ms against 260), Q7 at 2.92x, Q2 at 2.62x, Q18 at 2.46x and Q6 at
 2.34x; Q4 was at 1.95x and Q22 at 1.76x. No other plan changed, so the other differences are the
 load's.
+
+## Q3: the filters of the joins it feeds left to the joins (#433)
+
+Q3 was the widest ratio at SF10 in the run of all 22 for #469, 2.97x. On 0b7b533, with the DuckDB
+2.0.1 CLI downloaded for this, Q3 alone at SF10, best of 5, took 623, 505 and 509 ms against
+DuckDB's 199, 208 and 216, 2.36x to 3.13x, and Q7 589 to 598 ms, 2.21x to 2.33x, at loads of 3.47
+to 7.80 (22:38:28 to 22:38:58). Q3 was still the wider.
+
+**The cause.** Burrmill and DuckDB 2.0.1 run the same plan: `customer`'s `BUILDING` segment is the
+build side of the join to `orders`, the orders before 1995-03-15 that join keeps are the build side
+of the join to `lineitem`, and the 114K groups go to a top 10. In their `EXPLAIN ANALYZE`s the
+scans give the same rows: 300.3K customers, 1.46M orders and 302.1K `lineitem` rows. The difference
+is in the two large scans. In Burrmill's at SF10 on 0b7b533 (load 6.60, 22:39:07), both joins are
+partitioned, so each scan holds its join's dynamic filter as a `CASE` over each row's repartition
+hash, and `StaticRowFilters` kept it in the Parquet reader, since both read fixed-width columns
+their predicates do not (`l_extendedprice` and `l_discount`, `o_orderkey` and `o_shippriority`).
+The `lineitem` scan took 2.59 s of CPU, 1.28 s of it the row filter, and the `orders` scan 1.03 s,
+0.43 s of it the row filter. In DuckDB 2.0.1's (load 3.14, 22:40:00) those scans took 960 ms and
+520 ms. The filter's join is the operator straight above each scan, and it drops the same rows
+there; the keys it keeps are scattered through every page, so the reader spares little of the other
+columns' decoding.
+
+**The A/B.** With a build only for this that turned the reader's row filter off by column name, Q3
+took 413 and 405 ms against 555 and 524 with it on, two rounds alternating, best of 5, Burrmill
+alone, loads 5.19 to 7.48 (22:50:15 to 22:50:44). Collecting both joins as well took 361 and 369,
+and collecting them with the row filter on, 503 and 458; seven more rounds at loads of 9.92 to
+13.28 did not separate collecting from not, so it is not taken here. In the `EXPLAIN ANALYZE` of
+the row filter off (load 6.48, 22:50:55), the `lineitem` scan gave all 59.99M rows in 1.39 s of CPU,
+the filter above it took 217 ms to keep 32.33M and the join 355 ms; the `orders` scan took 452 ms,
+its filter 79 ms and its join 194 ms. Turning the reader's row filter off for every scan whose
+predicate holds only joins' filters, with nothing else to keep it, changed scans in 13 of the 21
+plans, and in three rounds alternating at loads of 10.62 to 30.77 (23:00:45 to 23:06:38) Q7 was
+slower in each, 729–876 ms against 866–1,083. Its `orders` scan holds the filter of the join to the customers, which reaches
+it through the join to `lineitem`: in the reader it cut that join's build side to 1.21M orders, and
+left to its join, that join built on all 15.00M and the joins above carried 18.23M rows where they
+had carried 117.0K (load 29.11, 23:06:47).
+
+**The fix.** A join's dynamic filter keeps a scan's row filter in the reader only where it reaches
+the scan through another join. Where the join probes the scan through filters, projections and
+repartitions alone, the filter is left to the join, as the scan's own `WHERE` is where nothing else
+keeps it in the reader: a top-k's filter, an equality with a literal, or an unread column that is
+not fixed-width still does, and #469's scans of only their predicates' columns are unchanged. Of the
+21 plans other than Q21's, eight change at SF1 and at SF10, all in where scans evaluate their
+predicates: Q3's `lineitem` and `orders`, Q5's `nation`, `customer`, `orders` and `lineitem`, Q10's
+and Q13's `orders`, Q11's and Q16's `partsupp`, and Q14's and Q17's `lineitem`. In
+`crates/burrmill/tests/df_staticfilters.rs`,
+`a_join_filter_from_the_join_it_feeds_filters_above_the_reader` fails on 0b7b533, and
+`a_join_filter_through_another_join_still_filters_in_the_reader` fails with every join's filter
+left to its join.
+
+**Measured** 2026-11-27 on db35a72 against 0b7b533, on the ThinkPad as above, 8 threads, 2 GiB, no
+spill directory: three rounds per scale factor, before then after, each the best of 5 for Burrmill
+and for the DuckDB 2.0.1 CLI in the same process. The wait for the load to fall under 8 ended at
+23:28:15 (7.97). Every answer was the same as DuckDB's.
+
+| SF | round | 1-minute load, start / end | DuckDB 2.0.1 ms | before ms | ratio | DuckDB 2.0.1 ms | after ms | ratio | Burrmill peak RSS MiB, before / after |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| 10 | 1 | 7.42 / 7.97 | 209 | 629 | 3.01x | 213 | 387 | 1.82x | 474 / 526 |
+| 10 | 2 | 7.97 / 8.21 | 222 | 593 | 2.67x | 218 | 397 | 1.82x | 490 / 533 |
+| 10 | 3 | 8.21 / 8.28 | 233 | 606 | 2.60x | 235 | 391 | 1.66x | 487 / 534 |
+| 1 | 1 | 8.28 / 7.77 | 32 | 68 | 2.12x | 32 | 47 | 1.47x | 367 / 416 |
+| 1 | 2 | 7.77 / 7.77 | 32 | 67 | 2.09x | 33 | 50 | 1.52x | 365 / 421 |
+| 1 | 3 | 7.77 / 7.77 | 33 | 67 | 2.04x | 34 | 46 | 1.37x | 369 / 419 |
+
+Q3 at SF10 went from 2.60x–3.01x DuckDB 2.0.1 to 1.66x–1.82x, and at SF1 from 2.04x–2.12x to
+1.37x–1.52x. Its peak RSS rose by about 50 MiB, the scans' batches now holding every row they read.
+
+The same rounds timed the other plans that change, at SF10, best of 5, loads 7.68 to 13.98 (23:29:00
+to 23:32:08); every answer was the same:
+
+| Q | DuckDB 2.0.1 ms, before | before ms | ratio | DuckDB 2.0.1 ms, after | after ms | ratio |
+|---|---|---|---|---|---|---|
+| 5 | 263, 264, 251 | 441, 516, 447 | 1.68x–1.96x | 253, 275, 260 | 404, 405, 416 | 1.47x–1.60x |
+| 10 | 299, 289, 298 | 749, 747, 731 | 2.45x–2.58x | 283, 296, 315 | 694, 691, 917 | 2.33x–2.91x |
+| 11 | 75, 82, 77 | 141, 153, 152 | 1.86x–1.97x | 79, 70, 76 | 86, 76, 78 | 1.02x–1.09x |
+| 13 | 523, 570, 527 | 784, 989, 1,028 | 1.50x–1.95x | 522, 556, 522 | 565, 586, 556 | 1.05x–1.08x |
+| 14 | 247, 203, 199 | 417, 343, 367 | 1.69x–1.85x | 246, 195, 267 | 314, 352, 357 | 1.28x–1.80x |
+| 16 | 101, 101, 94 | 140, 145, 133 | 1.39x–1.43x | 98, 95, 90 | 142, 132, 126 | 1.39x–1.45x |
+| 17 | 317, 401, 390 | 495, 632, 593 | 1.52x–1.58x | 340, 377, 459 | 753, 582, 686 | 1.49x–2.22x |
+
+Q10 and Q17 differ within what the load moves, one round of each 2.9x and 2.2x as it rose; four
+more rounds of Burrmill alone, alternating, at loads of 5.46 to 11.22 (23:33:08 to 23:34:19), took
+685, 911, 860 and 933 ms before and 656, 912, 915 and 945 after for Q10, and 453, 448, 493 and 501
+before and 414, 473, 506 and 527 after for Q17. Q17's `lineitem` scan, whose only predicate is the
+filter of a collected join to 2,040 parts, now gives all 59.99M rows and its join probes them:
+1.28 s of CPU in the scan and 203 ms in the join, against 1.41 s in the scan before, and its peak
+RSS rose from about 370 MiB to 440.
+
+**All 22 before and after**, at SF10, best of 3, DuckDB 2.0.1 in the same process, 0b7b533 then
+db35a72 straight after it. The load was 10.82 at the start (23:34:31), 15.68 between them and
+14.12 at the end (23:37:20). All 21 answers given were the same as DuckDB's in both, and Q21 was
+refused as above; at SF1, one run at loads of 13.47 to 12.56 (23:37:26 to 23:37:36), all 22 were
+the same. Before, the widest ratios were Q18 at 3.29x, Q7 at 3.11x, Q10 at 2.66x and Q3 at 2.65x.
+After, they were Q2 at 2.67x (332 ms against 124), Q10 at 2.66x, Q7 at 2.51x, Q19 at 2.41x and Q12
+at 2.40x; Q3 was at 1.84x. Q2, Q7, Q12, Q18 and Q19 have the same plans in both, so their
+differences are the load's.
 
 ## Spilling: Q21 under 2 GiB (#383)
 

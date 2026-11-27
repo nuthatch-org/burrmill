@@ -155,14 +155,41 @@ fn a_text_column_read_besides_still_filters_in_the_reader() {
     assert_ne!(pruned_in_reader(&e, sql), "0", "{sql}");
 }
 
+/// TPC-H Q3's shape: a join's filter on a scan the join probes directly, with a fixed-width column
+/// read besides. At SF10 Q3's `lineitem` scan, with the filter of its join to a year of orders,
+/// and its `orders` scan, with that of the join to a segment's customers, took 2.59 s and 1.03 s of
+/// CPU in the reader, 1.28 s and 0.43 s of it the row filter, and the statement 593–629 ms; with
+/// the filters left to the joins, 387–397 ms (#433).
 #[test]
-fn a_join_filter_still_filters_in_the_reader() {
+fn a_join_filter_from_the_join_it_feeds_filters_above_the_reader() {
     let tmp = tempfile::tempdir().unwrap();
     let e = engine(tmp.path());
     let sql = "SELECT count(*) AS c, CAST(sum(price) AS BIGINT) AS s FROM rows r JOIN keys k ON k.k = r.n \
                WHERE r.d >= 0 AND r.d < 100";
     let (c, s) = expected(|n, _, _| n % 100 == 0);
     assert_eq!(answer(&e, sql), [format!(r#"{{"c":{c},"s":{s}}}"#)]);
+    let scan = rows_scan(&e, sql);
+    assert!(scan.contains("DynamicFilter"), "no join filter in {scan}");
+    assert_eq!(pruned_in_reader(&e, sql), "0", "the reader evaluated {sql}");
+}
+
+/// TPC-H Q7's shape: a join's filter that reaches the scan through another join. In the reader it
+/// cuts what the join between them holds and carries: at SF10 Q7's `orders` scan, with the filter
+/// of the join to the customers above the join to `lineitem`, gave that join 1.21M orders to
+/// build on, and 15.00M with the filter left to the join, and its joins carried 18.23M rows where
+/// they had carried 117.0K (#433).
+#[test]
+fn a_join_filter_through_another_join_still_filters_in_the_reader() {
+    let tmp = tempfile::tempdir().unwrap();
+    let e = engine(tmp.path());
+    let sql = "SELECT count(*) AS c, CAST(sum(price) AS BIGINT) AS s \
+               FROM rows r JOIN keys a ON a.k = r.d JOIN keys b ON b.k = r.n \
+               WHERE r.q >= 0 AND r.q < 50";
+    let (c, s) = expected(|n, d, _| n % 100 == 0 && d == 0);
+    assert!(c > 0, "{c}");
+    assert_eq!(answer(&e, sql), [format!(r#"{{"c":{c},"s":{s}}}"#)]);
+    let scan = rows_scan(&e, sql);
+    assert_eq!(scan.matches("DynamicFilter").count(), 2, "{scan}");
     assert_ne!(pruned_in_reader(&e, sql), "0", "{sql}");
 }
 
