@@ -628,21 +628,21 @@ fn nested_struct_and_angle_bracket_types_are_refused_before_the_parser() {
         wrapped("ARRAY<", ">", 7000, "INT"),
     ] {
         let err = refusal(&format!("SELECT CAST(NULL AS {ty}) AS n"));
-        assert!(err.contains("brackets deeper than 64"), "{err}");
+        assert!(err.contains("brackets deeper than 128"), "{err}");
     }
 }
 
 #[test]
-fn type_depth_allows_32_and_refuses_33() {
+fn type_depth_allows_64_and_refuses_65() {
     let array = |levels: usize| format!("SELECT CAST(NULL AS INT{}) AS n", "[]".repeat(levels - 1));
-    assert!(Engine::open_empty().unwrap().sql(&array(32)).is_ok());
-    let err = refusal(&array(33));
-    assert!(err.contains("type nests deeper than 32"), "{err}");
-    // Under the bracket bound, but 31 suffixes on each of two levels.
-    let suffixes = "[]".repeat(31);
+    assert!(Engine::open_empty().unwrap().sql(&array(64)).is_ok());
+    let err = refusal(&array(65));
+    assert!(err.contains("type nests deeper than 64"), "{err}");
+    // Under the bracket bound, but 63 suffixes on each of two levels.
+    let suffixes = "[]".repeat(63);
     let sql = format!("SELECT CAST(NULL AS STRUCT(a INT{suffixes}){suffixes}) AS n");
     let err = refusal(&sql);
-    assert!(err.contains("type nests deeper than 32"), "{err}");
+    assert!(err.contains("type nests deeper than 64"), "{err}");
 }
 
 fn cube(keys: &[usize]) -> String {

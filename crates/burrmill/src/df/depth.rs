@@ -22,10 +22,12 @@ const MAX_SET_DEPTH: usize = 64;
 const MAX_RELATIONS: usize = 96;
 /// Brackets open at once, counting each `[]` of a type suffix as one more. sqlparser parses a
 /// nested `STRUCT(...)` without its recursion limit and builds `INT[]...[]` in a loop, so either
-/// overflowed the stack in the parser or in the first walk after it.
-const MAX_BRACKET_DEPTH: usize = 64;
-/// Levels of one written type: `INT[][]` is 3, `STRUCT(a INT[])` is 3. Views use a few.
-const MAX_TYPE_DEPTH: usize = 32;
+/// overflowed the stack in the parser or in the first walk after it. Looser than the type bound,
+/// which the walk after the parse applies.
+const MAX_BRACKET_DEPTH: usize = 128;
+/// Levels of one written type: `INT[][]` is 3, `STRUCT(a INT[])` is 3. Views use a few; DuckDB's
+/// own tests nest 51.
+const MAX_TYPE_DEPTH: usize = 64;
 /// Grouping sets one `GROUP BY` expands to, DataFusion's own cap. DataFusion skips it when the
 /// grouping is the only key, and expands `CUBE` at plan time, outside the memory budget.
 const MAX_GROUPING_SETS: usize = 4096;
