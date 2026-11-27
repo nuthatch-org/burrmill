@@ -2207,6 +2207,33 @@ fn binder_error(e: &SqlExpr) -> Option<String> {
                         if matches!(v.value, sq::Value::Number(..) | sq::Value::SingleQuotedString(_))
                 )
             };
+            // DuckDB's `count` takes one argument or none; DataFusion's counted the rows where
+            // every one of several was set (test/sql/aggregate/aggregates/
+            // test_incorrect_aggregate.test:5), and took `COUNT(DISTINCT *)` (test_count.test:49).
+            if f.name.0.len() == 1
+                && f.name.to_string().eq_ignore_ascii_case("count")
+                && let sq::FunctionArguments::List(l) = &f.args
+            {
+                if l.args.len() > 1 {
+                    return Some(format!(
+                        "Binder Error: No function matches the given name and argument types \
+                         'count' with {} arguments",
+                        l.args.len()
+                    ));
+                }
+                if l.duplicate_treatment == Some(sq::DuplicateTreatment::Distinct)
+                    && matches!(
+                        l.args.as_slice(),
+                        [sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Wildcard)]
+                    )
+                {
+                    return Some(
+                        "Binder Error: STAR expression is only allowed as the root element of an \
+                         expression. Use COLUMNS(*) instead."
+                            .into(),
+                    );
+                }
+            }
             if f.name.to_string().eq_ignore_ascii_case("map")
                 && let sq::FunctionArguments::List(l) = &f.args
                 && l.args.len() == 2
@@ -2247,22 +2274,152 @@ fn sole_arg(f: &sq::Function) -> Option<&SqlExpr> {
     }
 }
 
+/// DuckDB's `string_agg(x, NULL)` is NULL: a NULL separator makes every value NULL. DataFusion
+/// joined the values with none (test/sql/aggregate/aggregates/test_aggregate_types_scalar.test:132).
+fn null_separator(f: &mut sq::Function) {
+    let name = f.name.to_string().to_ascii_lowercase();
+    if !matches!(name.as_str(), "string_agg" | "group_concat" | "listagg") {
+        return;
+    }
+    let sq::FunctionArguments::List(l) = &mut f.args else {
+        return;
+    };
+    if let [
+        sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(x)),
+        sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(SqlExpr::Value(sep))),
+    ] = l.args.as_mut_slice()
+        && matches!(sep.value, sq::Value::Null)
+    {
+        *x = SqlExpr::Cast {
+            kind: sq::CastKind::Cast,
+            expr: Box::new(SqlExpr::Value(sq::Value::Null.into())),
+            data_type: SqlType::Varchar(None),
+            array: false,
+            format: None,
+        };
+    }
+}
+
+/// A select item that [`null_separator`] rewrites keeps its name, which two such items would
+/// otherwise share.
+fn name_null_separators(s: &mut sq::Select) {
+    for item in &mut s.projection {
+        if let sq::SelectItem::UnnamedExpr(e @ SqlExpr::Function(_)) = item
+            && let SqlExpr::Function(f) = &*e
+        {
+            let mut g = f.clone();
+            null_separator(&mut g);
+            if g != *f {
+                let alias = sq::Ident::with_quote('"', e.to_string());
+                *item = sq::SelectItem::ExprWithAlias {
+                    expr: e.clone(),
+                    alias,
+                };
+            }
+        }
+    }
+}
+
+/// A `DISTINCT ON` key that is an integer is DuckDB's select item at that position, and one that
+/// is another literal its binder error; DataFusion read either as a constant, one row
+/// (test/sql/aggregate/distinct/test_distinct_on.test:127, 133). `Err((binder, why))`.
+fn distinct_on(s: &mut sq::Select) -> std::result::Result<(), (bool, String)> {
+    let Some(sq::Distinct::On(keys)) = &mut s.distinct else {
+        return Ok(());
+    };
+    for k in keys.iter_mut() {
+        let SqlExpr::Value(v) = k else { continue };
+        let n = match &v.value {
+            sq::Value::Number(n, _) => n.parse::<i64>().ok(),
+            sq::Value::SingleQuotedString(_) | sq::Value::DoubleQuotedString(_) => None,
+            _ => continue,
+        };
+        let Some(n) = n else {
+            return Err((
+                true,
+                "Binder Error: DISTINCT ON non-integer literal has no effect.".into(),
+            ));
+        };
+        let items: Option<Vec<&SqlExpr>> =
+            s.projection
+                .iter()
+                .map(|i| match i {
+                    sq::SelectItem::UnnamedExpr(e)
+                    | sq::SelectItem::ExprWithAlias { expr: e, .. } => Some(e),
+                    _ => None,
+                })
+                .collect();
+        let Some(items) = items else {
+            return Err((
+                false,
+                "DISTINCT ON a select item's position, over a *, is not supported here".into(),
+            ));
+        };
+        match usize::try_from(n)
+            .ok()
+            .and_then(|i| items.get(i.checked_sub(1)?))
+        {
+            Some(e) => *k = (*e).clone(),
+            None => {
+                return Err((
+                    true,
+                    format!(
+                        "Binder Error: ORDER term out of range - should be between 1 and {}",
+                        items.len()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// DuckDB's `f(x) EXPORT_STATE` answers the aggregate's state, not its value; sqlparser reads the
 /// keyword as the column's alias, and the value was answered (#421,
-/// test/sql/aggregate/aggregate_state_export/ordered_aggregate_export_state.test:48).
-fn export_state(s: &sq::Select) -> Option<String> {
-    s.projection.iter().find_map(|item| match item {
-        sq::SelectItem::ExprWithAlias {
+/// test/sql/aggregate/aggregate_state_export/ordered_aggregate_export_state.test:48). Where the
+/// state DuckDB exports is the value (`count`, `min`, `max`, `bool_and`, `bool_or`, and `list` in
+/// the order rows came), the value is the answer; any other is refused, and over DISTINCT it is
+/// DuckDB's binder error. `Err((binder, why))`.
+fn export_state(s: &sq::Select) -> std::result::Result<(), (bool, String)> {
+    for item in &s.projection {
+        let sq::SelectItem::ExprWithAlias {
             expr: SqlExpr::Function(f),
             alias,
-        } if alias.quote_style.is_none() && alias.value.eq_ignore_ascii_case("export_state") => {
-            Some(format!(
-                "{}(...) EXPORT_STATE is not supported here",
-                f.name
-            ))
+        } = item
+        else {
+            continue;
+        };
+        if alias.quote_style.is_some() || !alias.value.eq_ignore_ascii_case("export_state") {
+            continue;
         }
-        _ => None,
-    })
+        let (distinct, ordered) = match &f.args {
+            sq::FunctionArguments::List(l) => (
+                l.duplicate_treatment == Some(sq::DuplicateTreatment::Distinct),
+                l.clauses
+                    .iter()
+                    .any(|c| matches!(c, sq::FunctionArgumentClause::OrderBy(_))),
+            ),
+            _ => (false, false),
+        };
+        if distinct {
+            return Err((
+                true,
+                "Binder Error: EXPORT_STATE is not supported for DISTINCT aggregates".into(),
+            ));
+        }
+        let name = f.name.to_string().to_ascii_lowercase();
+        let value = matches!(
+            name.as_str(),
+            "count" | "min" | "max" | "bool_and" | "bool_or" | "list" | "array_agg"
+        );
+        if !value || ordered || f.over.is_some() || !f.within_group.is_empty() {
+            return Err((
+                false,
+                format!("{}(...) EXPORT_STATE is not supported here", f.name),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// DuckDB's binder errors for UNNEST in a GROUP BY (#419): `GROUP BY ALL` over a select item that
@@ -2389,9 +2546,17 @@ impl VisitorMut for Rewriter {
 
     fn pre_visit_select(&mut self, s: &mut sq::Select) -> ControlFlow<()> {
         self.counts.enter_select(s);
-        if let Some(why) = export_state(s) {
-            self.refused = Some(why);
-            return ControlFlow::Break(());
+        name_null_separators(s);
+        match export_state(s).and_then(|()| distinct_on(s)) {
+            Ok(()) => {}
+            Err((true, why)) => {
+                self.binder = Some(why);
+                return ControlFlow::Break(());
+            }
+            Err((false, why)) => {
+                self.refused = Some(why);
+                return ControlFlow::Break(());
+            }
         }
         ControlFlow::Continue(())
     }
@@ -2522,6 +2687,9 @@ impl VisitorMut for Rewriter {
             if let Some(case) = if_as_case(f) {
                 *e = case;
             }
+        }
+        if let SqlExpr::Function(f) = e {
+            null_separator(f);
         }
         if let SqlExpr::Function(f) = e {
             if let Some(sq::WindowType::WindowSpec(w)) = f.over.as_mut() {

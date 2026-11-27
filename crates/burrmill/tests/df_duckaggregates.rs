@@ -169,6 +169,25 @@ fn export_state_is_refused_by_name() {
     ] {
         refused(&e, sql, "EXPORT_STATE");
     }
+    // Over DISTINCT it is DuckDB's binder error (test_export_state_distinct.test:26).
+    match e.sql("SELECT count(DISTINCT i) EXPORT_STATE FROM (VALUES (1)) t(i)") {
+        Ok(b) => panic!("answered {b:?}"),
+        Err(err) => assert!(
+            err.to_string()
+                .contains("EXPORT_STATE is not supported for DISTINCT aggregates"),
+            "{err}"
+        ),
+    }
+    // Where DuckDB's state is the value, the value is the answer (count_export_state.test:5).
+    assert_eq!(
+        rows(
+            &e,
+            "SELECT count(*) EXPORT_STATE, min(i) EXPORT_STATE, bool_or(i > 1) EXPORT_STATE \
+             FROM (VALUES (1), (2)) t(i)"
+        )
+        .len(),
+        1
+    );
     // A quoted alias of the name is a name.
     assert_eq!(
         rows(&e, "SELECT count(*) AS \"export_state\""),
@@ -220,4 +239,80 @@ fn regression_slope_and_r2_answer_as_duckdb() {
             json!({"g": 2, "null_slope": true, "nan_slope": null}),
         ]
     );
+}
+
+/// DuckDB's binder errors where DataFusion answered: `count` of several arguments
+/// (test/sql/aggregate/aggregates/test_incorrect_aggregate.test:5, test_aggregate_types_scalar.test:15),
+/// `COUNT(DISTINCT *)` (test_count.test:49), and a `DISTINCT ON` key that is a literal but no
+/// position of the select list (test/sql/aggregate/distinct/test_distinct_on.test:127, 133).
+#[test]
+fn duckdb_binder_errors_are_errors() {
+    let e = Engine::open_empty().unwrap();
+    for (sql, says) in [
+        ("SELECT COUNT(1, 2)", "No function matches"),
+        ("SELECT COUNT(1, 2, 3)", "No function matches"),
+        (
+            "SELECT COUNT(DISTINCT *) FROM (VALUES (1)) t(i)",
+            "STAR expression is only allowed as the root element",
+        ),
+        (
+            "SELECT DISTINCT ON (2) i FROM (VALUES (1), (2)) t(i)",
+            "ORDER term out of range - should be between 1 and 1",
+        ),
+        (
+            "SELECT DISTINCT ON (i, 'literal') i FROM (VALUES (1), (2)) t(i)",
+            "DISTINCT ON non-integer literal has no effect",
+        ),
+    ] {
+        match e.sql(sql) {
+            Ok(b) => panic!("{sql}: answered {b:?}"),
+            Err(err) => assert!(err.to_string().contains(says), "{sql}: {err}"),
+        }
+    }
+    // A position is the select item there.
+    assert_eq!(
+        rows(
+            &e,
+            "SELECT DISTINCT ON (2) i % 2 AS a, i % 3 AS b FROM range(6) t(i) ORDER BY 2, 1"
+        ),
+        vec![
+            json!({"a": 0, "b": 0}),
+            json!({"a": 0, "b": 1}),
+            json!({"a": 0, "b": 2}),
+        ]
+    );
+    assert_eq!(
+        rows(
+            &e,
+            "SELECT count(1) AS a, count(*) AS b, count(DISTINCT 1) AS c"
+        ),
+        vec![json!({"a": 1, "b": 1, "c": 1})]
+    );
+}
+
+/// `string_agg(x, NULL)` is NULL in DuckDB; DataFusion joined the values with no separator
+/// (test/sql/aggregate/aggregates/test_aggregate_types_scalar.test:132).
+#[test]
+fn string_agg_with_a_null_separator_is_null() {
+    let e = Engine::open_empty().unwrap();
+    assert_eq!(
+        rows(
+            &e,
+            "SELECT string_agg('hello', ' ') AS a, string_agg('hello', NULL) AS b, \
+             string_agg(NULL, ' ') AS c, string_agg('', '') AS d"
+        ),
+        vec![json!({"a": "hello", "b": null, "c": null, "d": ""})]
+    );
+    // Two such items, unnamed, keep names of their own.
+    let got = e
+        .sql("SELECT string_agg('hello', NULL), string_agg(NULL, NULL)")
+        .unwrap();
+    let names: Vec<String> = got[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    assert_eq!(names.len(), 2);
+    assert_ne!(names[0], names[1]);
 }
