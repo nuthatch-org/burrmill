@@ -1092,6 +1092,7 @@ fn rewrite(stmt: &mut DfStatement, known: &Known, names: &mut [Option<String>]) 
         lambda: vec![],
         known,
         ctes,
+        counts: Default::default(),
     };
     let _ = crate::walk::walk_mut(s.as_mut(), &mut rw);
     if let Some(why) = rw.binder {
@@ -1112,6 +1113,8 @@ struct Rewriter {
     known: Known,
     /// Every CTE name in the statement, lowercased: a table of that name may be the CTE.
     ctes: std::collections::HashSet<String>,
+    /// The relations of the `SELECT`s the walk is inside, for `COUNT(t.*)`.
+    counts: super::rowcounts::Frames,
 }
 
 struct CteNames<'a>(&'a mut std::collections::HashSet<String>);
@@ -2361,7 +2364,18 @@ impl VisitorMut for Rewriter {
     }
 
     fn post_visit_query(&mut self, q: &mut sq::Query) -> ControlFlow<()> {
+        self.counts.leave_query();
         super::subqueries::distinct_aggregate_names(q);
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_select(&mut self, s: &mut sq::Select) -> ControlFlow<()> {
+        self.counts.enter_select(s);
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_select(&mut self, _: &mut sq::Select) -> ControlFlow<()> {
+        self.counts.leave_select();
         ControlFlow::Continue(())
     }
 
@@ -2376,6 +2390,10 @@ impl VisitorMut for Rewriter {
     }
 
     fn pre_visit_query(&mut self, q: &mut sq::Query) -> ControlFlow<()> {
+        if let Err(why) = self.counts.enter_query(q) {
+            self.refused = Some(why);
+            return ControlFlow::Break(());
+        }
         if let Some(why) = unnest_grouping(&q.body) {
             self.binder = Some(why);
             return ControlFlow::Break(());
@@ -2463,6 +2481,10 @@ impl VisitorMut for Rewriter {
     }
 
     fn pre_visit_expr(&mut self, e: &mut SqlExpr) -> ControlFlow<()> {
+        if let Err(why) = self.counts.expr(e) {
+            self.refused = Some(why);
+            return ControlFlow::Break(());
+        }
         if let SqlExpr::Subquery(q) = e {
             top_n_correlated(q);
         }

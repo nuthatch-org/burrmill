@@ -89,6 +89,7 @@ mod printf;
 mod rangebounds;
 mod rangejoin;
 mod requirements;
+mod rowcounts;
 mod rule;
 mod sequential;
 mod session;
