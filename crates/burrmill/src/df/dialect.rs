@@ -63,6 +63,10 @@ pub(crate) fn parse_statements_until(
         let text = parser_text(&e);
         BurrmillError::Parse(if asof_error(&text) {
             ASOF_REFUSAL.into()
+        } else if expanded.to_ascii_lowercase().contains("export_state") {
+            // DuckDB's `f(x) EXPORT_STATE`, where sqlparser cannot read it (inside a call, before
+            // an alias); where it can, the rewrite refuses it (#421).
+            "EXPORT_STATE is not supported here".into()
         } else {
             super::errors::restate(text)
         })
@@ -1092,6 +1096,7 @@ fn rewrite(stmt: &mut DfStatement, known: &Known, names: &mut [Option<String>]) 
         lambda: vec![],
         known,
         ctes,
+        counts: Default::default(),
     };
     let _ = crate::walk::walk_mut(s.as_mut(), &mut rw);
     if let Some(why) = rw.binder {
@@ -1112,6 +1117,8 @@ struct Rewriter {
     known: Known,
     /// Every CTE name in the statement, lowercased: a table of that name may be the CTE.
     ctes: std::collections::HashSet<String>,
+    /// The relations of the `SELECT`s the walk is inside, for `COUNT(t.*)`.
+    counts: super::rowcounts::Frames,
 }
 
 struct CteNames<'a>(&'a mut std::collections::HashSet<String>);
@@ -1157,15 +1164,23 @@ fn nulls_last(v: &mut [sq::OrderByExpr]) {
 /// (though not in a window): it would order nothing.
 fn literal_key(v: &[sq::OrderByExpr]) -> Option<String> {
     v.iter()
-        .any(|o| match &o.expr {
-            SqlExpr::Value(v) => match &v.value {
-                sq::Value::SingleQuotedString(_) | sq::Value::DoubleQuotedString(_) => true,
-                sq::Value::Number(n, _) => n.parse::<i64>().is_err(),
-                _ => false,
-            },
-            _ => false,
-        })
+        .any(|o| non_integer_literal(&o.expr, false))
         .then(|| "Binder Error: ORDER BY non-integer literal has no effect.".to_string())
+}
+
+/// A literal DuckDB's binder refuses as an ordering key: a string or a non-integer number, and, in
+/// a query's own `ORDER BY` or `DISTINCT ON` (`query`), a boolean or NULL too (#421,
+/// test/sql/order/test_order_by_non_ordinal_literal.test:23), which an aggregate's takes.
+fn non_integer_literal(e: &SqlExpr, query: bool) -> bool {
+    match e {
+        SqlExpr::Value(v) => match &v.value {
+            sq::Value::SingleQuotedString(_) | sq::Value::DoubleQuotedString(_) => true,
+            sq::Value::Number(n, _) => n.parse::<i64>().is_err(),
+            sq::Value::Boolean(_) | sq::Value::Null => query,
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// `arg_max(x, y)`: `x` from the row with the greatest `y`, rows with either NULL passed over, as
@@ -2204,6 +2219,33 @@ fn binder_error(e: &SqlExpr) -> Option<String> {
                         if matches!(v.value, sq::Value::Number(..) | sq::Value::SingleQuotedString(_))
                 )
             };
+            // DuckDB's `count` takes one argument or none; DataFusion's counted the rows where
+            // every one of several was set (test/sql/aggregate/aggregates/
+            // test_incorrect_aggregate.test:5), and took `COUNT(DISTINCT *)` (test_count.test:49).
+            if f.name.0.len() == 1
+                && f.name.to_string().eq_ignore_ascii_case("count")
+                && let sq::FunctionArguments::List(l) = &f.args
+            {
+                if l.args.len() > 1 {
+                    return Some(format!(
+                        "Binder Error: No function matches the given name and argument types \
+                         'count' with {} arguments",
+                        l.args.len()
+                    ));
+                }
+                if l.duplicate_treatment == Some(sq::DuplicateTreatment::Distinct)
+                    && matches!(
+                        l.args.as_slice(),
+                        [sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Wildcard)]
+                    )
+                {
+                    return Some(
+                        "Binder Error: STAR expression is only allowed as the root element of an \
+                         expression. Use COLUMNS(*) instead."
+                            .into(),
+                    );
+                }
+            }
             if f.name.to_string().eq_ignore_ascii_case("map")
                 && let sq::FunctionArguments::List(l) = &f.args
                 && l.args.len() == 2
@@ -2242,6 +2284,273 @@ fn sole_arg(f: &sq::Function) -> Option<&SqlExpr> {
         },
         _ => None,
     }
+}
+
+/// DuckDB's `string_agg(x, NULL)` is NULL: a NULL separator makes every value NULL. DataFusion
+/// joined the values with none (test/sql/aggregate/aggregates/test_aggregate_types_scalar.test:132).
+fn null_separator(f: &mut sq::Function) {
+    let name = f.name.to_string().to_ascii_lowercase();
+    if !matches!(name.as_str(), "string_agg" | "group_concat" | "listagg") {
+        return;
+    }
+    let sq::FunctionArguments::List(l) = &mut f.args else {
+        return;
+    };
+    if let [
+        sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(x)),
+        sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(SqlExpr::Value(sep))),
+    ] = l.args.as_mut_slice()
+        && matches!(sep.value, sq::Value::Null)
+    {
+        *x = SqlExpr::Cast {
+            kind: sq::CastKind::Cast,
+            expr: Box::new(SqlExpr::Value(sq::Value::Null.into())),
+            data_type: SqlType::Varchar(None),
+            array: false,
+            format: None,
+        };
+    }
+}
+
+/// DuckDB names the parameter of `avg` and `sum`, `avg(x := v)` and `sum(arg := v)`; DataFusion's
+/// aggregates take no names, so the name is dropped (#421,
+/// test/sql/aggregate/aggregates/test_decimal_aggregate_named_argument.test:5).
+fn parameter_names(f: &mut sq::Function) {
+    let param = match f.name.to_string().to_ascii_lowercase().as_str() {
+        "avg" => "x",
+        "sum" => "arg",
+        _ => return,
+    };
+    let sq::FunctionArguments::List(l) = &mut f.args else {
+        return;
+    };
+    if let [a] = l.args.as_mut_slice()
+        && let sq::FunctionArg::Named {
+            name,
+            arg,
+            operator: sq::FunctionArgOperator::Assignment,
+        } = a
+        && name.quote_style.is_none()
+        && name.value.eq_ignore_ascii_case(param)
+    {
+        *a = sq::FunctionArg::Unnamed(arg.clone());
+    }
+}
+
+/// A select item that [`null_separator`] rewrites keeps its name, which two such items would
+/// otherwise share.
+fn name_null_separators(s: &mut sq::Select) {
+    for item in &mut s.projection {
+        if let sq::SelectItem::UnnamedExpr(e @ SqlExpr::Function(_)) = item
+            && let SqlExpr::Function(f) = &*e
+        {
+            let mut g = f.clone();
+            null_separator(&mut g);
+            if g != *f {
+                let alias = sq::Ident::with_quote('"', e.to_string());
+                *item = sq::SelectItem::ExprWithAlias {
+                    expr: e.clone(),
+                    alias,
+                };
+            }
+        }
+    }
+}
+
+/// A `DISTINCT ON` key that is an integer is DuckDB's select item at that position, and one that
+/// is another literal its binder error; DataFusion read either as a constant, one row
+/// (test/sql/aggregate/distinct/test_distinct_on.test:127, 133). `Err((binder, why))`.
+fn distinct_on(s: &mut sq::Select) -> std::result::Result<(), (bool, String)> {
+    let Some(sq::Distinct::On(keys)) = &mut s.distinct else {
+        return Ok(());
+    };
+    for k in keys.iter_mut() {
+        if non_integer_literal(k, true) {
+            return Err((
+                true,
+                "Binder Error: DISTINCT ON non-integer literal has no effect.".into(),
+            ));
+        }
+        let SqlExpr::Value(v) = k else { continue };
+        let sq::Value::Number(n, _) = &v.value else {
+            continue;
+        };
+        let Ok(n) = n.parse::<i64>() else { continue };
+        let items: Option<Vec<&SqlExpr>> =
+            s.projection
+                .iter()
+                .map(|i| match i {
+                    sq::SelectItem::UnnamedExpr(e)
+                    | sq::SelectItem::ExprWithAlias { expr: e, .. } => Some(e),
+                    _ => None,
+                })
+                .collect();
+        let Some(items) = items else {
+            return Err((
+                false,
+                "DISTINCT ON a select item's position, over a *, is not supported here".into(),
+            ));
+        };
+        match usize::try_from(n)
+            .ok()
+            .and_then(|i| items.get(i.checked_sub(1)?))
+        {
+            Some(e) => *k = (*e).clone(),
+            None => {
+                return Err((
+                    true,
+                    format!(
+                        "Binder Error: ORDER term out of range - should be between 1 and {}",
+                        items.len()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// DuckDB's `DISTINCT ON (k) ... ORDER BY o` keeps, for each `k`, the first row by `o`, in any
+/// order of keys; DataFusion takes only an `ORDER BY` that starts with `k` (#421,
+/// test/sql/aggregate/distinct/distinct_on_order_by.test:24). Where it does not, the `DISTINCT ON`
+/// is written as `QUALIFY row_number() OVER (PARTITION BY k ORDER BY o) = 1`, which leaves the
+/// select list as it is. A position or a select item's alias in `o` is the item's expression, as
+/// the window reads neither. Not where the query has a `QUALIFY` of its own, which DuckDB applies
+/// first.
+fn distinct_on_order(q: &mut sq::Query) -> std::result::Result<(), (bool, String)> {
+    let sq::SetExpr::Select(s) = q.body.as_mut() else {
+        return Ok(());
+    };
+    if !matches!(s.distinct, Some(sq::Distinct::On(_))) || s.qualify.is_some() {
+        return Ok(());
+    }
+    let Some(sq::OrderBy {
+        kind: sq::OrderByKind::Expressions(order),
+        ..
+    }) = &q.order_by
+    else {
+        return Ok(());
+    };
+    distinct_on(s)?;
+    let items: Option<Vec<(Option<&sq::Ident>, &SqlExpr)>> = s
+        .projection
+        .iter()
+        .map(|i| match i {
+            sq::SelectItem::UnnamedExpr(e) => Some((None, e)),
+            sq::SelectItem::ExprWithAlias { expr, alias } => Some((Some(alias), expr)),
+            _ => None,
+        })
+        .collect();
+    let mut resolved = Vec::with_capacity(order.len());
+    for o in order {
+        let expr = match (&o.expr, &items) {
+            (SqlExpr::Value(v), _) if matches!(v.value, sq::Value::Number(..)) => {
+                let sq::Value::Number(n, _) = &v.value else {
+                    unreachable!()
+                };
+                // A position needs the items; out of range, DataFusion's own error stands.
+                let Some(items) = &items else { return Ok(()) };
+                match n
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|i| items.get(i.checked_sub(1)?))
+                {
+                    Some((_, e)) => (*e).clone(),
+                    None => return Ok(()),
+                }
+            }
+            (SqlExpr::Identifier(id), Some(items)) => items
+                .iter()
+                .find(|(a, _)| a.is_some_and(|a| a.value.eq_ignore_ascii_case(&id.value)))
+                .map_or_else(|| o.expr.clone(), |(_, e)| (*e).clone()),
+            (e, _) => e.clone(),
+        };
+        resolved.push(sq::OrderByExpr {
+            expr,
+            options: o.options,
+            with_fill: None,
+        });
+    }
+    let Some(sq::Distinct::On(keys)) = &s.distinct else {
+        return Ok(());
+    };
+    if keys.iter().zip(&resolved).all(|(k, o)| *k == o.expr) {
+        return Ok(());
+    }
+    let window = SqlExpr::Function(sq::Function {
+        name: sq::ObjectName::from(vec![sq::Ident::new("row_number")]),
+        uses_odbc_syntax: false,
+        parameters: sq::FunctionArguments::None,
+        args: sq::FunctionArguments::List(sq::FunctionArgumentList {
+            duplicate_treatment: None,
+            args: vec![],
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: Some(sq::WindowType::WindowSpec(sq::WindowSpec {
+            window_name: None,
+            partition_by: keys.clone(),
+            order_by: resolved,
+            window_frame: None,
+        })),
+        within_group: vec![],
+    });
+    s.qualify = Some(binop(
+        window,
+        BinaryOperator::Eq,
+        SqlExpr::Value(sq::Value::Number("1".into(), false).into()),
+    ));
+    s.distinct = None;
+    Ok(())
+}
+
+/// DuckDB's `f(x) EXPORT_STATE` answers the aggregate's state, not its value; sqlparser reads the
+/// keyword as the column's alias, and the value was answered (#421,
+/// test/sql/aggregate/aggregate_state_export/ordered_aggregate_export_state.test:48). Where the
+/// state DuckDB exports is the value (`count`, `min`, `max`, `bool_and`, `bool_or`, and `list` in
+/// the order rows came), the value is the answer; any other is refused, and over DISTINCT it is
+/// DuckDB's binder error. `Err((binder, why))`.
+fn export_state(s: &sq::Select) -> std::result::Result<(), (bool, String)> {
+    for item in &s.projection {
+        let sq::SelectItem::ExprWithAlias {
+            expr: SqlExpr::Function(f),
+            alias,
+        } = item
+        else {
+            continue;
+        };
+        if alias.quote_style.is_some() || !alias.value.eq_ignore_ascii_case("export_state") {
+            continue;
+        }
+        let (distinct, ordered) = match &f.args {
+            sq::FunctionArguments::List(l) => (
+                l.duplicate_treatment == Some(sq::DuplicateTreatment::Distinct),
+                l.clauses
+                    .iter()
+                    .any(|c| matches!(c, sq::FunctionArgumentClause::OrderBy(_))),
+            ),
+            _ => (false, false),
+        };
+        if distinct {
+            return Err((
+                true,
+                "Binder Error: EXPORT_STATE is not supported for DISTINCT aggregates".into(),
+            ));
+        }
+        let name = f.name.to_string().to_ascii_lowercase();
+        let value = matches!(
+            name.as_str(),
+            "count" | "min" | "max" | "bool_and" | "bool_or" | "list" | "array_agg"
+        );
+        if !value || ordered || f.over.is_some() || !f.within_group.is_empty() {
+            return Err((
+                false,
+                format!("{}(...) EXPORT_STATE is not supported here", f.name),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// DuckDB's binder errors for UNNEST in a GROUP BY (#419): `GROUP BY ALL` over a select item that
@@ -2287,6 +2596,89 @@ fn unnest_grouping(b: &sq::SetExpr) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// DuckDB's binder errors for a window in a `GROUP BY ALL` (#421,
+/// test/sql/aggregate/group/group_by_all_window.test:31): a select item with a window that takes a
+/// column itself, as an argument or a `PARTITION BY` or `ORDER BY` key, is grouped on, which DuckDB
+/// refuses; DataFusion grouped on what it could and answered. Only a bare column counts, so an
+/// aggregate this does not know by name is not mistaken for one.
+fn window_grouping(b: &sq::SetExpr) -> Option<String> {
+    let s = match b {
+        sq::SetExpr::Select(s) => s,
+        sq::SetExpr::SetOperation { left, right, .. } => {
+            return window_grouping(left).or_else(|| window_grouping(right));
+        }
+        _ => return None,
+    };
+    if !matches!(s.group_by, sq::GroupByExpr::All(_)) {
+        return None;
+    }
+    let bare = |e: &SqlExpr| matches!(e, SqlExpr::Identifier(_) | SqlExpr::CompoundIdentifier(_));
+    struct Windows {
+        grouped: bool,
+        aggregate: bool,
+    }
+    impl sq::Visitor for Windows {
+        type Break = ();
+        fn pre_visit_query(&mut self, _: &sq::Query) -> ControlFlow<()> {
+            ControlFlow::Break(())
+        }
+        fn pre_visit_expr(&mut self, e: &SqlExpr) -> ControlFlow<()> {
+            let SqlExpr::Function(f) = e else {
+                return ControlFlow::Continue(());
+            };
+            let bare =
+                |e: &SqlExpr| matches!(e, SqlExpr::Identifier(_) | SqlExpr::CompoundIdentifier(_));
+            match &f.over {
+                Some(sq::WindowType::WindowSpec(w)) => {
+                    let args = match &f.args {
+                        sq::FunctionArguments::List(l) => l.args.as_slice(),
+                        _ => &[],
+                    };
+                    let arg = args.iter().any(|a| {
+                        matches!(a, sq::FunctionArg::Unnamed(sq::FunctionArgExpr::Expr(e)) if bare(e))
+                    });
+                    if arg
+                        || w.partition_by.iter().any(bare)
+                        || w.order_by.iter().any(|o| bare(&o.expr))
+                    {
+                        self.grouped = true;
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    let name = f.name.to_string().to_ascii_lowercase();
+                    if super::subqueries::AGGREGATES.contains(&name.as_str()) {
+                        self.aggregate = true;
+                    }
+                }
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    for item in &s.projection {
+        let (sq::SelectItem::UnnamedExpr(e) | sq::SelectItem::ExprWithAlias { expr: e, .. }) = item
+        else {
+            continue;
+        };
+        if bare(e) {
+            continue;
+        }
+        let mut w = Windows {
+            grouped: false,
+            aggregate: false,
+        };
+        let _ = crate::walk::walk(e, &mut w);
+        if w.grouped {
+            return Some(if w.aggregate {
+                "Binder Error: Cannot mix aggregates with non-aggregated columns!".into()
+            } else {
+                "Binder Error: Cannot group on a window clause".into()
+            });
+        }
+    }
+    None
 }
 
 /// DuckDB's type names DataFusion does not plan, renamed in place, within a list, struct or map as
@@ -2361,7 +2753,30 @@ impl VisitorMut for Rewriter {
     }
 
     fn post_visit_query(&mut self, q: &mut sq::Query) -> ControlFlow<()> {
+        self.counts.leave_query();
         super::subqueries::distinct_aggregate_names(q);
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_select(&mut self, s: &mut sq::Select) -> ControlFlow<()> {
+        self.counts.enter_select(s);
+        name_null_separators(s);
+        match export_state(s).and_then(|()| distinct_on(s)) {
+            Ok(()) => {}
+            Err((true, why)) => {
+                self.binder = Some(why);
+                return ControlFlow::Break(());
+            }
+            Err((false, why)) => {
+                self.refused = Some(why);
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_select(&mut self, _: &mut sq::Select) -> ControlFlow<()> {
+        self.counts.leave_select();
         ControlFlow::Continue(())
     }
 
@@ -2376,7 +2791,11 @@ impl VisitorMut for Rewriter {
     }
 
     fn pre_visit_query(&mut self, q: &mut sq::Query) -> ControlFlow<()> {
-        if let Some(why) = unnest_grouping(&q.body) {
+        if let Err(why) = self.counts.enter_query(q) {
+            self.refused = Some(why);
+            return ControlFlow::Break(());
+        }
+        if let Some(why) = unnest_grouping(&q.body).or_else(|| window_grouping(&q.body)) {
             self.binder = Some(why);
             return ControlFlow::Break(());
         }
@@ -2429,6 +2848,17 @@ impl VisitorMut for Rewriter {
         {
             v.value = sq::Value::Number(format!("{}", rounded.round() as u64), false);
         }
+        match distinct_on_order(q) {
+            Ok(()) => {}
+            Err((true, why)) => {
+                self.binder = Some(why);
+                return ControlFlow::Break(());
+            }
+            Err((false, why)) => {
+                self.refused = Some(why);
+                return ControlFlow::Break(());
+            }
+        }
         // DataFusion takes `ORDER BY ALL` only over bare columns; DuckDB orders by every output
         // column left to right, which is `ORDER BY 1, ..., n`.
         let width = output_width(&q.body);
@@ -2448,8 +2878,9 @@ impl VisitorMut for Rewriter {
         }
         match q.order_by.as_mut().map(|o| &mut o.kind) {
             Some(sq::OrderByKind::Expressions(v)) => {
-                if let Some(why) = literal_key(v) {
-                    self.refused = Some(why);
+                if v.iter().any(|o| non_integer_literal(&o.expr, true)) {
+                    self.refused =
+                        Some("Binder Error: ORDER BY non-integer literal has no effect.".into());
                     return ControlFlow::Break(());
                 }
                 nulls_last(v)
@@ -2463,6 +2894,10 @@ impl VisitorMut for Rewriter {
     }
 
     fn pre_visit_expr(&mut self, e: &mut SqlExpr) -> ControlFlow<()> {
+        if let Err(why) = self.counts.expr(e) {
+            self.refused = Some(why);
+            return ControlFlow::Break(());
+        }
         if let SqlExpr::Subquery(q) = e {
             top_n_correlated(q);
         }
@@ -2480,6 +2915,9 @@ impl VisitorMut for Rewriter {
             }
         }
         if let SqlExpr::Function(f) = e {
+            null_separator(f);
+        }
+        if let SqlExpr::Function(f) = e {
             if let Some(sq::WindowType::WindowSpec(w)) = f.over.as_mut() {
                 nulls_last(&mut w.order_by);
             }
@@ -2495,6 +2933,7 @@ impl VisitorMut for Rewriter {
                 }
             }
             nulls_last(&mut f.within_group);
+            parameter_names(f);
             rename_function(f);
             // sqlparser's DuckDB dialect reads `f(flag = 'true')` as a named argument; DuckDB, in an
             // expression, reads a comparison.

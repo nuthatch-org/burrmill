@@ -2,10 +2,10 @@
 # CI fails if any directory's wrong count rises or its pass count falls; regenerate with
 # docs/bench/sqllogictest.sh --update.
 directory	pass	refused	wrong	error	skipped
-aggregate	827	694	43	307	1657
+aggregate	882	914	1	74	1657
 alter	170	16	0	2	1448
 attach	2	4	0	0	1657
-binder	154	29	20	74	175
+binder	155	29	19	74	175
 cast	288	252	83	115	319
 catalog	204	71	0	16	3613
 collate	38	117	0	10	396
@@ -36,11 +36,11 @@ logging	1	4	0	6	367
 merge	68	0	0	3	209
 multi_file	0	0	0	0	89
 optimizer	667	109	19	78	2129
-order	94	25	7	19	214
+order	103	25	1	16	214
 ordinality	4	6	0	0	16
-overflow	93	10	3	66	13
+overflow	93	14	3	62	13
 parallelism	31	5	1	1	131
-parser	201	170	21	157	584
+parser	201	177	21	150	584
 peg_parser	61	13	3	64	477
 pg_catalog	5	19	0	24	99
 pivot	97	145	0	57	64
@@ -57,7 +57,7 @@ serialization	25	6	0	2	20
 setops	159	18	3	11	195
 settings	15	39	0	7	638
 show_select	22	22	0	37	71
-sql_export	443	271	5	85	1649
+sql_export	444	280	5	75	1649
 storage	51	27	0	4	6742
 storage_version	0	0	0	0	19
 subquery	356	233	0	265	800

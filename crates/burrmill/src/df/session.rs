@@ -547,6 +547,7 @@ impl MiniSession {
             let f = match f.name() {
                 "sum" | "avg" => super::floatsum::ExactDoubles::udaf(f),
                 "corr" => super::corr::Corr::udaf(f),
+                "regr_slope" | "regr_r2" => super::regr::DuckRegr::udaf(f),
                 _ => f,
             };
             for a in f.aliases() {

@@ -694,7 +694,7 @@ fn empty_select() -> sq::Select {
     *s
 }
 
-const AGGREGATES: &[&str] = &[
+pub(super) const AGGREGATES: &[&str] = &[
     "count",
     "sum",
     "min",
