@@ -8,7 +8,14 @@ version number promises.
 A release that changes any receipt in `corpus/receipts/receipts.jsonl` says which, and why, in its
 entry: a receipt someone kept stops verifying on that release (`tests/receipt_corpus.rs`).
 
-## Unreleased
+## 0.5.1 - 2026-11-28
+
+Prebuilt `burrmill` binaries for five targets, as a GitHub Release. What changed since 0.5.0 (#477, #478, #480):
+
+- A statement the parser cannot finish in bounded time or stack now returns an error quickly.
+- Type nesting is bounded (64 deep is allowed).
+- A lone CUBE, ROLLUP or GROUPING SETS is capped at 4096 grouping sets.
+- Receipt normalisation parses a receipt's statement under the same budget and bounds as a query.
 
 Engine (`burrmill`, feature `datafusion`)
 
@@ -42,6 +49,10 @@ Engine (`burrmill`, feature `datafusion`)
   names. In DuckDB's sqllogictest suite, `test/sql/aggregate` has 882 pass, 914 refused, 1 wrong
   and 74 error, where it had 827, 694, 43 and 307; the whole suite 12690 pass and 411 wrong,
   where 12625 and 459.
+
+A receipt still verifies only on the release that made it. `corpus/receipts` and `demo/receipt.json`
+are regenerated for 0.5.1: every receipt's engine string and digest change; every statement, input
+and answer is unchanged.
 
 ## 0.5.0 - 2026-11-27
 
